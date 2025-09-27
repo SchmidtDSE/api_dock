@@ -12,7 +12,8 @@ API Box is a flexible API gateway that allows you to proxy requests to multiple 
 - **YAML Configuration**: Simple, human-readable configuration files
 - **Access Control**: Define allowed/restricted routes per remote API
 - **Version Support**: Handle API versioning in URL paths
-- **FastAPI Backend**: Built on FastAPI for high performance and automatic documentation
+- **Multiple Backends**: Choose between FastAPI or Flask as your web framework
+- **Framework-Agnostic Core**: Standalone RouteMapper for integration with any web framework
 - **Type Safety**: Full type hints throughout the codebase
 
 ## Quick Start
@@ -54,11 +55,16 @@ pixi add --pypi $(cat pypi_package_names.txt)
 ### Basic Usage
 
 ```bash
-# Start API Box with default configuration
+# Start API Box with default configuration (FastAPI)
 pixi run api-box
 
+# Start with Flask backend
+pixi run api-box --backbone flask
+# or shorthand:
+pixi run api-box -b flask
+
 # Start with custom configuration file
-pixi run api-box --config /path/to/config.yaml
+pixi run api-box --config /path/to/config.yaml --backbone fastapi
 
 # Start on custom host/port
 pixi run api-box --host 0.0.0.0 --port 9000
@@ -66,6 +72,13 @@ pixi run api-box --host 0.0.0.0 --port 9000
 # Run with debug logging
 pixi run api-box --log-level debug
 ```
+
+### Backbone Options
+
+API Box supports multiple web framework backends:
+
+- **fastapi** (default): High-performance async framework with automatic OpenAPI docs
+- **flask**: Traditional synchronous framework, widely compatible
 
 ## Configuration
 
@@ -109,13 +122,95 @@ curl http://localhost:8000/service1/latest/users/
 curl http://localhost:8000/service1/v2/users/123
 ```
 
+## Using RouteMapper in Your Own Projects
+
+The core functionality is available as a standalone `RouteMapper` class that can be integrated into any web framework:
+
+### Basic Integration
+
+```python
+from api_box.route_mapper import RouteMapper
+
+# Initialize with optional config path
+route_mapper = RouteMapper(config_path="path/to/config.yaml")
+
+# Get API metadata
+metadata = route_mapper.get_config_metadata()
+
+# Check configuration values
+success, value, error = route_mapper.get_config_value("some_key")
+
+# Route requests (async version for FastAPI, etc.)
+success, data, status, error = await route_mapper.map_route(
+    remote_name="service1",
+    path="users/123",
+    method="GET",
+    headers={"Authorization": "Bearer token"},
+    query_params={"limit": "10"}
+)
+
+# Route requests (sync version for Flask, etc.)
+success, data, status, error = route_mapper.map_route_sync(
+    remote_name="service1",
+    path="users/123",
+    method="GET"
+)
+```
+
+### Framework Examples
+
+#### Django Integration
+```python
+from django.http import JsonResponse
+from api_box.route_mapper import RouteMapper
+
+route_mapper = RouteMapper()
+
+def api_proxy(request, remote_name, path):
+    success, data, status, error = route_mapper.map_route_sync(
+        remote_name=remote_name,
+        path=path,
+        method=request.method,
+        headers=dict(request.headers),
+        body=request.body,
+        query_params=dict(request.GET)
+    )
+
+    if not success:
+        return JsonResponse({"error": error}, status=status)
+
+    return JsonResponse(data, status=status)
+```
+
+#### Custom Framework Integration
+```python
+from api_box.route_mapper import RouteMapper
+
+route_mapper = RouteMapper()
+
+@your_framework.route("/{remote_name}/{path:path}")
+def proxy_handler(remote_name, path, request):
+    success, data, status, error = route_mapper.map_route_sync(
+        remote_name=remote_name,
+        path=path,
+        method=request.method,
+        headers=request.headers,
+        body=request.body,
+        query_params=request.query_params
+    )
+
+    return your_framework.Response(data, status=status)
+```
+
 ## Project Structure
 
 ```
 api_box/
 ├── api_box/
 │   ├── __init__.py      # Module exports
-│   ├── main.py          # FastAPI application
+│   ├── fast_api.py      # FastAPI application
+│   ├── flask_api.py     # Flask application
+│   ├── route_mapper.py  # Standalone route mapping core
 │   ├── config.py        # Configuration management
 │   └── cli.py           # Command-line interface
 ├── config/              # Configuration files
