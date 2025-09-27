@@ -15,7 +15,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from typing import Any, Dict, Optional
 
-from .route_mapper import RouteMapper
+from api_box.route_mapper import RouteMapper
 
 
 #

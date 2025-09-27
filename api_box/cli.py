@@ -17,7 +17,7 @@ from typing import Optional
 
 import uvicorn
 
-from .main import create_app
+from api_box.main import create_app
 
 
 #

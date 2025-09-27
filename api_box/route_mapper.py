@@ -14,7 +14,7 @@ License: CC-BY-4.0
 import httpx
 from typing import Any, Dict, List, Optional, Tuple
 
-from .config import find_remote_config, get_remote_names, is_route_allowed, load_main_config
+from api_box.config import find_remote_config, get_remote_names, is_route_allowed, load_main_config
 
 
 #
