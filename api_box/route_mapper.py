@@ -182,6 +182,14 @@ class RouteMapper:
                 except Exception:
                     response_data = response.text
 
+                # Check if the remote API returned an error status
+                if response.status_code >= 400:
+                    # Treat HTTP errors from remote as failures with JSON error message
+                    error_msg = f"Remote API returned {response.status_code}"
+                    if isinstance(response_data, str) and len(response_data) < 200:
+                        error_msg += f": {response_data}"
+                    return (False, None, response.status_code, error_msg)
+
                 return (True, response_data, response.status_code, None)
 
             except httpx.RequestError as e:

@@ -54,6 +54,9 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     _add_main_routes(app, route_mapper)
     _add_remote_routes(app, route_mapper)
 
+    # Add error handlers for JSON responses
+    _add_error_handlers(app)
+
     return app
 
 
@@ -139,6 +142,31 @@ def _add_remote_routes(app: FastAPI, route_mapper: RouteMapper) -> None:
             raise HTTPException(status_code=status_code, detail=error_message)
 
         return JSONResponse(content=response_data, status_code=status_code)
+
+
+def _add_error_handlers(app: FastAPI) -> None:
+    """Add custom error handlers to return JSON responses.
+
+    Args:
+        app: FastAPI application instance.
+    """
+    from fastapi import Request
+    from fastapi.responses import JSONResponse
+
+    @app.exception_handler(404)
+    async def not_found_handler(request: Request, exc):
+        """Return JSON response for 404 errors."""
+        return JSONResponse(content={"error": "Not found"}, status_code=404)
+
+    @app.exception_handler(405)
+    async def method_not_allowed_handler(request: Request, exc):
+        """Return JSON response for 405 errors."""
+        return JSONResponse(content={"error": "Method not allowed"}, status_code=405)
+
+    @app.exception_handler(500)
+    async def internal_error_handler(request: Request, exc):
+        """Return JSON response for 500 errors."""
+        return JSONResponse(content={"error": "Internal server error"}, status_code=500)
 
 
 # Default app instance
