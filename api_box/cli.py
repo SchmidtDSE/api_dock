@@ -17,7 +17,8 @@ from typing import Optional
 
 import uvicorn
 
-from api_box.main import create_app
+from api_box.fast_api import create_app as create_fastapi_app
+from api_box.flask_api import create_app as create_flask_app
 
 
 #
@@ -26,6 +27,7 @@ from api_box.main import create_app
 DEFAULT_HOST: str = "0.0.0.0"
 DEFAULT_PORT: int = 8000
 DEFAULT_CONFIG_PATH: Optional[str] = None
+DEFAULT_BACKBONE: str = "fastapi"
 
 
 #
@@ -37,15 +39,29 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        app = create_app(args.config)
-        print(f"Starting API Box server on {args.host}:{args.port}")
+        if args.backbone.lower() == "fastapi":
+            app = create_fastapi_app(args.config)
+            print(f"Starting API Box server (FastAPI) on {args.host}:{args.port}")
 
-        uvicorn.run(
-            app,
-            host=args.host,
-            port=args.port,
-            log_level=args.log_level
-        )
+            uvicorn.run(
+                app,
+                host=args.host,
+                port=args.port,
+                log_level=args.log_level
+            )
+        elif args.backbone.lower() == "flask":
+            app = create_flask_app(args.config)
+            print(f"Starting API Box server (Flask) on {args.host}:{args.port}")
+
+            app.run(
+                host=args.host,
+                port=args.port,
+                debug=(args.log_level == "debug")
+            )
+        else:
+            print(f"Error: Unknown backbone '{args.backbone}'. Choose 'fastapi' or 'flask'.", file=sys.stderr)
+            sys.exit(1)
+
     except Exception as e:
         print(f"Error starting API Box: {e}", file=sys.stderr)
         sys.exit(1)
@@ -92,6 +108,14 @@ def _create_parser() -> argparse.ArgumentParser:
         default="info",
         choices=["critical", "error", "warning", "info", "debug", "trace"],
         help="Log level for the server"
+    )
+
+    parser.add_argument(
+        "--backbone", "-b",
+        type=str,
+        default=DEFAULT_BACKBONE,
+        choices=["fastapi", "flask"],
+        help="Web framework backbone to use (fastapi or flask)"
     )
 
     return parser
