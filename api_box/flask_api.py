@@ -42,12 +42,15 @@ def create_app(config_path: Optional[str] = None) -> Flask:
 
     app = Flask(__name__)
 
+    # Disable automatic redirects for trailing slashes to avoid HTML responses
+    app.url_map.strict_slashes = False
+
     # Store route mapper in app config
     app.config['route_mapper'] = route_mapper
 
-    # Add routes
-    _add_main_routes(app, route_mapper)
+    # Add routes (remote routes first to avoid conflicts)
     _add_remote_routes(app, route_mapper)
+    _add_main_routes(app, route_mapper)
 
     return app
 
