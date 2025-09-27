@@ -14,7 +14,7 @@ License: CC-BY-4.0
 import httpx
 from typing import Any, Dict, List, Optional, Tuple
 
-from api_box.config import find_remote_config, get_remote_names, is_route_allowed, load_main_config
+from api_box.config import find_remote_config, find_route_mapping, get_remote_names, is_route_allowed, load_main_config
 
 
 #
@@ -155,9 +155,18 @@ class RouteMapper:
                 f"No URL configured for remote '{remote_name}'"
             )
 
+        # Check for custom route mapping
+        # Build the full pattern including remote name for matching
+        full_pattern = f"{remote_name}/{actual_path}"
+        mapped_route = find_route_mapping(full_pattern, method, remote_config, remote_name)
+        if mapped_route is not None:
+            final_path = mapped_route
+        else:
+            final_path = actual_path
+
         # Construct full URL
-        if actual_path:
-            full_url = f"{remote_url.rstrip('/')}/{actual_path}"
+        if final_path:
+            full_url = f"{remote_url.rstrip('/')}/{final_path}"
         else:
             full_url = remote_url.rstrip('/')
 

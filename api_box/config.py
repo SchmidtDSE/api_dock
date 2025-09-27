@@ -193,6 +193,44 @@ def is_route_allowed(route: str, config: Dict[str, Any], remote_name: Optional[s
     return True
 
 
+def find_route_mapping(full_route: str, method: str, remote_config: Dict[str, Any], remote_name: str) -> Optional[str]:
+    """Find custom route mapping for a specific route and method.
+
+    Args:
+        full_route: The incoming route with remote name (e.g., "another_name/users/123/permissions").
+        method: HTTP method (e.g., "GET", "POST").
+        remote_config: Remote configuration dictionary.
+        remote_name: Name of the remote for route_name substitution.
+
+    Returns:
+        Mapped remote route if found, None otherwise.
+    """
+    routes = remote_config.get("routes", [])
+
+    for route_mapping in routes:
+        if isinstance(route_mapping, dict):
+            config_route = route_mapping.get("route", "")
+            config_method = route_mapping.get("method", "").upper()
+            remote_route = route_mapping.get("remote_route", "")
+
+            # Check if method matches (case insensitive)
+            if config_method and config_method != method.upper():
+                continue
+
+            # Replace {{route_name}} with actual remote name in the pattern
+            pattern_with_name = config_route.replace("{{route_name}}", remote_name)
+
+            # Check if route pattern matches and extract parameters
+            params = _extract_route_params(full_route, pattern_with_name)
+            if params is not None:
+                # Add route_name to parameters for substitution
+                params["route_name"] = remote_name
+                # Substitute parameters in remote_route
+                return _substitute_route_params(remote_route, params)
+
+    return None
+
+
 #
 # INTERNAL
 #
@@ -261,3 +299,50 @@ def _route_matches_pattern(route: str, pattern: str) -> bool:
             return False
 
     return True
+
+
+def _extract_route_params(actual_route: str, pattern_route: str) -> Optional[Dict[str, str]]:
+    """Extract parameters from an actual route using a pattern.
+
+    Args:
+        actual_route: The actual route (e.g., "users/123/permissions").
+        pattern_route: The pattern route (e.g., "users/{user_id}/permissions").
+
+    Returns:
+        Dictionary of parameter mappings if match, None otherwise.
+    """
+    actual_parts = actual_route.strip("/").split("/")
+    pattern_parts = pattern_route.strip("/").split("/")
+
+    if len(actual_parts) != len(pattern_parts):
+        return None
+
+    params = {}
+    for actual_part, pattern_part in zip(actual_parts, pattern_parts):
+        if pattern_part.startswith("{") and pattern_part.endswith("}"):
+            # Extract parameter name
+            param_name = pattern_part[1:-1]
+            params[param_name] = actual_part
+        elif pattern_part != actual_part:
+            # Fixed path segment doesn't match
+            return None
+
+    return params
+
+
+def _substitute_route_params(template_route: str, params: Dict[str, str]) -> str:
+    """Substitute parameters in a template route.
+
+    Args:
+        template_route: The template route (e.g., "user-permissions/{{user_id}}").
+        params: Dictionary of parameter values.
+
+    Returns:
+        Route with substituted parameters.
+    """
+    result = template_route
+    for param_name, param_value in params.items():
+        # Handle both {param} and {{param}} formats
+        result = result.replace(f"{{{param_name}}}", param_value)
+        result = result.replace(f"{{{{{param_name}}}}}", param_value)
+    return result
