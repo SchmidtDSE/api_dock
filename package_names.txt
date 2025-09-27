@@ -1,0 +1,9 @@
+pycodestyle
+ipykernel
+jupyterlab
+numpy
+pandas
+fastapi
+uvicorn
+pyyaml
+httpx

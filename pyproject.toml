@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "api_box"
+version = "0.0.1"
+readme = "README.md"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "pyyaml",
+    "httpx"
+]
+
+[project.scripts]
+api-box = "api_box.cli:main"
+
+[tool.setuptools]
+packages = [
+	"api_box",
+	# "api_box.utils"
+]
+
+[tool.pixi.project]
+channels = ["conda-forge"]
+platforms = ["linux-64", "osx-64", "osx-arm64"]
+
+[tool.pixi.pypi-dependencies]
+api_box = { path = ".", editable = true }
