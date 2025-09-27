@@ -11,19 +11,16 @@ License: CC-BY-4.0
 #
 # IMPORTS
 #
-import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from typing import Any, Dict, Optional
 
-from .config import find_remote_config, get_remote_names, is_route_allowed, load_main_config
+from .route_mapper import RouteMapper
 
 
 #
 # CONSTANTS
 #
-DESCRIPTION_KEYS: List[str] = ["name", "description", "authors"]
-DEFAULT_VERSION: str = "latest"
 
 
 #
@@ -38,25 +35,24 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     Returns:
         Configured FastAPI application.
     """
-    # Load main configuration
-    try:
-        config = load_main_config(config_path)
-    except (FileNotFoundError, Exception) as e:
-        # For first pass, keep error handling simple
-        config = {"name": "api-box", "description": "API Box wrapper", "authors": []}
+    # Initialize route mapper
+    route_mapper = RouteMapper(config_path)
+
+    # Get metadata for FastAPI
+    metadata = route_mapper.get_config_metadata()
 
     app = FastAPI(
-        title=config.get("name", "API Box"),
-        description=config.get("description", "API wrapper using configuration files"),
+        title=metadata.get("name", "API Box"),
+        description=metadata.get("description", "API wrapper using configuration files"),
         version="0.1.0"
     )
 
-    # Store config in app state
-    app.state.config = config
+    # Store route mapper in app state
+    app.state.route_mapper = route_mapper
 
     # Add routes
-    _add_main_routes(app, config)
-    _add_remote_routes(app, config)
+    _add_main_routes(app, route_mapper)
+    _add_remote_routes(app, route_mapper)
 
     return app
 
@@ -64,18 +60,18 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
 #
 # INTERNAL
 #
-def _add_main_routes(app: FastAPI, config: Dict[str, Any]) -> None:
+def _add_main_routes(app: FastAPI, route_mapper: RouteMapper) -> None:
     """Add main API routes to the FastAPI app.
 
     Args:
         app: FastAPI application instance.
-        config: Main configuration dictionary.
+        route_mapper: RouteMapper instance.
     """
 
     @app.get("/")
     async def get_meta() -> Dict[str, Any]:
         """Return metadata from main config."""
-        return {k: config.get(k, None) for k in DESCRIPTION_KEYS}
+        return route_mapper.get_config_metadata()
 
     @app.get("/{key}")
     async def get_config_value(key: str) -> Any:
@@ -90,28 +86,24 @@ def _add_main_routes(app: FastAPI, config: Dict[str, Any]) -> None:
         Raises:
             HTTPException: If key not found or conflicts with remote name.
         """
-        # Check if key is a remote name (remotes take precedence)
-        remote_names = get_remote_names(config)
-        if key in remote_names:
-            raise HTTPException(
-                status_code=400,
-                detail=f"'{key}' is a remote name. Use /{key}/latest/ for remote API access."
-            )
+        success, value, error_message = route_mapper.get_config_value(key)
 
-        if key not in config:
-            raise HTTPException(status_code=404, detail=f"Configuration key '{key}' not found")
+        if not success:
+            if "is a remote name" in error_message:
+                raise HTTPException(status_code=400, detail=error_message)
+            else:
+                raise HTTPException(status_code=404, detail=error_message)
 
-        return config[key]
+        return value
 
 
-def _add_remote_routes(app: FastAPI, config: Dict[str, Any]) -> None:
+def _add_remote_routes(app: FastAPI, route_mapper: RouteMapper) -> None:
     """Add remote API proxy routes to the FastAPI app.
 
     Args:
         app: FastAPI application instance.
-        config: Main configuration dictionary.
+        route_mapper: RouteMapper instance.
     """
-    remote_names = get_remote_names(config)
 
     @app.api_route("/{remote_name}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
     async def proxy_to_remote(remote_name: str, path: str, request: Request) -> JSONResponse:
@@ -128,66 +120,25 @@ def _add_remote_routes(app: FastAPI, config: Dict[str, Any]) -> None:
         Raises:
             HTTPException: If remote not found or route not allowed.
         """
-        if remote_name not in remote_names:
-            raise HTTPException(status_code=404, detail=f"Remote '{remote_name}' not found")
+        # Get request body if present
+        body = None
+        if request.method in ["POST", "PUT", "PATCH"]:
+            body = await request.body()
 
-        # Parse version from path (optional)
-        path_parts = path.split("/")
-        version = DEFAULT_VERSION
-        actual_path = path
+        # Use RouteMapper to handle the request
+        success, response_data, status_code, error_message = await route_mapper.map_route(
+            remote_name=remote_name,
+            path=path,
+            method=request.method,
+            headers=dict(request.headers),
+            body=body,
+            query_params=dict(request.query_params)
+        )
 
-        # Check if first part of path is a version
-        if path_parts and (path_parts[0] == "latest" or path_parts[0].isdigit()):
-            version = path_parts[0]
-            actual_path = "/".join(path_parts[1:])
+        if not success:
+            raise HTTPException(status_code=status_code, detail=error_message)
 
-        # Check if route is allowed
-        if not is_route_allowed(actual_path, config, remote_name):
-            raise HTTPException(status_code=403, detail=f"Route '{actual_path}' not allowed for remote '{remote_name}'")
-
-        # Load remote configuration
-        try:
-            remote_config = find_remote_config(remote_name, config)
-        except FileNotFoundError:
-            raise HTTPException(status_code=404, detail=f"Configuration for remote '{remote_name}' not found")
-
-        remote_url = remote_config.get("url")
-        if not remote_url:
-            raise HTTPException(status_code=500, detail=f"No URL configured for remote '{remote_name}'")
-
-        # Construct full URL
-        if actual_path:
-            full_url = f"{remote_url.rstrip('/')}/{actual_path}"
-        else:
-            full_url = remote_url.rstrip('/')
-
-        # Forward the request
-        async with httpx.AsyncClient() as client:
-            try:
-                # Get request body if present
-                body = None
-                if request.method in ["POST", "PUT", "PATCH"]:
-                    body = await request.body()
-
-                # Forward request
-                response = await client.request(
-                    method=request.method,
-                    url=full_url,
-                    headers=dict(request.headers),
-                    content=body,
-                    params=dict(request.query_params)
-                )
-
-                # Return response
-                return JSONResponse(
-                    content=response.json() if response.headers.get("content-type", "").startswith("application/json") else response.text,
-                    status_code=response.status_code
-                )
-
-            except httpx.RequestError as e:
-                raise HTTPException(status_code=502, detail=f"Error connecting to remote API: {str(e)}")
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        return JSONResponse(content=response_data, status_code=status_code)
 
 
 # Default app instance
