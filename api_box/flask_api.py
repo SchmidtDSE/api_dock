@@ -52,6 +52,9 @@ def create_app(config_path: Optional[str] = None) -> Flask:
     _add_remote_routes(app, route_mapper)
     _add_main_routes(app, route_mapper)
 
+    # Add error handlers for JSON responses
+    _add_error_handlers(app)
+
     return app
 
 
@@ -130,6 +133,29 @@ def _add_remote_routes(app: Flask, route_mapper: RouteMapper) -> None:
             return jsonify({"error": error_message}), status_code
 
         return jsonify(response_data), status_code
+
+
+def _add_error_handlers(app: Flask) -> None:
+    """Add custom error handlers to return JSON responses.
+
+    Args:
+        app: Flask application instance.
+    """
+
+    @app.errorhandler(404)
+    def not_found(error):
+        """Return JSON response for 404 errors."""
+        return jsonify({"error": "Not found"}), 404
+
+    @app.errorhandler(405)
+    def method_not_allowed(error):
+        """Return JSON response for 405 errors."""
+        return jsonify({"error": "Method not allowed"}), 405
+
+    @app.errorhandler(500)
+    def internal_error(error):
+        """Return JSON response for 500 errors."""
+        return jsonify({"error": "Internal server error"}), 500
 
 
 # Default app instance
