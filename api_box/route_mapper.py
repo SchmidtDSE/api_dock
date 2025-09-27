@@ -82,10 +82,13 @@ class RouteMapper:
         return (True, self.config[key], None)
 
 
-    async def map_route(self, remote_name: str, path: str, method: str,
-                       headers: Optional[Dict[str, str]] = None,
-                       body: Optional[bytes] = None,
-                       query_params: Optional[Dict[str, str]] = None) -> Tuple[bool, Any, int, Optional[str]]:
+    async def map_route(self,
+            remote_name: str,
+            path: str,
+            method: str,
+            headers: Optional[Dict[str, str]] = None,
+            body: Optional[bytes] = None,
+            query_params: Optional[Dict[str, str]] = None) -> Tuple[bool, Any, int, Optional[str]]:
         """Map a request to a remote API.
 
         Args:
@@ -197,6 +200,39 @@ class RouteMapper:
             List of remote names.
         """
         return self.remote_names.copy()
+
+
+    def map_route_sync(self, remote_name: str, path: str, method: str,
+                      headers: Optional[Dict[str, str]] = None,
+                      body: Optional[bytes] = None,
+                      query_params: Optional[Dict[str, str]] = None) -> Tuple[bool, Any, int, Optional[str]]:
+        """Synchronous version of map_route for frameworks that don't support async.
+
+        Args:
+            remote_name: Name of the remote API.
+            path: The path to proxy to the remote API.
+            method: HTTP method (GET, POST, etc.).
+            headers: Request headers dictionary.
+            body: Request body bytes.
+            query_params: Query parameters dictionary.
+
+        Returns:
+            Tuple of (success, response_data, status_code, error_message).
+            If success is False, error_message contains the reason.
+        """
+        import asyncio
+
+        # Run the async version in a new event loop
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result = loop.run_until_complete(
+                self.map_route(remote_name, path, method, headers, body, query_params)
+            )
+            loop.close()
+            return result
+        except Exception as e:
+            return (False, None, 500, f"Sync wrapper error: {str(e)}")
 
 
 #
