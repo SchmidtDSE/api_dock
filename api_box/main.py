@@ -22,7 +22,7 @@ from .config import find_remote_config, get_remote_names, is_route_allowed, load
 #
 # CONSTANTS
 #
-DESCRIPTION_KEYS: list[str] = ["name", "description", "authors"]
+DESCRIPTION_KEYS: List[str] = ["name", "description", "authors"]
 DEFAULT_VERSION: str = "latest"
 
 
