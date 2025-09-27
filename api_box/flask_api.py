@@ -98,7 +98,7 @@ def _add_remote_routes(app: Flask, route_mapper: RouteMapper) -> None:
     """
 
     @app.route("/<remote_name>/<path:path>", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
-    async def proxy_to_remote(remote_name: str, path: str):
+    def proxy_to_remote(remote_name: str, path: str):
         """Proxy requests to remote APIs.
 
         Args:
@@ -113,8 +113,8 @@ def _add_remote_routes(app: Flask, route_mapper: RouteMapper) -> None:
         if request.method in ["POST", "PUT", "PATCH"]:
             body = request.get_data()
 
-        # Use RouteMapper to handle the request
-        success, response_data, status_code, error_message = await route_mapper.map_route(
+        # Use RouteMapper to handle the request (synchronous version)
+        success, response_data, status_code, error_message = route_mapper.map_route_sync(
             remote_name=remote_name,
             path=path,
             method=request.method,
