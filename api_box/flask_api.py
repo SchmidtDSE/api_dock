@@ -74,25 +74,6 @@ def _add_main_routes(app: Flask, route_mapper: RouteMapper) -> None:
         """Return metadata from main config."""
         return jsonify(route_mapper.get_config_metadata())
 
-    @app.route("/<key>")
-    def get_config_value(key: str) -> Any:
-        """Get a top-level config value by key.
-
-        Args:
-            key: Configuration key to retrieve.
-
-        Returns:
-            Configuration value or error response.
-        """
-        success, value, error_message = route_mapper.get_config_value(key)
-
-        if not success:
-            if "is a remote name" in error_message:
-                return jsonify({"error": error_message}), 400
-            else:
-                return jsonify({"error": error_message}), 404
-
-        return jsonify(value)
 
 
 def _add_remote_routes(app: Flask, route_mapper: RouteMapper) -> None:
