@@ -101,6 +101,113 @@ url: "http://localhost:8001"
 description: "First remote service"
 ```
 
+## Routing Syntax
+
+API Box uses a unified routing configuration that supports both simple string routes and complex dictionary-based routes with custom mappings and HTTP methods.
+
+### Route Patterns
+
+Routes use double curly braces `{{}}` for variable placeholders:
+
+- `users` - Matches exactly "users"
+- `users/{{user_id}}` - Matches "users/123", "users/abc", etc.
+- `users/{{user_id}}/profile` - Matches "users/123/profile"
+- `{{}}` - Anonymous variable (matches any single path segment)
+
+### Unified Routes Structure
+
+The `routes` section in remote configuration files supports two formats:
+
+#### 1. String Routes (Simple GET Routes)
+
+```yaml
+routes:
+  - users                          # GET /users
+  - users/{{user_id}}              # GET /users/123
+  - users/{{user_id}}/profile      # GET /users/123/profile
+  - posts/{{post_id}}              # GET /posts/456
+```
+
+#### 2. Dictionary Routes (Custom Methods and Mappings)
+
+```yaml
+routes:
+  # Different HTTP method
+  - route: users/{{user_id}}
+    method: post                   # POST /users/123
+
+  # Custom remote mapping
+  - route: users/{{user_id}}/permissions
+    remote_route: user-permissions/{{user_id}}
+    method: get                    # Maps local route to different remote endpoint
+
+  # Complex mapping with multiple variables
+  - route: search/{{category}}/{{term}}
+    remote_route: api/v2/search/{{term}}/in/{{category}}
+    method: get
+```
+
+#### 3. Mixed Configuration Example
+
+```yaml
+name: my_api_remote
+url: http://api.example.com
+routes:
+  - users                                    # Simple GET route
+  - users/{{user_id}}                       # Simple GET route with variable
+  - route: users/{{user_id}}/posts         # Custom method
+    method: post
+  - route: users/{{user_id}}/permissions   # Custom mapping
+    remote_route: user-perms/{{user_id}}
+    method: get
+```
+
+### Variable Naming
+
+- For simple routes, variable names can be descriptive (`{{user_id}}`) or anonymous (`{{}}`)
+- For custom mappings, variable names **must match** between `route` and `remote_route`
+- Variables are case-sensitive and must be consistent
+
+### Route Restrictions
+
+You can restrict access to specific routes using the `restricted` section:
+
+```yaml
+restricted:
+  - admin                             # Block all admin routes
+  - users/{{user_id}}/private        # Block private user data
+  - system/{{system_id}}/config      # Block system configuration
+```
+
+### Complete Remote Configuration Example
+
+```yaml
+name: comprehensive_remote
+description: Example showing all routing features
+url: http://api.example.com
+
+# Unified routes (mix of strings and dicts)
+routes:
+  - health                                    # GET /health
+  - users                                     # GET /users
+  - users/{{user_id}}                        # GET /users/123
+  - users/{{user_id}}/profile               # GET /users/123/profile
+  - route: users/{{user_id}}/posts          # POST /users/123/posts
+    method: post
+  - route: users/{{user_id}}/permissions    # Custom mapping
+    remote_route: user-permissions/{{user_id}}
+    method: get
+  - route: search/{{query}}                  # Different remote structure
+    remote_route: api/v2/search?q={{query}}
+    method: get
+
+# Routes that are explicitly blocked
+restricted:
+  - admin
+  - users/{{user_id}}/private
+  - system/{{system_id}}/delete
+```
+
 ## API Usage
 
 Once running, API Box provides:
