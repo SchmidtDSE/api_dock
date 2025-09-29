@@ -21,7 +21,7 @@ import yaml
 #
 # CONSTANTS
 #
-DEFAULT_CONFIG_DIR: str = "config"
+DEFAULT_CONFIG_DIR: str = "api_box_config"
 DEFAULT_CONFIG_FILE: str = "config.yaml"
 REMOTES_DIR: str = "remotes"
 
@@ -162,30 +162,36 @@ def is_route_allowed(route: str, config: Dict[str, Any], remote_name: Optional[s
     Returns:
         True if route is allowed, False otherwise.
     """
-    # Check global restrictions
+    # Always allow empty route (root path) for API metadata access
+    if not route or route == "":
+        return True
+    # Check global restrictions from main config
     global_restricted = config.get("restricted", [])
     global_routes = config.get("routes", [])
 
-    # Check remote-specific restrictions
+    # Check remote-specific restrictions from remote config file
     remote_restricted = []
     remote_routes = []
 
     if remote_name:
-        remotes = config.get("remotes", [])
-        for remote in remotes:
-            if isinstance(remote, dict):
-                if remote.get("name") == remote_name:
-                    remote_restricted = remote.get("restricted", [])
-                    remote_routes = remote.get("routes", [])
-                    break
+        try:
+            # Load the remote config to check for restrictions/routes
+            remote_config = find_remote_config(remote_name, config)
+            remote_restricted = remote_config.get("restricted", [])
+            remote_routes = remote_config.get("routes", [])
+        except FileNotFoundError:
+            # If remote config not found, just use global restrictions
+            pass
 
     # If explicit routes are defined (whitelist), check against them
-    allowed_routes = remote_routes or global_routes
+    # Remote-specific routes take precedence over global routes
+    allowed_routes = remote_routes if remote_routes else global_routes
     if allowed_routes:
         return _route_matches_patterns(route, allowed_routes)
 
     # Otherwise, check against restricted patterns (blacklist)
-    restricted_routes = remote_restricted or global_restricted
+    # Remote-specific restrictions take precedence over global restrictions
+    restricted_routes = remote_restricted if remote_restricted else global_restricted
     if restricted_routes:
         return not _route_matches_patterns(route, restricted_routes)
 
@@ -275,11 +281,11 @@ def _route_matches_patterns(route: str, patterns: List[str]) -> bool:
 def _route_matches_pattern(route: str, pattern: str) -> bool:
     """Check if a route matches a specific pattern.
 
-    Patterns use <> as wildcards for path segments.
+    Patterns use {{}} as wildcards for path segments.
     Examples:
-        - "<>/delete" matches "users/123/delete"
-        - "<>" matches "users/123"
-        - "users/<>/permissions" matches "users/123/permissions"
+        - "users/{{}}/delete" matches "users/123/delete"
+        - "users/{{}}" matches "users/123"
+        - "users/{{}}/permissions" matches "users/123/permissions"
 
     Args:
         route: The route to check.
@@ -288,6 +294,10 @@ def _route_matches_pattern(route: str, pattern: str) -> bool:
     Returns:
         True if route matches pattern, False otherwise.
     """
+    # Handle case where pattern is not a string (dict, list, etc.)
+    if not isinstance(pattern, str):
+        return False
+
     route_parts = route.strip("/").split("/")
     pattern_parts = pattern.strip("/").split("/")
 
@@ -295,7 +305,12 @@ def _route_matches_pattern(route: str, pattern: str) -> bool:
         return False
 
     for route_part, pattern_part in zip(route_parts, pattern_parts):
-        if pattern_part != "<>" and pattern_part != route_part:
+        # Check if pattern part is a variable (starts and ends with double braces)
+        if pattern_part.startswith("{{") and pattern_part.endswith("}}"):
+            # Variable matches any value
+            continue
+        elif pattern_part != route_part:
+            # Literal part must match exactly
             return False
 
     return True
