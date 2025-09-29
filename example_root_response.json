@@ -1,0 +1,19 @@
+{
+  "name": "test-api-box",
+  "description": "Test configuration for API Box wrapper with toy remotes - testing restrictions and routes",
+  "authors": [
+    {
+      "name": "brookie",
+      "email": "bguzder-williams@berkeley.edu"
+    }
+  ],
+  "endpoints": [
+    "/"
+  ],
+  "remotes": [
+    "custom_mapping_remote",
+    "basic_remote",
+    "restricted_remote",
+    "allowed_routes_remote"
+  ]
+}

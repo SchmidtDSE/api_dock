@@ -1,0 +1,8 @@
+name: remote_with_restrictions
+description: Remote API with route restrictions
+authors:
+  - Test API Team
+url: http://127.0.0.1:8001
+restricted:
+  - users/{{}}/permissions
+  - admin/{{}}

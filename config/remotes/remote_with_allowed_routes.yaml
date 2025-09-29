@@ -1,0 +1,9 @@
+name: remote_with_allowed_routes
+description: Remote API with explicit allowed routes
+authors:
+  - Test API Team
+url: http://127.0.0.1:8002
+routes:
+  - users
+  - users/{{}}
+  - users/{{}}/profile
