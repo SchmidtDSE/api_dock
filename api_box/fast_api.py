@@ -76,28 +76,6 @@ def _add_main_routes(app: FastAPI, route_mapper: RouteMapper) -> None:
         """Return metadata from main config."""
         return route_mapper.get_config_metadata()
 
-    @app.get("/{key}")
-    async def get_config_value(key: str) -> Any:
-        """Get a top-level config value by key.
-
-        Args:
-            key: Configuration key to retrieve.
-
-        Returns:
-            Configuration value.
-
-        Raises:
-            HTTPException: If key not found or conflicts with remote name.
-        """
-        success, value, error_message = route_mapper.get_config_value(key)
-
-        if not success:
-            if "is a remote name" in error_message:
-                raise HTTPException(status_code=400, detail=error_message)
-            else:
-                raise HTTPException(status_code=404, detail=error_message)
-
-        return value
 
 
 def _add_remote_routes(app: FastAPI, route_mapper: RouteMapper) -> None:
@@ -139,7 +117,8 @@ def _add_remote_routes(app: FastAPI, route_mapper: RouteMapper) -> None:
         )
 
         if not success:
-            raise HTTPException(status_code=status_code, detail=error_message)
+            # Return clean JSON error response
+            return JSONResponse(content={"error": error_message}, status_code=status_code)
 
         return JSONResponse(content=response_data, status_code=status_code)
 
