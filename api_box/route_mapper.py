@@ -52,43 +52,18 @@ class RouteMapper:
         """Get API metadata from configuration.
 
         Returns:
-            Dictionary containing name, description, and authors.
+            Dictionary containing name, description, authors, endpoints, and remotes.
         """
-        description_keys = ["name", "description", "authors"]
-        return {k: self.config.get(k, None) for k in description_keys}
+        metadata = {
+            "name": self.config.get("name", "API Box"),
+            "description": self.config.get("description", "API wrapper using configuration files"),
+            "authors": self.config.get("authors", []),
+            "endpoints": self.config.get("endpoints", ["/"]),
+            "remotes": self.remote_names
+        }
+        return metadata
 
 
-    def get_config_value(self, key: str) -> Tuple[bool, Any, Optional[str]]:
-        """Get a configuration value by key.
-
-        Args:
-            key: Configuration key to retrieve.
-
-        Returns:
-            Tuple of (success, value, error_message).
-            If success is False, error_message contains the reason.
-        """
-        # Check if key is a remote name (remotes take precedence)
-        if key in self.remote_names:
-            return (
-                False,
-                None,
-                f"'{key}' is a remote name. Use /{key}/latest/ for remote API access."
-            )
-
-        # Check if key might be a remote filename that maps to a different name
-        if self._is_remote_filename(key):
-            actual_name = self._get_remote_name_by_filename(key)
-            return (
-                False,
-                None,
-                f"'{key}' refers to remote '{actual_name}'. Use /{actual_name}/latest/ for remote API access."
-            )
-
-        if key not in self.config:
-            return (False, None, f"Configuration key '{key}' not found")
-
-        return (True, self.config[key], None)
 
 
     async def map_route(self,
@@ -125,6 +100,10 @@ class RouteMapper:
         if path_parts and (path_parts[0] == "latest" or path_parts[0].isdigit()):
             version = path_parts[0]
             actual_path = "/".join(path_parts[1:])
+
+        # Handle empty actual_path - should be allowed as root route
+        if not actual_path:
+            actual_path = ""
 
         # Check if route is allowed
         if not is_route_allowed(actual_path, self.config, remote_name):
