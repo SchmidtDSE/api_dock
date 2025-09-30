@@ -14,7 +14,9 @@ License: CC-BY-4.0
 import httpx
 from typing import Any, Dict, List, Optional, Tuple
 
-from api_box.config import find_remote_config, find_route_mapping, get_remote_names, is_route_allowed, load_main_config
+from api_box.config import find_remote_config, find_route_mapping, get_database_names, get_remote_names, is_route_allowed, load_main_config
+from api_box.database_config import find_database_route, load_database_config
+from api_box.sql_builder import build_sql_query, extract_path_parameters
 
 
 #
@@ -46,20 +48,22 @@ class RouteMapper:
             self.config = {"name": "api-box", "description": "API Box wrapper", "authors": []}
 
         self.remote_names = get_remote_names(self.config)
+        self.database_names = get_database_names(self.config)
 
 
     def get_config_metadata(self) -> Dict[str, Any]:
         """Get API metadata from configuration.
 
         Returns:
-            Dictionary containing name, description, authors, endpoints, and remotes.
+            Dictionary containing name, description, authors, endpoints, remotes, and databases.
         """
         metadata = {
             "name": self.config.get("name", "API Box"),
             "description": self.config.get("description", "API wrapper using configuration files"),
             "authors": self.config.get("authors", []),
             "endpoints": self.config.get("endpoints", ["/"]),
-            "remotes": self.remote_names
+            "remotes": self.remote_names,
+            "databases": self.database_names
         }
         return metadata
 
@@ -186,6 +190,75 @@ class RouteMapper:
                 return (False, None, 500, f"Internal server error: {str(e)}")
 
 
+    async def map_database_route(
+            self,
+            database_name: str,
+            path: str) -> Tuple[bool, Any, int, Optional[str]]:
+        """Execute a SQL query for a database route.
+
+        Args:
+            database_name: Name of the database.
+            path: The path to match against database routes.
+
+        Returns:
+            Tuple of (success, response_data, status_code, error_message).
+            If success is False, error_message contains the reason.
+        """
+        # Validate database exists
+        if database_name not in self.database_names:
+            return (False, None, 404, f"Database '{database_name}' not found")
+
+        # Load database configuration
+        try:
+            database_config = load_database_config(database_name)
+        except FileNotFoundError:
+            return (
+                False,
+                None,
+                404,
+                f"Configuration for database '{database_name}' not found"
+            )
+
+        # Find matching route in database config
+        route_config = find_database_route(path, database_config)
+        if route_config is None:
+            return (
+                False,
+                None,
+                404,
+                f"Route '{path}' not found in database '{database_name}'"
+            )
+
+        # Extract path parameters
+        route_pattern = route_config.get("route", "")
+        path_params = extract_path_parameters(path, route_pattern)
+
+        # Build SQL query
+        sql_template = route_config.get("sql", "")
+        try:
+            sql_query = build_sql_query(sql_template, database_config, path_params)
+        except ValueError as e:
+            return (False, None, 500, f"SQL query error: {str(e)}")
+
+        # Execute SQL query using DuckDB
+        try:
+            import duckdb
+
+            # Execute query and fetch results
+            conn = duckdb.connect(database=':memory:')
+            result = conn.execute(sql_query).fetchall()
+            columns = [desc[0] for desc in conn.description] if conn.description else []
+            conn.close()
+
+            # Convert to list of dictionaries
+            response_data = [dict(zip(columns, row)) for row in result]
+
+            return (True, response_data, 200, None)
+
+        except Exception as e:
+            return (False, None, 500, f"Database query error: {str(e)}")
+
+
     def is_remote_name(self, name: str) -> bool:
         """Check if a given name is a configured remote name.
 
@@ -198,6 +271,18 @@ class RouteMapper:
         return name in self.remote_names
 
 
+    def is_database_name(self, name: str) -> bool:
+        """Check if a given name is a configured database name.
+
+        Args:
+            name: The name to check.
+
+        Returns:
+            True if name is a database name, False otherwise.
+        """
+        return name in self.database_names
+
+
     def get_remote_names(self) -> List[str]:
         """Get list of configured remote names.
 
@@ -205,6 +290,15 @@ class RouteMapper:
             List of remote names.
         """
         return self.remote_names.copy()
+
+
+    def get_database_names(self) -> List[str]:
+        """Get list of configured database names.
+
+        Returns:
+            List of database names.
+        """
+        return self.database_names.copy()
 
 
     def map_route_sync(self, remote_name: str, path: str, method: str,
