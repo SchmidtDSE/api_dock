@@ -151,6 +151,27 @@ def get_remote_names(config: Dict[str, Any], config_dir: Optional[str] = None) -
     return list(get_remote_mapping(config, config_dir).keys())
 
 
+def get_database_names(config: Dict[str, Any]) -> List[str]:
+    """Extract list of database names from main config.
+
+    Args:
+        config: Main configuration dictionary.
+
+    Returns:
+        List of database names.
+    """
+    databases = config.get("databases", [])
+    database_names = []
+
+    for database in databases:
+        if isinstance(database, str):
+            database_names.append(database)
+        elif isinstance(database, dict) and "name" in database:
+            database_names.append(database["name"])
+
+    return database_names
+
+
 def is_route_allowed(route: str, config: Dict[str, Any], remote_name: Optional[str] = None) -> bool:
     """Check if a route is allowed based on configuration restrictions.
 
