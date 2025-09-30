@@ -8,3 +8,4 @@ uvicorn
 pyyaml
 httpx
 flask
+duckdb
