@@ -208,6 +208,100 @@ restricted:
   - system/{{system_id}}/delete
 ```
 
+## SQL Database Support
+
+API Box now supports SQL queries against Parquet files and other data sources using DuckDB. Define databases in your configuration and query them through REST endpoints.
+
+### Database Configuration
+
+Database configurations are stored in `config/databases/` directory. Each database defines:
+- **tables**: Mapping of table names to file paths (e.g., S3, local Parquet files)
+- **queries**: Named SQL queries for reuse
+- **routes**: REST endpoints mapped to SQL queries
+
+### Database Configuration Example (`databases/db_example.yaml`)
+
+```yaml
+name: db_example
+description: Example database with Parquet files
+authors:
+  - API Team
+
+# Table definitions
+tables:
+  users: s3://your-bucket/users.parquet
+  permissions: s3://your-bucket/user_permissions.parquet
+
+# Named queries (optional)
+queries:
+  get_permissions: >
+    SELECT [[users]].*, [[permissions]].permission_name
+    FROM [[users]]
+    JOIN [[permissions]] ON [[users]].ID = [[permissions]].ID
+    WHERE [[users]].user_id = {{user_id}}
+
+# REST route definitions
+routes:
+  - route: users
+    sql: SELECT [[users]].* FROM [[users]]
+
+  - route: users/{{user_id}}
+    sql: SELECT [[users]].* FROM [[users]] WHERE [[users]].user_id = {{user_id}}
+
+  - route: users/{{user_id}}/permissions
+    sql: "[[get_permissions]]"
+```
+
+### SQL Syntax
+
+#### Table References: `[[table_name]]`
+
+Use double square brackets to reference tables defined in the `tables` section:
+
+```sql
+SELECT [[users]].* FROM [[users]]
+```
+
+This automatically expands to:
+
+```sql
+SELECT users.* FROM 's3://your-bucket/users.parquet' AS users
+```
+
+#### Path Parameters: `{{param_name}}`
+
+Use double curly braces for route parameters:
+
+```yaml
+route: users/{{user_id}}
+sql: SELECT [[users]].* FROM [[users]] WHERE user_id = {{user_id}}
+```
+
+When accessing `/db_example/users/123`, `{{user_id}}` is replaced with `'123'`.
+
+#### Named Queries: `[[query_name]]`
+
+Reference named queries from the `queries` section:
+
+```yaml
+routes:
+  - route: users/{{user_id}}/permissions
+    sql: "[[get_permissions]]"
+```
+
+### Main Configuration Update
+
+Add databases to your main `config.yaml`:
+
+```yaml
+name: my-api-box
+description: API Box with SQL support
+databases:
+  - db_example
+remotes:
+  - service1
+```
+
 ## API Usage
 
 Once running, API Box provides:
@@ -215,6 +309,7 @@ Once running, API Box provides:
 - `GET /` - API metadata
 - `GET /{config_key}` - Get configuration values
 - `/{remote_name}/{version}/{path}` - Proxy to remote APIs
+- `/{database_name}/{path}` - Query SQL databases
 
 ### Example Requests
 
@@ -227,6 +322,13 @@ curl http://localhost:8000/service1/latest/users/
 
 # Access specific API version
 curl http://localhost:8000/service1/v2/users/123
+
+# Query SQL database
+curl http://localhost:8000/db_example/users
+
+# Query with parameters
+curl http://localhost:8000/db_example/users/123
+curl http://localhost:8000/db_example/users/123/permissions
 ```
 
 ## Using RouteMapper in Your Own Projects
