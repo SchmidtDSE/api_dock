@@ -1,5 +1,5 @@
 name: example-api
-description: Test API Box with route restrictions
+description: Test API Box with route restrictions and SQL databases
 authors:
   - name: Test User
     email: test@email.com
@@ -7,6 +7,9 @@ remotes:
   - remote_with_restrictions
   - remote_with_allowed_routes
   - remote_with_custom_mapping
+
+databases:
+  - db_example
 
 # Non-remote endpoints (API Box's own endpoints)
 endpoints:
