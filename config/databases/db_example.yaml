@@ -1,0 +1,19 @@
+name: db_example
+description: Example database with Parquet files
+authors:
+  - API Team
+
+tables:
+  users: s3://your-bucket/users.parquet
+  permissions: s3://your-bucket/user_permissions.parquet
+
+queries:
+  get_permissions: SELECT [[users]].*, [[permissions]].permission_name FROM [[users]] JOIN [[permissions]] ON [[users]].ID = [[permissions]].ID WHERE [[users]].user_id = {{user_id}}
+
+routes:
+  - route: users
+    sql: SELECT [[users]].* FROM [[users]]
+  - route: users/{{user_id}}
+    sql: SELECT [[users]].* FROM [[users]] WHERE [[users]].user_id = {{user_id}}
+  - route: users/{{user_id}}/permissions
+    sql: "[[get_permissions]]"
