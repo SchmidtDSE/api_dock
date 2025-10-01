@@ -97,7 +97,7 @@ Then just run `pixi run api-box start` to launch a new api with following endpoi
   - query example_db for user-permissions: `/db_example/users/{{user_id}}/permissions`
 - list service1 endpoints: `/service1` 
   - proxy for http://api.example.com/health: `/service1/health`
-  - proxy for http://api.example.com/user-permissions/{{user_id}}: `/service1/users/{{user_id}}/permissions'
+  - proxy for http://api.example.com/user-permissions/{{user_id}}: `/service1/users/{{user_id}}/permissions`
 - list service2|3 endpoints: `/service2|3` 
   - ...
 
