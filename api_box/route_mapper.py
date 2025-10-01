@@ -55,15 +55,18 @@ class RouteMapper:
         """Get API metadata from configuration.
 
         Returns:
-            Dictionary containing name, description, authors, endpoints, remotes, and databases.
+            Dictionary containing name, description, authors, endpoints, and remotes.
+            Note: Databases are included in remotes list to hide implementation details.
         """
+        # Merge databases into remotes list (hide implementation from users)
+        all_remotes = self.remote_names + self.database_names
+
         metadata = {
             "name": self.config.get("name", "API Box"),
             "description": self.config.get("description", "API wrapper using configuration files"),
             "authors": self.config.get("authors", []),
             "endpoints": self.config.get("endpoints", ["/"]),
-            "remotes": self.remote_names,
-            "databases": self.database_names
+            "remotes": all_remotes
         }
         return metadata
 
