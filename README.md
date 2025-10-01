@@ -140,6 +140,18 @@ description: "First remote service"
 
 API Box uses a unified routing configuration that supports both simple string routes and complex dictionary-based routes with custom mappings and HTTP methods.
 
+### Bracket Notation
+
+API Box uses two types of double-bracket notation with distinct purposes:
+
+- **`{{variable}}`** - Route URL variables (path parameters in REST endpoints)
+  - Example: `users/{{user_id}}` matches `/users/123`
+  - Used in route definitions and SQL WHERE clauses
+
+- **`[[reference]]`** - Configuration value references (table names, named queries)
+  - Example: `[[users]]` expands to table file path
+  - Used only in SQL queries to reference tables/queries from config
+
 ### Route Patterns
 
 Routes use double curly braces `{{}}` for variable placeholders:
