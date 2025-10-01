@@ -86,29 +86,41 @@ def _add_remote_routes(app: Flask, route_mapper: RouteMapper) -> None:
 
     @app.route("/<remote_name>/<path:path>", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
     def proxy_to_remote(remote_name: str, path: str):
-        """Proxy requests to remote APIs.
+        """Proxy requests to remote APIs or databases.
 
         Args:
-            remote_name: Name of the remote API.
-            path: The path to proxy to the remote API.
+            remote_name: Name of the remote API or database.
+            path: The path to proxy to the remote API or query from database.
 
         Returns:
-            Response from the remote API or error response.
+            Response from the remote API/database or error response.
         """
-        # Get request body if present
-        body = None
-        if request.method in ["POST", "PUT", "PATCH"]:
-            body = request.get_data()
+        # Check if remote_name is a database first
+        if remote_name in route_mapper.database_names:
+            # Handle as database route (using async with asyncio.run)
+            import asyncio
+            success, response_data, status_code, error_message = asyncio.run(
+                route_mapper.map_database_route(
+                    database_name=remote_name,
+                    path=path
+                )
+            )
+        else:
+            # Handle as remote API route
+            # Get request body if present
+            body = None
+            if request.method in ["POST", "PUT", "PATCH"]:
+                body = request.get_data()
 
-        # Use RouteMapper to handle the request (synchronous version)
-        success, response_data, status_code, error_message = route_mapper.map_route_sync(
-            remote_name=remote_name,
-            path=path,
-            method=request.method,
-            headers=dict(request.headers),
-            body=body,
-            query_params=dict(request.args)
-        )
+            # Use RouteMapper to handle the request (synchronous version)
+            success, response_data, status_code, error_message = route_mapper.map_route_sync(
+                remote_name=remote_name,
+                path=path,
+                method=request.method,
+                headers=dict(request.headers),
+                body=body,
+                query_params=dict(request.args)
+            )
 
         if not success:
             return jsonify({"error": error_message}), status_code
