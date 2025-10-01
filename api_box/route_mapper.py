@@ -14,8 +14,8 @@ License: CC-BY-4.0
 import httpx
 from typing import Any, Dict, List, Optional, Tuple
 
-from api_box.config import find_remote_config, find_route_mapping, get_database_names, get_remote_names, is_route_allowed, load_main_config
-from api_box.database_config import find_database_route, load_database_config
+from api_box.config import find_remote_config, find_route_mapping, get_database_names, get_remote_names, get_remote_versions, is_route_allowed, is_versioned_remote, load_main_config, resolve_latest_version
+from api_box.database_config import find_database_route, get_database_versions, is_versioned_database, load_database_config, resolve_latest_database_version
 from api_box.sql_builder import build_sql_query, extract_path_parameters
 
 
@@ -98,22 +98,50 @@ class RouteMapper:
         if remote_name not in self.remote_names:
             return (False, None, 404, f"Remote '{remote_name}' not found")
 
-        # Parse version from path (optional)
+        # Check if this is a versioned remote
+        is_versioned = is_versioned_remote(remote_name, self.config)
+
+        # Parse version from path if remote is versioned
         path_parts = path.split("/") if path else []
-        version = DEFAULT_VERSION
+        version = None
         actual_path = path
 
-        # Check if first part of path is a version
-        if path_parts and (path_parts[0] == "latest" or path_parts[0].isdigit()):
-            version = path_parts[0]
-            actual_path = "/".join(path_parts[1:])
+        if is_versioned and path_parts:
+            # First part should be the version for versioned remotes
+            potential_version = path_parts[0]
+            available_versions = get_remote_versions(remote_name, self.config)
+
+            if potential_version == "latest":
+                # Resolve latest to actual version
+                version = resolve_latest_version(available_versions)
+                if version is None:
+                    return (False, None, 404, f"No versions found for remote '{remote_name}'")
+                actual_path = "/".join(path_parts[1:])
+            elif potential_version in available_versions:
+                version = potential_version
+                actual_path = "/".join(path_parts[1:])
+            elif not path:
+                # Empty path on versioned remote - list versions
+                return (True, {"versions": available_versions}, 200, None)
+            else:
+                # Path provided but no valid version - error
+                return (
+                    False,
+                    None,
+                    404,
+                    f"Configuration for remote '{remote_name}' not found"
+                )
+        elif is_versioned and not path:
+            # Empty path on versioned remote - list versions
+            available_versions = get_remote_versions(remote_name, self.config)
+            return (True, {"versions": available_versions}, 200, None)
 
         # Handle empty actual_path - should be allowed as root route
         if not actual_path:
             actual_path = ""
 
         # Check if route is allowed
-        if not is_route_allowed(actual_path, self.config, remote_name):
+        if not is_route_allowed(actual_path, self.config, remote_name, version):
             return (
                 False,
                 None,
@@ -123,7 +151,7 @@ class RouteMapper:
 
         # Load remote configuration
         try:
-            remote_config = find_remote_config(remote_name, self.config)
+            remote_config = find_remote_config(remote_name, self.config, version=version)
         except FileNotFoundError:
             return (
                 False,
@@ -211,9 +239,47 @@ class RouteMapper:
         if database_name not in self.database_names:
             return (False, None, 404, f"Database '{database_name}' not found")
 
+        # Check if this is a versioned database
+        is_versioned = is_versioned_database(database_name)
+
+        # Parse version from path if database is versioned
+        path_parts = path.split("/") if path else []
+        version = None
+        actual_path = path
+
+        if is_versioned and path_parts:
+            # First part should be the version for versioned databases
+            potential_version = path_parts[0]
+            available_versions = get_database_versions(database_name)
+
+            if potential_version == "latest":
+                # Resolve latest to actual version
+                version = resolve_latest_database_version(available_versions)
+                if version is None:
+                    return (False, None, 404, f"No versions found for database '{database_name}'")
+                actual_path = "/".join(path_parts[1:])
+            elif potential_version in available_versions:
+                version = potential_version
+                actual_path = "/".join(path_parts[1:])
+            elif not path:
+                # Empty path on versioned database - list versions
+                return (True, {"versions": available_versions}, 200, None)
+            else:
+                # Path provided but no valid version - error
+                return (
+                    False,
+                    None,
+                    404,
+                    f"Configuration for database '{database_name}' not found"
+                )
+        elif is_versioned and not path:
+            # Empty path on versioned database - list versions
+            available_versions = get_database_versions(database_name)
+            return (True, {"versions": available_versions}, 200, None)
+
         # Load database configuration
         try:
-            database_config = load_database_config(database_name)
+            database_config = load_database_config(database_name, version=version)
         except FileNotFoundError:
             return (
                 False,
@@ -222,19 +288,25 @@ class RouteMapper:
                 f"Configuration for database '{database_name}' not found"
             )
 
+        # Handle empty path - return list of available routes
+        if not actual_path or actual_path == "":
+            routes = database_config.get("routes", [])
+            route_list = [r.get("route", "") for r in routes if isinstance(r, dict)]
+            return (True, {"routes": route_list}, 200, None)
+
         # Find matching route in database config
-        route_config = find_database_route(path, database_config)
+        route_config = find_database_route(actual_path, database_config)
         if route_config is None:
             return (
                 False,
                 None,
                 404,
-                f"Route '{path}' not found in database '{database_name}'"
+                f"Route '{actual_path}' not found in database '{database_name}'"
             )
 
         # Extract path parameters
         route_pattern = route_config.get("route", "")
-        path_params = extract_path_parameters(path, route_pattern)
+        path_params = extract_path_parameters(actual_path, route_pattern)
 
         # Build SQL query
         sql_template = route_config.get("sql", "")
