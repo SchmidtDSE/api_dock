@@ -1,6 +1,6 @@
 # API Box
 
-API Box is a flexible API gateway that allows you to proxy requests to multiple remote APIs and databases through a single endpoint. The proxy can easily be launched as a FastAPI or Flask app, or integrated into any exisiting python based API. It uses YAML configuration files to define remote API connections, routing rules, and access controls. This makes it easy to manage multiple API integrations and provide a unified interface to your applications.
+API Box is a flexible API gateway that allows you to proxy requests to multiple remote APIs and databases through a single endpoint. The proxy can easily be launched as a FastAPI or Flask app, or integrated into any exisiting python based API. 
 
 ## Features
 
@@ -10,16 +10,14 @@ API Box is a flexible API gateway that allows you to proxy requests to multiple 
 - **YAML Configuration**: Simple, human-readable configuration files
 - **Access Control**: Define allowed/restricted routes per remote API
 - **Version Support**: Handle API versioning in URL paths
-- **Multiple Backends**: Choose between FastAPI or Flask as your web framework
-- **Click-Based CLI**: Modern command-line interface with init/start/describe commands
-- **Framework-Agnostic Core**: Standalone RouteMapper for integration with any web framework
-- **Type Safety**: Full type hints throughout the codebase
+- **Flexibility**: Quickly launch FastAPI or Flask apps, or easily integrate into any existing framework
 
 ## Quick Example
 
 Suppose we have these 3 config files (and similar ones similar to service1.yaml for service2 andand service3)
 
-```yaml toy_api_config/config.yaml
+```yaml 
+# toy_api_config/config.yaml
 name: "My API Box"
 description: "API proxy for multiple services"
 authors: ["Your Name"]
@@ -35,7 +33,8 @@ databases:
   - "db_example"
 ```
 
-```yaml toy_api_config/remotes/service1.yaml
+```yaml 
+# toy_api_config/remotes/service1.yaml
 name: service1
 description: Example showing all routing features
 url: http://api.example.com
@@ -55,7 +54,8 @@ routes:
     method: get
 ```
 
-```yaml toy_api_config/databases/db_example.yaml
+```yaml 
+# toy_api_config/databases/db_example.yaml
 name: db_example
 description: Example database with Parquet files
 authors:
@@ -90,15 +90,17 @@ routes:
 
 Then run `pixi run api-box start` a new api with following endpoints:
 
-- `/`: list remote api names and databases `{... ,"remotes":["service1", "service2", "service3", "db_example"]}`
-- `/service1`: list service1 endpoints `{... ,"remotes":["health", "users", "users/{{user_id}}/posts", "users/{{user_id}}/permissions"]}`
-- `/service1/health` returns the response from http://api.example.com/health 
+```
+- /: list remote api names and databases {... ,"remotes":["service1", "service2", "service3", "db_example"]}
+- /service1: list service1 endpoints {... ,"remotes":["health", "users", "users/{{user_id}}/posts", "users/{{user_id}}/permissions"]}
+- /service1/health returns the response from http://api.example.com/health 
 - ...
-- `service1/users/{{user_id}}/permissions returns the response from http://api.example.com/user-permissions/{{user_id}}
+- service1/users/{{user_id}}/permissions returns the response from http://api.example.com/user-permissions/{{user_id}}
 - .... similar for service 2 and 3.
-- `/db_example/users`: response from querying example_db for users
-- `/db_example/users/{{user_id}}`: response from querying example_db for user
-- `/db_example/users/{{user_id}}/permissions`: response from querying example_db for user-permissions
+- /db_example/users: response from querying example_db for users
+- /db_example/users/{{user_id}}: response from querying example_db for user
+- /db_example/users/{{user_id}}/permissions: response from querying example_db for user-permissions
+```
 
 ---
 
