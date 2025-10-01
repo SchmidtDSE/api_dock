@@ -1,6 +1,6 @@
 # API Box
 
-API Box is a flexible API gateway that allows you to proxy requests to multiple remote APIs and databases through a single endpoint. The proxy can easily be launched as a FastAPI or Flask app, or integrated into any exisiting python based API. 
+API Box is a flexible API gateway that allows you to proxy requests to multiple remote APIs and Databases through a single endpoint. The proxy can easily be launched as a FastAPI or Flask app, or integrated into any exisiting python based API. 
 
 ## Features
 
