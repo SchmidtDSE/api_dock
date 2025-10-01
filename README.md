@@ -91,15 +91,15 @@ routes:
 Then run `pixi run api-box start` a new api with following endpoints:
 
 ```
-- /: list remote api names and databases {... ,"remotes":["service1", "service2", "service3", "db_example"]}
-- /service1: list service1 endpoints {... ,"remotes":["health", "users", "users/{{user_id}}/posts", "users/{{user_id}}/permissions"]}
+- list remote api names and databases {... ,"remotes":["service1", ..., "db_example"]}: '/'
+- list service1 endpoints {... ,"remotes":["health", ..., "users/{{user_id}}/permissions"]}: '/service1'
 - /service1/health returns the response from http://api.example.com/health 
 - ...
-- service1/users/{{user_id}}/permissions returns the response from http://api.example.com/user-permissions/{{user_id}}
-- .... similar for service 2 and 3.
-- /db_example/users: response from querying example_db for users
-- /db_example/users/{{user_id}}: response from querying example_db for user
-- /db_example/users/{{user_id}}/permissions: response from querying example_db for user-permissions
+- proxy for http://api.example.com/user-permissions/{{user_id}}: 'service1/users/{{user_id}}/permissions'
+- ...
+- query example_db for users: 'db_example/users'
+- query example_db for user: '/db_example/users/{{user_id}}'
+- query example_db for user-permissions: '/db_example/users/{{user_id}}/permissions'
 ```
 
 ---
