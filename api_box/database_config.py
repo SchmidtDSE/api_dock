@@ -27,12 +27,13 @@ DATABASES_DIR: str = "databases"
 #
 # PUBLIC
 #
-def load_database_config(database_filename: str, config_dir: Optional[str] = None) -> Dict[str, Any]:
+def load_database_config(database_filename: str, config_dir: Optional[str] = None, version: Optional[str] = None) -> Dict[str, Any]:
     """Load a database configuration file.
 
     Args:
         database_filename: Name of the database config file (without .yaml extension).
         config_dir: Base config directory. If None, uses default.
+        version: Version string for versioned databases (e.g., "0.1", "1.2"). If None, loads non-versioned database.
 
     Returns:
         Dictionary containing database configuration data.
@@ -45,7 +46,16 @@ def load_database_config(database_filename: str, config_dir: Optional[str] = Non
         from api_box.config import DEFAULT_CONFIG_DIR
         config_dir = DEFAULT_CONFIG_DIR
 
-    database_config_path = os.path.join(config_dir, DATABASES_DIR, f"{database_filename}.yaml")
+    # Check if this is a versioned database
+    if version is not None or is_versioned_database(database_filename, config_dir):
+        if version is None:
+            raise FileNotFoundError(f"Database '{database_filename}' is versioned - version parameter required")
+
+        # Load versioned config
+        database_config_path = os.path.join(config_dir, DATABASES_DIR, database_filename, f"{version}.yaml")
+    else:
+        # Non-versioned database
+        database_config_path = os.path.join(config_dir, DATABASES_DIR, f"{database_filename}.yaml")
 
     return _load_yaml_file(database_config_path)
 
@@ -97,6 +107,76 @@ def get_named_query(query_name: str, database_config: Dict[str, Any]) -> Optiona
     """
     queries = database_config.get("queries", {})
     return queries.get(query_name)
+
+
+def is_versioned_database(database_name: str, config_dir: Optional[str] = None) -> bool:
+    """Check if a database has versioned configurations.
+
+    Args:
+        database_name: Name of the database.
+        config_dir: Base config directory. If None, uses default.
+
+    Returns:
+        True if database has versioned configs (is a directory), False otherwise.
+    """
+    if config_dir is None:
+        from api_box.config import DEFAULT_CONFIG_DIR
+        config_dir = DEFAULT_CONFIG_DIR
+
+    database_dir = os.path.join(config_dir, DATABASES_DIR, database_name)
+    return os.path.isdir(database_dir)
+
+
+def get_database_versions(database_name: str, config_dir: Optional[str] = None) -> List[str]:
+    """Get list of available versions for a versioned database.
+
+    Args:
+        database_name: Name of the database.
+        config_dir: Base config directory. If None, uses default.
+
+    Returns:
+        List of version strings (e.g., ["0.1", "0.2", "1.2"]).
+        Returns empty list if database is not versioned.
+    """
+    if config_dir is None:
+        from api_box.config import DEFAULT_CONFIG_DIR
+        config_dir = DEFAULT_CONFIG_DIR
+
+    if not is_versioned_database(database_name, config_dir):
+        return []
+
+    database_dir = os.path.join(config_dir, DATABASES_DIR, database_name)
+    versions = []
+
+    for filename in os.listdir(database_dir):
+        if filename.endswith('.yaml'):
+            version = filename[:-5]  # Remove .yaml extension
+            versions.append(version)
+
+    return sorted(versions)
+
+
+def resolve_latest_database_version(versions: List[str]) -> Optional[str]:
+    """Resolve 'latest' to the highest version from a list.
+
+    Args:
+        versions: List of version strings.
+
+    Returns:
+        The latest version string, or None if list is empty.
+    """
+    if not versions:
+        return None
+
+    # Try to sort as floats
+    try:
+        float_versions = [(float(v), v) for v in versions]
+        float_versions.sort(key=lambda x: x[0], reverse=True)
+        return float_versions[0][1]
+    except ValueError:
+        # Fall back to string sorting
+        sorted_versions = sorted(versions, reverse=True)
+        return sorted_versions[0]
 
 
 def find_database_route(path: str, database_config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
