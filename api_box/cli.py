@@ -178,7 +178,19 @@ def describe(config_name: Optional[str]) -> None:
 
         authors = config.get('authors', [])
         if authors:
-            click.echo(f"Authors: {', '.join(authors)}")
+            # Handle both string authors and dict authors (with name/email)
+            author_strings = []
+            for author in authors:
+                if isinstance(author, dict):
+                    name = author.get('name', 'Unknown')
+                    email = author.get('email')
+                    if email:
+                        author_strings.append(f"{name} <{email}>")
+                    else:
+                        author_strings.append(name)
+                else:
+                    author_strings.append(str(author))
+            click.echo(f"Authors: {', '.join(author_strings)}")
 
         click.echo()
 
