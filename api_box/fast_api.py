@@ -88,33 +88,42 @@ def _add_remote_routes(app: FastAPI, route_mapper: RouteMapper) -> None:
 
     @app.api_route("/{remote_name}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
     async def proxy_to_remote(remote_name: str, path: str, request: Request) -> JSONResponse:
-        """Proxy requests to remote APIs.
+        """Proxy requests to remote APIs or databases.
 
         Args:
-            remote_name: Name of the remote API.
-            path: The path to proxy to the remote API.
+            remote_name: Name of the remote API or database.
+            path: The path to proxy to the remote API or query from database.
             request: The incoming request.
 
         Returns:
-            Response from the remote API.
+            Response from the remote API or database query results.
 
         Raises:
-            HTTPException: If remote not found or route not allowed.
+            HTTPException: If remote/database not found or route not allowed.
         """
-        # Get request body if present
-        body = None
-        if request.method in ["POST", "PUT", "PATCH"]:
-            body = await request.body()
+        # Check if remote_name is a database first
+        if remote_name in route_mapper.database_names:
+            # Handle as database route
+            success, response_data, status_code, error_message = await route_mapper.map_database_route(
+                database_name=remote_name,
+                path=path
+            )
+        else:
+            # Handle as remote API route
+            # Get request body if present
+            body = None
+            if request.method in ["POST", "PUT", "PATCH"]:
+                body = await request.body()
 
-        # Use RouteMapper to handle the request
-        success, response_data, status_code, error_message = await route_mapper.map_route(
-            remote_name=remote_name,
-            path=path,
-            method=request.method,
-            headers=dict(request.headers),
-            body=body,
-            query_params=dict(request.query_params)
-        )
+            # Use RouteMapper to handle the request
+            success, response_data, status_code, error_message = await route_mapper.map_route(
+                remote_name=remote_name,
+                path=path,
+                method=request.method,
+                headers=dict(request.headers),
+                body=body,
+                query_params=dict(request.query_params)
+            )
 
         if not success:
             # Return clean JSON error response
