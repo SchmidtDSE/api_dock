@@ -1,2 +1,3 @@
 httpcore
 duckdb
+pyarrow
