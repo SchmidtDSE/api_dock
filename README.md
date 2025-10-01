@@ -1,6 +1,24 @@
 # API Box
 
-API Box is a flexible API gateway that allows you to proxy requests to multiple remote APIs and Databases through a single endpoint. The proxy can easily be launched as a FastAPI or Flask app, or integrated into any exisiting python based API. 
+API Box is a flexible API gateway that allows you to proxy requests to multiple remote APIs and Databases through a single endpoint. The proxy can easily be launched as a FastAPI or Flask app, or integrated into any existing python based API.
+
+## Table of Contents
+
+- [Features](#features)
+- [Quick Example](#quick-example)
+- [CLI](#cli)
+  - [Commands](#commands)
+  - [Examples](#examples)
+- [CONFIGURATION AND SYNTAX](#configuration-and-syntax)
+  - [Main Configuration](#main-configuration-api_box_configconfigyaml)
+  - [Remote Configurations](#remote-configurations)
+  - [SQL Database Support](#sql-database-support)
+- [Using RouteMapper in Your Own Projects](#using-routemapper-in-your-own-projects)
+  - [Basic Integration](#basic-integration)
+  - [Framework Examples](#framework-examples)
+  - [Database Integration](#database-integration)
+- [INSTALL/REQUIREMENTS](#installrequirements)
+- [License](#license)
 
 ## Features
 
@@ -14,7 +32,7 @@ API Box is a flexible API gateway that allows you to proxy requests to multiple 
 
 ## Quick Example
 
-Suppose we have these 3 config files (and similar ones similar to service1.yaml for service2 andand service3)
+Suppose we have these 3 config files (and similar ones for service2 and service3)
 
 ```yaml 
 # api_box_config/config.yaml
@@ -133,7 +151,7 @@ pixi run api-box start --backbone flask
 pixi run api-box start --host 0.0.0.0 --port 9000
 
 
-# these commans also work for alternative configurations (example: api_box_config/config_v2.yaml)
+# these commands also work for alternative configurations (example: api_box_config/config_v2.yaml)
 pixi run api-box start config_v2
 pixi run api-box describe config_v2
 ```
@@ -167,17 +185,17 @@ api_box_config
 
 ## Main Configuration (`api_box_config/config.yaml`)
 
-The main configuration files are stored in the top level of the CWD's `api_box_config/` directory. By default api-box expects there to be one called `config.yaml`, however configs with different names (such as `config_v2`) can be added and launched as shown in the CLI.Examples section.
+The main configuration files are stored in the top level of the CWD's `api_box_config/` directory. By default api-box expects there to be one called `config.yaml`, however configs with different names (such as `config_v2`) can be added and launched as shown in the CLI Examples section.
 
 ```yaml
-# api_box_config/config.py
+# api_box_config/config.yaml
 name: "My API Box"
 description: "API proxy for multiple services"
 authors: ["Your Name"]
 
 # Remote APIs to proxy
 remotes:
-  - "service1"           # add configuration in "api_box_config/remotes/service2.yaml"
+  - "service1"           # add configuration in "api_box_config/remotes/service1.yaml"
   - "service2"           # add configuration in "api_box_config/remotes/service2.yaml"
   - "versioned_service"  # add configurations in versions in "api_box_config/remotes/versioned_service/"
 
@@ -191,7 +209,7 @@ databases:
 
 ## Remote Configurations
 
-The exmple below is a remote configuration. 
+The example below is a remote configuration. 
 
 ```yaml 
 # api_box_config/remotes/service1.yaml
@@ -291,11 +309,11 @@ Database configurations are stored in `config/databases/` directory. Each databa
 ### Syntax
 
 As with the remote-apis, the routes to databases use double-curly-brackets {{}} to reference url variable placeholders.
-Additionaly for SQL there are double-square-brackets [[]].  These are used for reference other items in the database config, namely: table_names, named-queries.
+Additionally for SQL there are double-square-brackets [[]]. These are used to reference other items in the database config, namely: table_names, named-queries.
 
 #### Table References: `[[table_name]]`
 
-Use double square brackets to reference tables defined in the `tables` section. if we have
+Use double square brackets to reference tables defined in the `tables` section. If we have
 
 ```yaml
 tables:
@@ -368,8 +386,6 @@ routes:
 ---
 
 # Using RouteMapper in Your Own Projects
-
-TODO: SHOW DATABASE INTEGRATED INTO ONES OWN PROJECT
 
 The core functionality is available as a standalone `RouteMapper` class that can be integrated into any web framework:
 
@@ -449,6 +465,81 @@ def proxy_handler(remote_name, path, request):
     return your_framework.Response(data, status=status)
 ```
 
+## Database Integration
+
+The `RouteMapper` also supports SQL database queries through the `map_database_route` method:
+
+```python
+from api_box.route_mapper import RouteMapper
+import asyncio
+
+route_mapper = RouteMapper(config_path="path/to/config.yaml")
+
+# Query database (async version)
+async def query_database():
+    success, data, status, error = await route_mapper.map_database_route(
+        database_name="db_example",
+        path="users/123"
+    )
+
+    if success:
+        print(data)  # List of dictionaries from SQL query
+    else:
+        print(f"Error: {error}")
+
+# Run async query
+asyncio.run(query_database())
+```
+
+### Django Database Integration
+
+```python
+from django.http import JsonResponse
+from api_box.route_mapper import RouteMapper
+import asyncio
+
+route_mapper = RouteMapper()
+
+def database_query(request, database_name, path):
+    # Run async database query in sync context
+    success, data, status, error = asyncio.run(
+        route_mapper.map_database_route(
+            database_name=database_name,
+            path=path
+        )
+    )
+
+    if not success:
+        return JsonResponse({"error": error}, status=status)
+
+    return JsonResponse(data, safe=False, status=status)
+```
+
+### Flask Database Integration
+
+```python
+from flask import Flask, jsonify
+from api_box.route_mapper import RouteMapper
+import asyncio
+
+app = Flask(__name__)
+route_mapper = RouteMapper()
+
+@app.route("/<database_name>/<path:path>")
+def database_proxy(database_name, path):
+    success, data, status, error = asyncio.run(
+        route_mapper.map_database_route(
+            database_name=database_name,
+            path=path
+        )
+    )
+
+    if not success:
+        return jsonify({"error": error}), status
+
+    return jsonify(data), status
+```
+
 ---
 
 # INSTALL/REQUIREMENTS
@@ -456,7 +547,7 @@ def proxy_handler(remote_name, path, request):
 Requirements are managed through a [Pixi](https://pixi.sh/latest) "project" (similar to a conda environment). After pixi is installed use `pixi run <cmd>` to ensure the correct project is being used. For example,
 
 ```bash
-# lauch jupyter
+# launch jupyter
 pixi run jupyter lab .
 
 # run a script
