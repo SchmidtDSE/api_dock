@@ -9,10 +9,13 @@ API Box is a flexible API gateway that allows you to proxy requests to multiple 
 ## Features
 
 - **Multi-API Proxying**: Route requests to different remote APIs based on configuration
+- **SQL Database Support**: Query Parquet files and databases using DuckDB via REST endpoints
+- **Cloud Storage Support**: Native support for S3, GCS, HTTPS, and local file paths
 - **YAML Configuration**: Simple, human-readable configuration files
 - **Access Control**: Define allowed/restricted routes per remote API
 - **Version Support**: Handle API versioning in URL paths
 - **Multiple Backends**: Choose between FastAPI or Flask as your web framework
+- **Click-Based CLI**: Modern command-line interface with init/start/describe commands
 - **Framework-Agnostic Core**: Standalone RouteMapper for integration with any web framework
 - **Type Safety**: Full type hints throughout the codebase
 
@@ -55,23 +58,40 @@ pixi add --pypi $(cat pypi_package_names.txt)
 ### Basic Usage
 
 ```bash
-# Start API Box with default configuration (FastAPI)
+# Initialize local configuration directory
+pixi run api-box init
+
+# List available configurations
 pixi run api-box
 
-# Start with Flask backend
-pixi run api-box --backbone flask
-# or shorthand:
-pixi run api-box -b flask
+# Start API Box with default configuration (FastAPI)
+pixi run api-box start
 
-# Start with custom configuration file
-pixi run api-box --config /path/to/config.yaml --backbone fastapi
+# Start with custom configuration
+pixi run api-box start my-config
+
+# Describe configuration (shows expanded SQL queries)
+pixi run api-box describe
+pixi run api-box describe my-config
+
+# Start with Flask backend
+pixi run api-box start --backbone flask
 
 # Start on custom host/port
-pixi run api-box --host 0.0.0.0 --port 9000
+pixi run api-box start --host 0.0.0.0 --port 9000
 
 # Run with debug logging
-pixi run api-box --log-level debug
+pixi run api-box start --log-level debug
 ```
+
+### CLI Commands
+
+API Box provides a modern Click-based CLI:
+
+- **api-box** (default): List all available configurations
+- **api-box init [--force]**: Initialize `api_box_config/` directory with default configs
+- **api-box start [config_name]**: Start API Box server with optional config name
+- **api-box describe [config_name]**: Display formatted configuration with expanded SQL queries
 
 ### Backbone Options
 
@@ -82,15 +102,30 @@ API Box supports multiple web framework backends:
 
 ## Configuration
 
+### Configuration Discovery
+
+API Box searches for configuration files in this order:
+1. `api_box_config/` - Local project configurations
+2. `config/` - Project configurations
+3. Package default configurations
+
+Run `api-box init` to create `api_box_config/` with default configurations.
+
 ### Main Configuration (`config/config.yaml`)
 
 ```yaml
 name: "My API Box"
 description: "API proxy for multiple services"
 authors: ["Your Name"]
+
+# Remote APIs to proxy
 remotes:
   - "service1"
   - "service2"
+
+# SQL databases to query
+databases:
+  - "analytics_db"
 ```
 
 ### Remote Configuration (`config/remotes/service1.yaml`)
@@ -215,7 +250,7 @@ API Box now supports SQL queries against Parquet files and other data sources us
 ### Database Configuration
 
 Database configurations are stored in `config/databases/` directory. Each database defines:
-- **tables**: Mapping of table names to file paths (e.g., S3, local Parquet files)
+- **tables**: Mapping of table names to file paths (supports S3, GCS, HTTPS, local paths)
 - **queries**: Named SQL queries for reuse
 - **routes**: REST endpoints mapped to SQL queries
 
@@ -227,10 +262,12 @@ description: Example database with Parquet files
 authors:
   - API Team
 
-# Table definitions
+# Table definitions - supports multiple storage backends
 tables:
-  users: s3://your-bucket/users.parquet
-  permissions: s3://your-bucket/user_permissions.parquet
+  users: s3://your-bucket/users.parquet              # S3
+  permissions: gs://your-bucket/permissions.parquet  # Google Cloud Storage
+  posts: https://storage.googleapis.com/bucket/posts.parquet  # HTTPS
+  local_data: tables/local_data.parquet              # Local filesystem
 
 # Named queries (optional)
 queries:
@@ -251,6 +288,17 @@ routes:
   - route: users/{{user_id}}/permissions
     sql: "[[get_permissions]]"
 ```
+
+### Cloud Storage Support
+
+API Box supports querying data from multiple storage backends through DuckDB:
+
+- **S3**: `s3://bucket/path/to/file.parquet`
+- **Google Cloud Storage**: `gs://bucket/path/to/file.parquet`
+- **HTTPS**: `https://storage.googleapis.com/bucket/file.parquet`
+- **Local Files**: `tables/data.parquet` or `/absolute/path/to/file.parquet`
+
+All table paths are passed directly to DuckDB, which handles authentication and data access natively.
 
 ### SQL Syntax
 
@@ -289,17 +337,19 @@ routes:
     sql: "[[get_permissions]]"
 ```
 
-### Main Configuration Update
+### Viewing Configuration
 
-Add databases to your main `config.yaml`:
+Use the `describe` command to view your configuration with expanded SQL queries:
 
-```yaml
-name: my-api-box
-description: API Box with SQL support
-databases:
-  - db_example
-remotes:
-  - service1
+```bash
+pixi run api-box describe
+
+# Output shows:
+# - Basic metadata (name, description, authors)
+# - List of remotes
+# - List of databases with:
+#   - Table definitions (name → file path)
+#   - Routes with expanded SQL (e.g., [[users]] → 's3://bucket/users.parquet' AS users)
 ```
 
 ## API Usage
@@ -416,13 +466,19 @@ def proxy_handler(remote_name, path, request):
 ```
 api_box/
 ├── api_box/
-│   ├── __init__.py      # Module exports
-│   ├── fast_api.py      # FastAPI application
-│   ├── flask_api.py     # Flask application
-│   ├── route_mapper.py  # Standalone route mapping core
-│   ├── config.py        # Configuration management
-│   └── cli.py           # Command-line interface
-├── config/              # Configuration files
+│   ├── __init__.py           # Module exports
+│   ├── cli.py                # Click-based command-line interface
+│   ├── config_discovery.py   # Configuration file discovery
+│   ├── config.py             # Configuration management
+│   ├── database_config.py    # Database configuration loading
+│   ├── sql_builder.py        # SQL query builder with substitutions
+│   ├── fast_api.py           # FastAPI application
+│   ├── flask_api.py          # Flask application
+│   └── route_mapper.py       # Standalone route mapping core
+├── config/                   # Default configuration files
+│   ├── config.yaml           # Main configuration
+│   ├── remotes/              # Remote API configurations
+│   └── databases/            # Database configurations
 ├── README.md
 └── pyproject.toml
 ```
