@@ -88,19 +88,18 @@ routes:
     sql: "[[get_permissions]]"
 ```
 
-Then run `pixi run api-box start` a new api with following endpoints:
+Then just run `pixi run api-box start` to launch a new api with following endpoints:
 
-```
-- list remote api names and databases {... ,"remotes":["service1", ..., "db_example"]}: '/'
-- list service1 endpoints {... ,"remotes":["health", ..., "users/{{user_id}}/permissions"]}: '/service1'
-- /service1/health returns the response from http://api.example.com/health 
-- ...
-- proxy for http://api.example.com/user-permissions/{{user_id}}: 'service1/users/{{user_id}}/permissions'
-- ...
-- query example_db for users: 'db_example/users'
-- query example_db for user: '/db_example/users/{{user_id}}'
-- query example_db for user-permissions: '/db_example/users/{{user_id}}/permissions'
-```
+- list remote api names and databases: `/`
+- list of available db_example queries: `/db_example/users`
+  - query example_db for users: `/db_example/users`
+  - query example_db for user: `/db_example/users/{{user_id}}`
+  - query example_db for user-permissions: `/db_example/users/{{user_id}}/permissions`
+- list service1 endpoints: `/service1` 
+  - proxy for http://api.example.com/health: `/service1/health`
+  - proxy for http://api.example.com/user-permissions/{{user_id}}: `/service1/users/{{user_id}}/permissions'
+- list service2|3 endpoints: `/service2|3` 
+  - ...
 
 ---
 
