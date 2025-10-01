@@ -17,7 +17,7 @@ API Box is a flexible API gateway that allows you to proxy requests to multiple 
 Suppose we have these 3 config files (and similar ones similar to service1.yaml for service2 andand service3)
 
 ```yaml 
-# toy_api_config/config.yaml
+# api_box_config/config.yaml
 name: "My API Box"
 description: "API proxy for multiple services"
 authors: ["Your Name"]
@@ -34,7 +34,7 @@ databases:
 ```
 
 ```yaml 
-# toy_api_config/remotes/service1.yaml
+# api_box_config/remotes/service1.yaml
 name: service1
 description: Example showing all routing features
 url: http://api.example.com
@@ -55,7 +55,7 @@ routes:
 ```
 
 ```yaml 
-# toy_api_config/databases/db_example.yaml
+# api_box_config/databases/db_example.yaml
 name: db_example
 description: Example database with Parquet files
 authors:
@@ -105,35 +105,7 @@ Then just run `pixi run api-box start` to launch a new api with following endpoi
 
 # CLI
 
-
-```bash
-# Initialize local configuration directory
-pixi run api-box init
-
-# List available configurations
-pixi run api-box
-
-# Start API Box with default configuration (FastAPI)
-pixi run api-box start
-
-# Start with custom configuration
-pixi run api-box start my-config
-
-# Describe configuration (shows expanded SQL queries)
-pixi run api-box describe
-pixi run api-box describe my-config
-
-# Start with Flask backend
-pixi run api-box start --backbone flask
-
-# Start on custom host/port
-pixi run api-box start --host 0.0.0.0 --port 9000
-
-# Run with debug logging
-pixi run api-box start --log-level debug
-```
-
-## CLI Commands
+## Commands
 
 API Box provides a modern Click-based CLI:
 
@@ -142,59 +114,107 @@ API Box provides a modern Click-based CLI:
 - **api-box start [config_name]**: Start API Box server with optional config name
 - **api-box describe [config_name]**: Display formatted configuration with expanded SQL queries
 
-## Backbone Options
 
-API Box supports multiple web framework backends:
+## Examples
 
-- **fastapi** (default): High-performance async framework with automatic OpenAPI docs
-- **flask**: Traditional synchronous framework, widely compatible
+```bash
+# Initialize local configuration directory
+pixi run api-box init
+
+# List available configurations, and available commands
+pixi run api-box
+
+# Start API server
+# - default configuration (api_box_config/config.yaml) with FastAPI
+pixi run api-box start
+# - default configuration with Flask (backbone options: fastapi (default) or flask)
+pixi run api-box start --backbone flask
+# - specify with host and/or port
+pixi run api-box start --host 0.0.0.0 --port 9000
+
+
+# these commans also work for alternative configurations (example: api_box_config/config_v2.yaml)
+pixi run api-box start config_v2
+pixi run api-box describe config_v2
+```
 
 ---
 
-# CONFIGURATION
+# CONFIGURATION AND SYNTAX
 
-## Main Configuration (`config/config.yaml`)
+Assume our file structure is:
+
+```bash
+api_box_config
+├── config.yaml
+├── config_v2.yaml
+├── databases
+│    ├── analytics_db.yaml
+│    └── versioned_db
+│        ├── 0.1.yaml
+│        ├── 0.5.yaml
+│        └── 1.1.yaml
+└── remotes
+    ├── service1.yaml
+    ├── service2.yaml
+    └── versioned_service
+        ├── 0.1.yaml
+        ├── 0.2.yaml
+        └── 0.3.yaml
+```
+
+---
+
+## Main Configuration (`api_box_config/config.yaml`)
+
+The main configuration files are stored in the top level of the CWD's `api_box_config/` directory. By default api-box expects there to be one called `config.yaml`, however configs with different names (such as `config_v2`) can be added and launched as shown in the CLI.Examples section.
 
 ```yaml
+# api_box_config/config.py
 name: "My API Box"
 description: "API proxy for multiple services"
 authors: ["Your Name"]
 
 # Remote APIs to proxy
 remotes:
-  - "service1"
-  - "service2"
+  - "service1"           # add configuration in "api_box_config/remotes/service2.yaml"
+  - "service2"           # add configuration in "api_box_config/remotes/service2.yaml"
+  - "versioned_service"  # add configurations in versions in "api_box_config/remotes/versioned_service/"
 
 # SQL databases to query
 databases:
-  - "analytics_db"
+  - "analytics_db"       # adds database configuration in  "api_box_config/databases/analytics_db.yaml"
+  - "versioned_db"       # adds database configurations in  "api_box_config/databases/versioned_db/"
 ```
 
-## Remote Configuration (`config/remotes/service1.yaml`)
+---
 
-```yaml
-name: "service1"
-url: "http://localhost:8001"
-description: "First remote service"
+## Remote Configurations
+
+The exmple below is a remote configuration. 
+
+```yaml 
+# api_box_config/remotes/service1.yaml
+name: service1                 # this is the slug that goes in the url (ie: /service1/users)
+url: http://api.example.com    # the base-url of the api being proxied
+description: This is an api    # included in response for /service1 route
+
+# Here is where we define the routing
+routes:
+  # routes with identical signatures
+  - health                                  # GET  http://api.example.com/health
+  - route: users                            # GET  http://api.example.com/users (using explicit method)
+    method: get
+  - users/{{user_id}}                       # GET  http://api.example.com/users/{{user_id}}
+  - route: users/{{user_id}}/posts          # POST http://api.example.com/users/{{user_id}}/posts
+    method: post
+  # route with a different signature
+  - route: users/{{user_id}}/permissions    # GET  http://api.example.com/user-permissions/{{user_id}}
+    remote_route: user-permissions/{{user_id}}
+    method: get
 ```
 
-## Routing Syntax
-
-API Box uses a unified routing configuration that supports both simple string routes and complex dictionary-based routes with custom mappings and HTTP methods.
-
-## Bracket Notation
-
-API Box uses two types of double-bracket notation with distinct purposes:
-
-- **`{{variable}}`** - Route URL variables (path parameters in REST endpoints)
-  - Example: `users/{{user_id}}` matches `/users/123`
-  - Used in route definitions and SQL WHERE clauses
-
-- **`[[reference]]`** - Configuration value references (table names, named queries)
-  - Example: `[[users]]` expands to table file path
-  - Used only in SQL queries to reference tables/queries from config
-
-## Route Patterns
+### Variable Placeholders
 
 Routes use double curly braces `{{}}` for variable placeholders:
 
@@ -203,11 +223,7 @@ Routes use double curly braces `{{}}` for variable placeholders:
 - `users/{{user_id}}/profile` - Matches "users/123/profile"
 - `{{}}` - Anonymous variable (matches any single path segment)
 
-## Unified Routes Structure
-
-The `routes` section in remote configuration files supports two formats:
-
-### 1. String Routes (Simple GET Routes)
+### String Routes (Simple GET Routes)
 
 ```yaml
 routes:
@@ -217,10 +233,14 @@ routes:
   - posts/{{post_id}}              # GET /posts/456
 ```
 
-### 2. Dictionary Routes (Custom Methods and Mappings)
+### Dictionary Routes (Custom Methods and Mappings)
 
 ```yaml
 routes:
+  # A simple GET (note this is the same as passing the string 'users/{{user_id}}')
+  - route: users/{{user_id}}
+    method: get  
+
   # Different HTTP method
   - route: users/{{user_id}}
     method: post                   # POST /users/123
@@ -231,86 +251,85 @@ routes:
     method: get                    # Maps local route to different remote endpoint
 
   # Complex mapping with multiple variables
-  - route: search/{{category}}/{{term}}
-    remote_route: api/v2/search/{{term}}/in/{{category}}
+  - route: search/{{category}}/{{term}}/after/{{date}}
+    remote_route: api/v2/search/{{term}}/in/{{category}}?after={{date}}
     method: get
 ```
 
-### 3. Mixed Configuration Example
-
-```yaml
-name: my_api_remote
-url: http://api.example.com
-routes:
-  - users                                    # Simple GET route
-  - users/{{user_id}}                       # Simple GET route with variable
-  - route: users/{{user_id}}/posts         # Custom method
-    method: post
-  - route: users/{{user_id}}/permissions   # Custom mapping
-    remote_route: user-perms/{{user_id}}
-    method: get
-```
-
-## Variable Naming
-
-- For simple routes, variable names can be descriptive (`{{user_id}}`) or anonymous (`{{}}`)
-- For custom mappings, variable names **must match** between `route` and `remote_route`
-- Variables are case-sensitive and must be consistent
-
-## Route Restrictions
+### Route Restrictions
 
 You can restrict access to specific routes using the `restricted` section:
 
 ```yaml
+name: restricted_config
+
+...
+
+routes:
+  ...
+
 restricted:
-  - admin                             # Block all admin routes
+  - admin                            # Block all admin routes
   - users/{{user_id}}/private        # Block private user data
   - system/{{system_id}}/config      # Block system configuration
 ```
 
-## Complete Remote Configuration Example
-
-```yaml
-name: comprehensive_remote
-description: Example showing all routing features
-url: http://api.example.com
-
-# Unified routes (mix of strings and dicts)
-routes:
-  - health                                    # GET /health
-  - users                                     # GET /users
-  - users/{{user_id}}                        # GET /users/123
-  - users/{{user_id}}/profile               # GET /users/123/profile
-  - route: users/{{user_id}}/posts          # POST /users/123/posts
-    method: post
-  - route: users/{{user_id}}/permissions    # Custom mapping
-    remote_route: user-permissions/{{user_id}}
-    method: get
-  - route: search/{{query}}                  # Different remote structure
-    remote_route: api/v2/search?q={{query}}
-    method: get
-
-# Routes that are explicitly blocked
-restricted:
-  - admin
-  - users/{{user_id}}/private
-  - system/{{system_id}}/delete
-```
-
 ---
 
-# SQL Database Support
+## SQL Database Support
 
-API Box now supports SQL queries against Parquet files and other data sources using DuckDB. Define databases in your configuration and query them through REST endpoints.
+API Box can also be used to query Databases. For now only parquet support is working but we will be adding other Databases in the future.
 
-## Database Configuration
+
+### Database Configuration
 
 Database configurations are stored in `config/databases/` directory. Each database defines:
 - **tables**: Mapping of table names to file paths (supports S3, GCS, HTTPS, local paths)
 - **queries**: Named SQL queries for reuse
 - **routes**: REST endpoints mapped to SQL queries
 
-## Database Configuration Example (`databases/db_example.yaml`)
+### Syntax
+
+As with the remote-apis, the routes to databases use double-curly-brackets {{}} to reference url variable placeholders.
+Additionaly for SQL there are double-square-brackets [[]].  These are used for reference other items in the database config, namely: table_names, named-queries.
+
+#### Table References: `[[table_name]]`
+
+Use double square brackets to reference tables defined in the `tables` section. if we have
+
+```yaml
+tables:
+  users: s3://your-bucket/users.parquet
+```
+
+then `SELECT [[users]].* FROM [[users]]` automatically expands to:
+
+```sql
+SELECT users.* FROM 's3://your-bucket/users.parquet' AS users
+```
+
+#### Named Queries: `[[query_name]]`
+
+Similarly, you can reference named queries from the `queries` section with [[]]. This is one way to keep the routes clean even with complicated sql queries.
+
+
+```yaml
+queries:
+  get_user_permissions: |
+    SELECT [[users]].user_id, [[users]].name, [[user_permissions]].permission_name, [[user_permissions]].granted_date
+    FROM [[users]]
+    JOIN [[user_permissions]] ON [[users]].user_id = [[user_permissions]].user_id
+    WHERE [[users]].user_id = {{user_id}}
+
+routes:
+  - route: users/{{user_id}}/permissions
+    sql: "[[get_permissions]]"
+```
+
+
+#### EXAMPLE
+
+Here's a complete example
 
 ```yaml
 name: db_example
@@ -320,10 +339,10 @@ authors:
 
 # Table definitions - supports multiple storage backends
 tables:
-  users: s3://your-bucket/users.parquet              # S3
-  permissions: gs://your-bucket/permissions.parquet  # Google Cloud Storage
-  posts: https://storage.googleapis.com/bucket/posts.parquet  # HTTPS
-  local_data: tables/local_data.parquet              # Local filesystem
+  users: s3://your-bucket/users.parquet                # S3
+  permissions: gs://your-bucket/permissions.parquet    # Google Cloud Storage
+  posts: https://store-files.com/bucket/posts.parquet  # HTTPS
+  local_data: tables/local_data.parquet                # Local filesystem
 
 # Named queries (optional)
 queries:
@@ -345,43 +364,6 @@ routes:
     sql: "[[get_permissions]]"
 ```
 
-
-## SQL Syntax
-
-### Table References: `[[table_name]]`
-
-Use double square brackets to reference tables defined in the `tables` section:
-
-```sql
-SELECT [[users]].* FROM [[users]]
-```
-
-This automatically expands to:
-
-```sql
-SELECT users.* FROM 's3://your-bucket/users.parquet' AS users
-```
-
-### Path Parameters: `{{param_name}}`
-
-Use double curly braces for route parameters:
-
-```yaml
-route: users/{{user_id}}
-sql: SELECT [[users]].* FROM [[users]] WHERE user_id = {{user_id}}
-```
-
-When accessing `/db_example/users/123`, `{{user_id}}` is replaced with `'123'`.
-
-### Named Queries: `[[query_name]]`
-
-Reference named queries from the `queries` section:
-
-```yaml
-routes:
-  - route: users/{{user_id}}/permissions
-    sql: "[[get_permissions]]"
-```
 
 ---
 
