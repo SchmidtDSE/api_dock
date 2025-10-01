@@ -103,20 +103,27 @@ def _substitute_table_references(sql: str, database_config: Dict[str, Any]) -> s
     """
     # Find all [[table_name]] references
     table_pattern = r'\[\[([^\]]+)\]\]'
-    matches = re.findall(table_pattern, sql)
 
-    result_sql = sql
-    for table_name in matches:
+    def replace_table_reference(match):
+        table_name = match.group(1)
         table_path = get_table_definition(table_name, database_config)
 
         if table_path is None:
             raise ValueError(f"Table '{table_name}' not found in database configuration")
 
-        # Replace [[table_name]] with quoted file path and alias
-        # e.g., [[users]] -> 's3://bucket/users.parquet' AS users
-        table_reference = f"'{table_path}' AS {table_name}"
-        result_sql = result_sql.replace(f"[[{table_name}]]", table_reference)
+        # Check context: if preceded by FROM or JOIN, use full reference
+        # Otherwise, just use the table name (alias)
+        start_pos = match.start()
+        context_before = sql[max(0, start_pos-20):start_pos].upper()
 
+        if 'FROM' in context_before or 'JOIN' in context_before:
+            # Full reference for FROM/JOIN clauses
+            return f"'{table_path}' AS {table_name}"
+        else:
+            # Just the table name (alias) for other contexts like SELECT
+            return table_name
+
+    result_sql = re.sub(table_pattern, replace_table_reference, sql)
     return result_sql
 
 
