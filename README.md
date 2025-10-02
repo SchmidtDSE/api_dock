@@ -156,6 +156,8 @@ pixi run api-box start config_v2
 pixi run api-box describe config_v2
 ```
 
+**For more details**, see the [Configuration Wiki](https://github.com/yourusername/api_box/wiki/Configuration).
+
 ---
 
 # CONFIGURATION AND SYNTAX
@@ -292,6 +294,8 @@ restricted:
   - system/{{system_id}}/config      # Block system configuration
 ```
 
+**For more details**, see the [Routing and Restrictions Wiki](https://github.com/yourusername/api_box/wiki/Routing-and-Restrictions).
+
 ---
 
 ## SQL Database Support
@@ -382,6 +386,7 @@ routes:
     sql: "[[get_permissions]]"
 ```
 
+**For more details**, see the [SQL Database Support Wiki](https://github.com/yourusername/api_box/wiki/SQL-Database-Support).
 
 ---
 
