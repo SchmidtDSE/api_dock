@@ -1,6 +1,6 @@
 """
 
-Database Configuration Module for API Base
+Database Configuration Module for API Dock
 
 Handles loading and parsing of database configuration files for SQL-based routes.
 
@@ -43,7 +43,7 @@ def load_database_config(database_filename: str, config_dir: Optional[str] = Non
         yaml.YAMLError: If config file is invalid YAML.
     """
     if config_dir is None:
-        from api_base.config import DEFAULT_CONFIG_DIR
+        from api_dock.config import DEFAULT_CONFIG_DIR
         config_dir = DEFAULT_CONFIG_DIR
 
     # Check if this is a versioned database
@@ -120,7 +120,7 @@ def is_versioned_database(database_name: str, config_dir: Optional[str] = None) 
         True if database has versioned configs (is a directory), False otherwise.
     """
     if config_dir is None:
-        from api_base.config import DEFAULT_CONFIG_DIR
+        from api_dock.config import DEFAULT_CONFIG_DIR
         config_dir = DEFAULT_CONFIG_DIR
 
     database_dir = os.path.join(config_dir, DATABASES_DIR, database_name)
@@ -139,7 +139,7 @@ def get_database_versions(database_name: str, config_dir: Optional[str] = None) 
         Returns empty list if database is not versioned.
     """
     if config_dir is None:
-        from api_base.config import DEFAULT_CONFIG_DIR
+        from api_dock.config import DEFAULT_CONFIG_DIR
         config_dir = DEFAULT_CONFIG_DIR
 
     if not is_versioned_database(database_name, config_dir):

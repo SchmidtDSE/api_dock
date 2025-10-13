@@ -3,7 +3,7 @@ requires = ["setuptools", "build"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "api_base"
+name = "api_dock"
 version = "0.0.1"
 description = "A flexible API gateway that allows you to proxy requests to multiple remote APIs and Databases"
 readme = "README.md"
@@ -37,11 +37,11 @@ dependencies = [
 ]
 
 [project.scripts]
-api-base = "api_base.cli:main"
+api-dock = "api_dock.cli:main"
 
 [tool.setuptools]
 packages = [
-	"api_base",
+	"api_dock",
 ]
 
 [tool.pixi.project]
@@ -49,7 +49,7 @@ channels = ["conda-forge"]
 platforms = ["linux-64", "osx-64", "osx-arm64"]
 
 [tool.pixi.pypi-dependencies]
-api_base = { path = ".", editable = true }
+api_dock = { path = ".", editable = true }
 
 [tool.pixi.dependencies]
 pycodestyle = ">=2.14.0,<3"

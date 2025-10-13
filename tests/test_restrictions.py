@@ -11,10 +11,10 @@ License: BSD 3-Clause
 import sys
 from pathlib import Path
 
-# Add the api_base package to the path for testing
+# Add the api_dock package to the path for testing
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from api_base.config import is_route_allowed, load_main_config
+from api_dock.config import is_route_allowed, load_main_config
 
 #
 # CONSTANTS
@@ -81,7 +81,7 @@ def test_route_restrictions():
 def main():
     """Run all tests."""
     print("=" * 60)
-    print("API Base Route Restrictions Test")
+    print("API Dock Route Restrictions Test")
     print("=" * 60)
 
     success = test_route_restrictions()

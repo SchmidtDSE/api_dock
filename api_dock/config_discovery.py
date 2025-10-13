@@ -1,6 +1,6 @@
 """
 
-Configuration Discovery Module for API Base
+Configuration Discovery Module for API Dock
 
 Handles discovery and initialization of configuration files.
 
@@ -20,7 +20,7 @@ from typing import Optional
 #
 # CONSTANTS
 #
-LOCAL_CONFIG_DIR: str = "api_base_config"
+LOCAL_CONFIG_DIR: str = "api_dock_config"
 DEFAULT_CONFIG_NAME: str = "config"
 
 
@@ -31,9 +31,9 @@ def find_config(config_name: Optional[str] = None) -> Optional[str]:
     """Find configuration file by name.
 
     Search order:
-    1. api_base_config/<config_name>.yaml
+    1. api_dock_config/<config_name>.yaml
     2. config/<config_name>.yaml
-    3. api_base/config/<config_name>.yaml (package default)
+    3. api_dock/config/<config_name>.yaml (package default)
 
     Args:
         config_name: Config name without .yaml extension (default: "config").
@@ -61,7 +61,7 @@ def find_config(config_name: Optional[str] = None) -> Optional[str]:
     # Check package config directory
     try:
         import importlib.resources as pkg_resources
-        package_config = Path(pkg_resources.files("api_base") / "config" / f"{config_name}.yaml")
+        package_config = Path(pkg_resources.files("api_dock") / "config" / f"{config_name}.yaml")
         if package_config.exists():
             return str(package_config)
     except Exception:
@@ -74,10 +74,10 @@ def init_config() -> bool:
     """Initialize local configuration directory.
 
     This function:
-    1. Creates api_base_config/ directory
-    2. Creates api_base_config/remotes/ subdirectory
-    3. Creates api_base_config/databases/ subdirectory
-    4. Copies package default config files to api_base_config/
+    1. Creates api_dock_config/ directory
+    2. Creates api_dock_config/remotes/ subdirectory
+    3. Creates api_dock_config/databases/ subdirectory
+    4. Copies package default config files to api_dock_config/
 
     Returns:
         True if successful, False on error.
@@ -137,7 +137,7 @@ def _get_package_config_dir() -> Optional[Path]:
     """
     try:
         import importlib.resources as pkg_resources
-        config_dir = Path(pkg_resources.files("api_base") / "config")
+        config_dir = Path(pkg_resources.files("api_dock") / "config")
         return config_dir if config_dir.exists() else None
     except Exception:
         return None

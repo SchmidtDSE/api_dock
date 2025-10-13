@@ -5,9 +5,9 @@ Test the updated config syntax
 License: BSD 3-Clause
 """
 import sys
-sys.path.insert(0, '/workspace/api_base')
+sys.path.insert(0, '/workspace/api_dock')
 
-from api_base.config import _route_matches_pattern
+from api_dock.config import _route_matches_pattern
 
 def test_updated_syntax():
     """Test the updated route pattern matching with named variables."""

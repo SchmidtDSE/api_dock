@@ -1,6 +1,6 @@
 """
 
-Main FastAPI Application for API Base
+Main FastAPI Application for API Dock
 
 Core FastAPI application that handles routing to remote APIs and serves config data.
 
@@ -15,7 +15,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from typing import Any, Dict, Optional
 
-from api_base.route_mapper import RouteMapper
+from api_dock.route_mapper import RouteMapper
 
 
 #
@@ -42,7 +42,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     metadata = route_mapper.get_config_metadata()
 
     app = FastAPI(
-        title=metadata.get("name", "API Base"),
+        title=metadata.get("name", "API Dock"),
         description=metadata.get("description", "API wrapper using configuration files"),
         version="0.1.0"
     )

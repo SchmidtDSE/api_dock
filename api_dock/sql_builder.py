@@ -1,6 +1,6 @@
 """
 
-SQL Query Builder Module for API Base
+SQL Query Builder Module for API Dock
 
 Builds SQL queries with table and parameter substitution for database routes.
 
@@ -14,7 +14,7 @@ License: BSD 3-Clause
 import re
 from typing import Any, Dict, Optional
 
-from api_base.database_config import get_named_query, get_table_definition
+from api_dock.database_config import get_named_query, get_table_definition
 
 
 #
