@@ -1,6 +1,6 @@
 """
 
-Flask Application for API Box
+Flask Application for API Base
 
 Flask-based application that handles routing to remote APIs and serves config data.
 
@@ -14,7 +14,7 @@ License: BSD 3-Clause
 from flask import Flask, jsonify, request
 from typing import Any, Dict, Optional
 
-from api_box.route_mapper import RouteMapper
+from api_base.route_mapper import RouteMapper
 
 
 #

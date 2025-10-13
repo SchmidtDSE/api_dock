@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-Test script for API Box root endpoint
+Test script for API Base root endpoint
 
 License: BSD 3-Clause
 """
 import sys
-sys.path.insert(0, '/workspace/api_box')
+sys.path.insert(0, '/workspace/api_base')
 
-from api_box.route_mapper import RouteMapper
+from api_base.route_mapper import RouteMapper
 
-def test_api_box_metadata():
+def test_api_base_metadata():
     """Test the enhanced metadata returned by the root endpoint."""
-    print("Testing API Box Enhanced Metadata")
+    print("Testing API Base Enhanced Metadata")
     print("=" * 50)
 
-    # Test with the main api_box config
-    print("\n1. Main API Box Config:")
+    # Test with the main api_base config
+    print("\n1. Main API Base Config:")
     print("-" * 30)
-    route_mapper = RouteMapper("/workspace/api_box/config/config.yaml")
+    route_mapper = RouteMapper("/workspace/api_base/config/config.yaml")
     metadata = route_mapper.get_config_metadata()
 
     for key, value in metadata.items():
@@ -26,7 +26,7 @@ def test_api_box_metadata():
     # Test with the test project config
     print("\n2. Test Project Config:")
     print("-" * 30)
-    route_mapper_test = RouteMapper("/workspace/api_box_test_project/api_box_config/config.yaml")
+    route_mapper_test = RouteMapper("/workspace/api_base_test_project/api_base_config/config.yaml")
     metadata_test = route_mapper_test.get_config_metadata()
 
     for key, value in metadata_test.items():
@@ -41,4 +41,4 @@ def test_api_box_metadata():
     print("- remotes: List of remote API names")
 
 if __name__ == "__main__":
-    test_api_box_metadata()
+    test_api_base_metadata()

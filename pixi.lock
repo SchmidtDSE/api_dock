@@ -641,7 +641,7 @@ packages:
   size: 138159
   timestamp: 1758634638734
 - pypi: ./
-  name: api-box
+  name: api-base
   version: 0.0.1
   sha256: b1828a39fe9d7aebc26bfdd501fa6eef9479f696c5857026e53b6cf3392179d4
   requires_dist:

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Test the API Box fixes
+Test the API Base fixes
 
 License: BSD 3-Clause
 """
 import sys
-sys.path.insert(0, '/workspace/api_box')
+sys.path.insert(0, '/workspace/api_base')
 
-from api_box.config import _route_matches_pattern
+from api_base.config import _route_matches_pattern
 
 def test_pattern_matching():
     """Test the fixed pattern matching function."""

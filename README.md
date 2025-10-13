@@ -1,6 +1,6 @@
-# API Box
+# API Base
 
-API Box is a flexible API gateway that allows you to proxy requests to multiple remote APIs and Databases through a single endpoint. The proxy can easily be launched as a FastAPI or Flask app, or integrated into any existing python based API.
+API Base (API(s) + (data)Base(s)/base-(for)-API(s)) a flexible API gateway that allows you to proxy requests to multiple remote APIs and Databases through a single endpoint. The proxy can easily be launched as a FastAPI or Flask app, or integrated into any existing python based API.
 
 ## Table of Contents
 
@@ -10,7 +10,7 @@ API Box is a flexible API gateway that allows you to proxy requests to multiple 
   - [Commands](#commands)
   - [Examples](#examples)
 - [CONFIGURATION AND SYNTAX](#configuration-and-syntax)
-  - [Main Configuration](#main-configuration-api_box_configconfigyaml)
+  - [Main Configuration](#main-configuration-api_base_configconfigyaml)
   - [Remote Configurations](#remote-configurations)
   - [SQL Database Support](#sql-database-support)
 - [Using RouteMapper in Your Own Projects](#using-routemapper-in-your-own-projects)
@@ -35,8 +35,8 @@ API Box is a flexible API gateway that allows you to proxy requests to multiple 
 Suppose we have these 3 config files (and similar ones for service2 and service3)
 
 ```yaml 
-# api_box_config/config.yaml
-name: "My API Box"
+# api_base_config/config.yaml
+name: "My API Base"
 description: "API proxy for multiple services"
 authors: ["Your Name"]
 
@@ -52,7 +52,7 @@ databases:
 ```
 
 ```yaml 
-# api_box_config/remotes/service1.yaml
+# api_base_config/remotes/service1.yaml
 name: service1
 description: Example showing all routing features
 url: http://api.example.com
@@ -73,7 +73,7 @@ routes:
 ```
 
 ```yaml 
-# api_box_config/databases/db_example.yaml
+# api_base_config/databases/db_example.yaml
 name: db_example
 description: Example database with Parquet files
 authors:
@@ -106,7 +106,7 @@ routes:
     sql: "[[get_permissions]]"
 ```
 
-Then just run `pixi run api-box start` to launch a new api with following endpoints:
+Then just run `pixi run api-base start` to launch a new api with following endpoints:
 
 - list remote api names and databases: `/`
 - list of available db_example queries: `/db_example/users`
@@ -125,38 +125,38 @@ Then just run `pixi run api-box start` to launch a new api with following endpoi
 
 ## Commands
 
-API Box provides a modern Click-based CLI:
+API Base provides a modern Click-based CLI:
 
-- **api-box** (default): List all available configurations
-- **api-box init [--force]**: Initialize `api_box_config/` directory with default configs
-- **api-box start [config_name]**: Start API Box server with optional config name
-- **api-box describe [config_name]**: Display formatted configuration with expanded SQL queries
+- **api-base** (default): List all available configurations
+- **api-base init [--force]**: Initialize `api_base_config/` directory with default configs
+- **api-base start [config_name]**: Start API Base server with optional config name
+- **api-base describe [config_name]**: Display formatted configuration with expanded SQL queries
 
 
 ## Examples
 
 ```bash
 # Initialize local configuration directory
-pixi run api-box init
+pixi run api-base init
 
 # List available configurations, and available commands
-pixi run api-box
+pixi run api-base
 
 # Start API server
-# - default configuration (api_box_config/config.yaml) with FastAPI
-pixi run api-box start
+# - default configuration (api_base_config/config.yaml) with FastAPI
+pixi run api-base start
 # - default configuration with Flask (backbone options: fastapi (default) or flask)
-pixi run api-box start --backbone flask
+pixi run api-base start --backbone flask
 # - specify with host and/or port
-pixi run api-box start --host 0.0.0.0 --port 9000
+pixi run api-base start --host 0.0.0.0 --port 9000
 
 
-# these commands also work for alternative configurations (example: api_box_config/config_v2.yaml)
-pixi run api-box start config_v2
-pixi run api-box describe config_v2
+# these commands also work for alternative configurations (example: api_base_config/config_v2.yaml)
+pixi run api-base start config_v2
+pixi run api-base describe config_v2
 ```
 
-**For more details**, see the [Configuration Wiki](https://github.com/yourusername/api_box/wiki/Configuration).
+**For more details**, see the [Configuration Wiki](https://github.com/yourusername/api_base/wiki/Configuration).
 
 ---
 
@@ -165,7 +165,7 @@ pixi run api-box describe config_v2
 Assume our file structure is:
 
 ```bash
-api_box_config
+api_base_config
 ├── config.yaml
 ├── config_v2.yaml
 ├── databases
@@ -185,26 +185,26 @@ api_box_config
 
 ---
 
-## Main Configuration (`api_box_config/config.yaml`)
+## Main Configuration (`api_base_config/config.yaml`)
 
-The main configuration files are stored in the top level of the CWD's `api_box_config/` directory. By default api-box expects there to be one called `config.yaml`, however configs with different names (such as `config_v2`) can be added and launched as shown in the CLI Examples section.
+The main configuration files are stored in the top level of the CWD's `api_base_config/` directory. By default api-base expects there to be one called `config.yaml`, however configs with different names (such as `config_v2`) can be added and launched as shown in the CLI Examples section.
 
 ```yaml
-# api_box_config/config.yaml
-name: "My API Box"
+# api_base_config/config.yaml
+name: "My API Base"
 description: "API proxy for multiple services"
 authors: ["Your Name"]
 
 # Remote APIs to proxy
 remotes:
-  - "service1"           # add configuration in "api_box_config/remotes/service1.yaml"
-  - "service2"           # add configuration in "api_box_config/remotes/service2.yaml"
-  - "versioned_service"  # add configurations in versions in "api_box_config/remotes/versioned_service/"
+  - "service1"           # add configuration in "api_base_config/remotes/service1.yaml"
+  - "service2"           # add configuration in "api_base_config/remotes/service2.yaml"
+  - "versioned_service"  # add configurations in versions in "api_base_config/remotes/versioned_service/"
 
 # SQL databases to query
 databases:
-  - "analytics_db"       # adds database configuration in  "api_box_config/databases/analytics_db.yaml"
-  - "versioned_db"       # adds database configurations in  "api_box_config/databases/versioned_db/"
+  - "analytics_db"       # adds database configuration in  "api_base_config/databases/analytics_db.yaml"
+  - "versioned_db"       # adds database configurations in  "api_base_config/databases/versioned_db/"
 ```
 
 ---
@@ -214,7 +214,7 @@ databases:
 The example below is a remote configuration. 
 
 ```yaml 
-# api_box_config/remotes/service1.yaml
+# api_base_config/remotes/service1.yaml
 name: service1                 # this is the slug that goes in the url (ie: /service1/users)
 url: http://api.example.com    # the base-url of the api being proxied
 description: This is an api    # included in response for /service1 route
@@ -294,13 +294,13 @@ restricted:
   - system/{{system_id}}/config      # Block system configuration
 ```
 
-**For more details**, see the [Routing and Restrictions Wiki](https://github.com/yourusername/api_box/wiki/Routing-and-Restrictions).
+**For more details**, see the [Routing and Restrictions Wiki](https://github.com/yourusername/api_base/wiki/Routing-and-Restrictions).
 
 ---
 
 ## SQL Database Support
 
-API Box can also be used to query Databases. For now only parquet support is working but we will be adding other Databases in the future.
+API Base can also be used to query Databases. For now only parquet support is working but we will be adding other Databases in the future.
 
 
 ### Database Configuration
@@ -386,7 +386,7 @@ routes:
     sql: "[[get_permissions]]"
 ```
 
-**For more details**, see the [SQL Database Support Wiki](https://github.com/yourusername/api_box/wiki/SQL-Database-Support).
+**For more details**, see the [SQL Database Support Wiki](https://github.com/yourusername/api_base/wiki/SQL-Database-Support).
 
 ---
 
@@ -397,7 +397,7 @@ The core functionality is available as a standalone `RouteMapper` class that can
 ## Basic Integration
 
 ```python
-from api_box.route_mapper import RouteMapper
+from api_base.route_mapper import RouteMapper
 
 # Initialize with optional config path
 route_mapper = RouteMapper(config_path="path/to/config.yaml")
@@ -430,7 +430,7 @@ success, data, status, error = route_mapper.map_route_sync(
 ### Django Integration
 ```python
 from django.http import JsonResponse
-from api_box.route_mapper import RouteMapper
+from api_base.route_mapper import RouteMapper
 
 route_mapper = RouteMapper()
 
@@ -452,7 +452,7 @@ def api_proxy(request, remote_name, path):
 
 ### Custom Framework Integration
 ```python
-from api_box.route_mapper import RouteMapper
+from api_base.route_mapper import RouteMapper
 
 route_mapper = RouteMapper()
 
@@ -475,7 +475,7 @@ def proxy_handler(remote_name, path, request):
 The `RouteMapper` also supports SQL database queries through the `map_database_route` method:
 
 ```python
-from api_box.route_mapper import RouteMapper
+from api_base.route_mapper import RouteMapper
 import asyncio
 
 route_mapper = RouteMapper(config_path="path/to/config.yaml")
@@ -500,7 +500,7 @@ asyncio.run(query_database())
 
 ```python
 from django.http import JsonResponse
-from api_box.route_mapper import RouteMapper
+from api_base.route_mapper import RouteMapper
 import asyncio
 
 route_mapper = RouteMapper()
@@ -524,7 +524,7 @@ def database_query(request, database_name, path):
 
 ```python
 from flask import Flask, jsonify
-from api_box.route_mapper import RouteMapper
+from api_base.route_mapper import RouteMapper
 import asyncio
 
 app = Flask(__name__)
@@ -561,7 +561,7 @@ pixi run python scripts/hello_world.py
 
 The first time `pixi run` is executed the project will be installed (note this means the first run will be a bit slower). Any changes to the project will be updated on the subsequent `pixi run`.  It is unnecessary, but you can run `pixi install` after changes - this will update your local environment, so that it does not need to be updated on the next `pixi run`.
 
-Note, the repo's `pyproject.toml`, and `pixi.lock` files ensure `pixi run` will just work. No need to recreate an environment. Additionally, the `pyproject.toml` file includes `api_box = { path = ".", editable = true }`. This line is equivalent to `pip install -e .`, so there is no need to pip install this module.
+Note, the repo's `pyproject.toml`, and `pixi.lock` files ensure `pixi run` will just work. No need to recreate an environment. Additionally, the `pyproject.toml` file includes `api_base = { path = ".", editable = true }`. This line is equivalent to `pip install -e .`, so there is no need to pip install this module.
 
 The project was initially created using a `package_names.txt` and the following steps. Note that this should **NOT** be re-run as it will create a new project (potentially changing package versions).
 

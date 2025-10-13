@@ -1,6 +1,6 @@
 """
 
-Route Mapper Module for API Box
+Route Mapper Module for API Base
 
 Standalone route mapping functionality that can be integrated into any web framework.
 
@@ -14,9 +14,9 @@ License: BSD 3-Clause
 import httpx
 from typing import Any, Dict, List, Optional, Tuple
 
-from api_box.config import find_remote_config, find_route_mapping, get_database_names, get_remote_names, get_remote_versions, is_route_allowed, is_versioned_remote, load_main_config, resolve_latest_version
-from api_box.database_config import find_database_route, get_database_versions, is_versioned_database, load_database_config, resolve_latest_database_version
-from api_box.sql_builder import build_sql_query, extract_path_parameters
+from api_base.config import find_remote_config, find_route_mapping, get_database_names, get_remote_names, get_remote_versions, is_route_allowed, is_versioned_remote, load_main_config, resolve_latest_version
+from api_base.database_config import find_database_route, get_database_versions, is_versioned_database, load_database_config, resolve_latest_database_version
+from api_base.sql_builder import build_sql_query, extract_path_parameters
 
 
 #
@@ -45,7 +45,7 @@ class RouteMapper:
             self.config = load_main_config(config_path)
         except (FileNotFoundError, Exception):
             # For first pass, keep error handling simple
-            self.config = {"name": "api-box", "description": "API Box wrapper", "authors": []}
+            self.config = {"name": "api-base", "description": "API Base wrapper", "authors": []}
 
         self.remote_names = get_remote_names(self.config)
         self.database_names = get_database_names(self.config)
@@ -62,7 +62,7 @@ class RouteMapper:
         all_remotes = self.remote_names + self.database_names
 
         metadata = {
-            "name": self.config.get("name", "API Box"),
+            "name": self.config.get("name", "API Base"),
             "description": self.config.get("description", "API wrapper using configuration files"),
             "authors": self.config.get("authors", []),
             "endpoints": self.config.get("endpoints", ["/"]),
@@ -434,7 +434,7 @@ class RouteMapper:
         Returns:
             Actual remote name or None if not found.
         """
-        from api_box.config import get_remote_mapping
+        from api_base.config import get_remote_mapping
 
         mapping = get_remote_mapping(self.config)
         # Find the remote name that corresponds to this filename

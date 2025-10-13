@@ -1,8 +1,8 @@
 """
 
-CLI Module for API Box
+CLI Module for API Base
 
-Click-based command-line interface for API Box operations.
+Click-based command-line interface for API Base operations.
 
 License: BSD 3-Clause
 
@@ -19,12 +19,12 @@ import click
 import uvicorn
 import yaml
 
-from api_box.config import load_main_config
-from api_box.config_discovery import find_config, init_config
-from api_box.database_config import load_database_config
-from api_box.fast_api import create_app as create_fastapi_app
-from api_box.flask_api import create_app as create_flask_app
-from api_box.sql_builder import build_sql_query
+from api_base.config import load_main_config
+from api_base.config_discovery import find_config, init_config
+from api_base.database_config import load_database_config
+from api_base.fast_api import create_app as create_fastapi_app
+from api_base.flask_api import create_app as create_flask_app
+from api_base.sql_builder import build_sql_query
 
 
 #
@@ -41,7 +41,7 @@ DEFAULT_BACKBONE: str = "fastapi"
 @click.group(invoke_without_command=True)
 @click.pass_context
 def cli(ctx: click.Context) -> None:
-    """API Box - API wrapper using configuration files.
+    """API Base - API wrapper using configuration files.
 
     Run without command to see available configurations.
     """
@@ -52,11 +52,11 @@ def cli(ctx: click.Context) -> None:
 @cli.command()
 @click.option("--force", "-f", is_flag=True, help="Overwrite existing files")
 def init(force: bool) -> None:
-    """Initialize api_box_config/ directory with default configurations.
+    """Initialize api_base_config/ directory with default configurations.
 
-    Copies configuration files from the package to api_box_config/.
+    Copies configuration files from the package to api_base_config/.
     """
-    config_dir = Path("api_box_config")
+    config_dir = Path("api_base_config")
 
     # Check if directory exists and has files
     if config_dir.exists() and not force:
@@ -93,13 +93,13 @@ def init(force: bool) -> None:
               default="info",
               help="Log level for the server")
 def start(config_name: Optional[str], host: str, port: int, backbone: str, log_level: str) -> None:
-    """Start API Box server.
+    """Start API Base server.
 
     CONFIG_NAME: Optional config name (default: config.yaml)
 
     Examples:
-      api-box start                 # Use config.yaml
-      api-box start my-config       # Use my-config.yaml
+      api-base start                 # Use config.yaml
+      api-base start my-config       # Use my-config.yaml
     """
     # Find configuration file
     config_path = find_config(config_name)
@@ -109,13 +109,13 @@ def start(config_name: Optional[str], host: str, port: int, backbone: str, log_l
             click.echo(f"Error: Configuration '{config_name}' not found", err=True)
         else:
             click.echo("Error: No configuration file found", err=True)
-        click.echo("\nRun 'api-box init' to create default configuration")
+        click.echo("\nRun 'api-base init' to create default configuration")
         sys.exit(1)
 
     try:
         if backbone.lower() == "fastapi":
             app = create_fastapi_app(config_path)
-            click.echo(f"Starting API Box server (FastAPI) on {host}:{port}")
+            click.echo(f"Starting API Base server (FastAPI) on {host}:{port}")
             click.echo(f"Using config: {config_path}")
 
             uvicorn.run(
@@ -126,7 +126,7 @@ def start(config_name: Optional[str], host: str, port: int, backbone: str, log_l
             )
         elif backbone.lower() == "flask":
             app = create_flask_app(config_path)
-            click.echo(f"Starting API Box server (Flask) on {host}:{port}")
+            click.echo(f"Starting API Base server (Flask) on {host}:{port}")
             click.echo(f"Using config: {config_path}")
 
             app.run(
@@ -136,22 +136,22 @@ def start(config_name: Optional[str], host: str, port: int, backbone: str, log_l
             )
 
     except Exception as e:
-        click.echo(f"Error starting API Box: {e}", err=True)
+        click.echo(f"Error starting API Base: {e}", err=True)
         sys.exit(1)
 
 
 @cli.command()
 @click.argument("config_name", required=False)
 def describe(config_name: Optional[str]) -> None:
-    """Describe API Box configuration.
+    """Describe API Base configuration.
 
     CONFIG_NAME: Optional config name (default: config.yaml)
 
     Displays formatted configuration with expanded SQL queries.
 
     Examples:
-      api-box describe              # Describe config.yaml
-      api-box describe my-config    # Describe my-config.yaml
+      api-base describe              # Describe config.yaml
+      api-base describe my-config    # Describe my-config.yaml
     """
     # Find configuration file
     config_path = find_config(config_name)
@@ -168,7 +168,7 @@ def describe(config_name: Optional[str]) -> None:
         config = load_main_config(config_path)
 
         click.echo("=" * 60)
-        click.echo(f"API Box Configuration: {config_path}")
+        click.echo(f"API Base Configuration: {config_path}")
         click.echo("=" * 60)
         click.echo()
 
@@ -267,11 +267,11 @@ def main() -> None:
 #
 def _list_configs() -> None:
     """List available configurations."""
-    click.echo("API Box - API wrapper using configuration files")
+    click.echo("API Base - API wrapper using configuration files")
     click.echo()
 
     # Check for local configs
-    local_dir = Path("api_box_config")
+    local_dir = Path("api_base_config")
     config_dir = Path("config")
 
     local_configs = list(local_dir.glob("*.yaml")) if local_dir.exists() else []
@@ -280,18 +280,18 @@ def _list_configs() -> None:
     # Check for package configs
     try:
         import importlib.resources as pkg_resources
-        package_dir = Path(pkg_resources.files("api_box") / "config")
+        package_dir = Path(pkg_resources.files("api_base") / "config")
         package_configs = list(package_dir.glob("*.yaml")) if package_dir.exists() else []
     except Exception:
         package_configs = []
 
     if local_configs:
-        click.echo("📁 Local configurations (api_box_config/):")
+        click.echo("📁 Local configurations (api_base_config/):")
         for config_file in sorted(local_configs):
             click.echo(f"  {config_file.stem}")
         click.echo()
     else:
-        click.echo("📁 Local configurations (api_box_config/): None")
+        click.echo("📁 Local configurations (api_base_config/): None")
         click.echo()
 
     if config_configs:
@@ -307,11 +307,11 @@ def _list_configs() -> None:
         click.echo()
 
     click.echo("Commands:")
-    click.echo("  api-box init                    # Initialize config directory")
-    click.echo("  api-box start [config]          # Start API Box server")
-    click.echo("  api-box describe [config]       # Describe configuration")
+    click.echo("  api-base init                    # Initialize config directory")
+    click.echo("  api-base start [config]          # Start API Base server")
+    click.echo("  api-base describe [config]       # Describe configuration")
     click.echo()
-    click.echo("Run 'api-box --help' for more information")
+    click.echo("Run 'api-base --help' for more information")
 
 
 if __name__ == "__main__":

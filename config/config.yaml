@@ -1,5 +1,5 @@
 name: example-api
-description: Test API Box with route restrictions and SQL databases
+description: Test APIbAse with route restrictions and SQL databases
 authors:
   - name: Test User
     email: test@email.com
@@ -11,7 +11,7 @@ remotes:
 databases:
   - db_example
 
-# Non-remote endpoints (API Box's own endpoints)
+# Non-remote endpoints (APIbAse's own endpoints)
 endpoints:
   - "/"                    # API metadata and information
 

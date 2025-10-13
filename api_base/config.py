@@ -1,6 +1,6 @@
 """
 
-Configuration Module for API Box
+Configuration Module for API Base
 
 Handles loading and parsing of YAML configuration files for main API and remote APIs.
 
@@ -21,7 +21,7 @@ import yaml
 #
 # CONSTANTS
 #
-DEFAULT_CONFIG_DIR: str = "api_box_config"
+DEFAULT_CONFIG_DIR: str = "api_base_config"
 DEFAULT_CONFIG_FILE: str = "config.yaml"
 REMOTES_DIR: str = "remotes"
 DATABASES_DIR: str = "databases"

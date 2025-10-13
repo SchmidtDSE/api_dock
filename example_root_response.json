@@ -1,6 +1,7 @@
+
 {
-  "name": "test-api-box",
-  "description": "Test configuration for API Box wrapper with toy remotes - testing restrictions and routes",
+  "name": "test-api-base",
+  "description": "Test configuration for API Base wrapper with toy remotes - testing restrictions and routes",
   "authors": [
     {
       "name": "brookie",
