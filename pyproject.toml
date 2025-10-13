@@ -1,11 +1,31 @@
 [build-system]
-requires = ["setuptools"]
+requires = ["setuptools", "build"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "api_box"
 version = "0.0.1"
+description = "A flexible API gateway that allows you to proxy requests to multiple remote APIs and Databases"
 readme = "README.md"
+license = {text = "BSd 3-clause"}
+authors = [
+  {name = "Brookie Guzder-Williams", email = "bguzder-williams@berkeley.edu"}
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Scientific/Engineering",
+]
+requires-python = ">=3.8"
 dependencies = [
     "click",
     "fastapi",
@@ -22,7 +42,6 @@ api-box = "api_box.cli:main"
 [tool.setuptools]
 packages = [
 	"api_box",
-	# "api_box.utils"
 ]
 
 [tool.pixi.project]
@@ -44,3 +63,14 @@ pyyaml = ">=6.0.3,<7"
 httpx = ">=0.28.1,<0.29"
 flask = ">=3.1.2,<4"
 duckdb = ">=1.1.3,<2"
+
+[tool.pixi.environments]
+default = { features = [] }
+dev = { features = ["dev"] }
+
+[tool.pixi.feature.dev.dependencies]
+twine = "*"
+
+[tool.pixi.feature.dev.pypi-dependencies]
+build = "*"
+
