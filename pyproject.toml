@@ -44,9 +44,12 @@ packages = [
 	"api_dock",
 ]
 
+[tool.setuptools.package-data]
+api_dock = ["config/*.yaml", "config/**/*.yaml"]
+
 [tool.pixi.project]
 channels = ["conda-forge"]
-platforms = ["linux-64", "osx-64", "osx-arm64"]
+platforms = ["osx-arm64", "linux-64", "osx-64", "linux-aarch64"]
 
 [tool.pixi.pypi-dependencies]
 api_dock = { path = ".", editable = true }
@@ -73,4 +76,3 @@ twine = "*"
 
 [tool.pixi.feature.dev.pypi-dependencies]
 build = "*"
-
