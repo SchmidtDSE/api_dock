@@ -4,7 +4,7 @@ SQL Query Builder Module for API Box
 
 Builds SQL queries with table and parameter substitution for database routes.
 
-License: CC-BY-4.0
+License: BSD 3-Clause
 
 """
 

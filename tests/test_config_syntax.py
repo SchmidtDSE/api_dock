@@ -2,7 +2,7 @@
 """
 Test the updated config syntax
 
-License: CC-BY-4.0
+License: BSD 3-Clause
 """
 import sys
 sys.path.insert(0, '/workspace/api_box')

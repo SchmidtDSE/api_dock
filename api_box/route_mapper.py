@@ -4,7 +4,7 @@ Route Mapper Module for API Box
 
 Standalone route mapping functionality that can be integrated into any web framework.
 
-License: CC-BY-4.0
+License: BSD 3-Clause
 
 """
 

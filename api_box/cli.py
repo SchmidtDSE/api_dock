@@ -4,7 +4,7 @@ CLI Module for API Box
 
 Click-based command-line interface for API Box operations.
 
-License: CC-BY-4.0
+License: BSD 3-Clause
 
 """
 

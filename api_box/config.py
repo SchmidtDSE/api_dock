@@ -4,7 +4,7 @@ Configuration Module for API Box
 
 Handles loading and parsing of YAML configuration files for main API and remote APIs.
 
-License: CC-BY-4.0
+License: BSD 3-Clause
 
 """
 

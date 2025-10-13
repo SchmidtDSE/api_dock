@@ -4,7 +4,7 @@ Database Configuration Module for API Box
 
 Handles loading and parsing of database configuration files for SQL-based routes.
 
-License: CC-BY-4.0
+License: BSD 3-Clause
 
 """
 

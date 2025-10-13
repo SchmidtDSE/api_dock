@@ -2,7 +2,7 @@
 """
 Test script for route restrictions and allowed routes functionality.
 
-License: CC-BY-4.0
+License: BSD 3-Clause
 """
 
 #

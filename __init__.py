@@ -4,7 +4,7 @@ API Box
 
 API wrapper that uses configuration files to pass requests to different APIs.
 
-License: CC-BY-4.0
+License: BSD 3-Clause
 
 """
 

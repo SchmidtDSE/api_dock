@@ -4,7 +4,7 @@ Configuration Discovery Module for API Box
 
 Handles discovery and initialization of configuration files.
 
-License: CC-BY-4.0
+License: BSD 3-Clause
 
 """
 

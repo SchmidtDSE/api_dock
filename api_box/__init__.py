@@ -4,7 +4,7 @@ API Box Core Module
 
 Core functionality for API Box wrapper.
 
-License: CC-BY-4.0
+License: BSD 3-Clause
 
 """
 

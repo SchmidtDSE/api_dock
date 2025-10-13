@@ -4,7 +4,7 @@ Flask Application for API Box
 
 Flask-based application that handles routing to remote APIs and serves config data.
 
-License: CC-BY-4.0
+License: BSD 3-Clause
 
 """
 
