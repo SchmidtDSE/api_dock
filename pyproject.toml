@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "api_dock"
-version = "0.0.1"
+version = "0.0.2"
 description = "A flexible API gateway that allows you to proxy requests to multiple remote APIs and Databases"
 readme = "README.md"
 license = {text = "BSd 3-clause"}
@@ -25,7 +25,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
     "Topic :: Scientific/Engineering",
 ]
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 dependencies = [
     "click",
     "fastapi",
@@ -40,12 +40,10 @@ dependencies = [
 api-dock = "api_dock.cli:main"
 
 [tool.setuptools]
-packages = [
-	"api_dock",
-]
+packages = ["api_dock", "config"]
 
 [tool.setuptools.package-data]
-api_dock = ["config/*.yaml", "config/**/*.yaml"]
+config = ["*.yaml", "**/*.yaml"]
 
 [tool.pixi.project]
 channels = ["conda-forge"]
