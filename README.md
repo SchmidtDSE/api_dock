@@ -5,6 +5,7 @@ API Dock (API(s) + (data)Base(s)/base-(for)-API(s)) a flexible API gateway that 
 ## Table of Contents
 
 - [Features](#features)
+- [Install](#install)
 - [Quick Example](#quick-example)
 - [CLI](#cli)
   - [Commands](#commands)
@@ -17,7 +18,7 @@ API Dock (API(s) + (data)Base(s)/base-(for)-API(s)) a flexible API gateway that 
   - [Basic Integration](#basic-integration)
   - [Framework Examples](#framework-examples)
   - [Database Integration](#database-integration)
-- [INSTALL/REQUIREMENTS](#installrequirements)
+- [Requirements](#requirements)
 - [License](#license)
 
 ## Features
@@ -29,6 +30,20 @@ API Dock (API(s) + (data)Base(s)/base-(for)-API(s)) a flexible API gateway that 
 - **Access Control**: Define allowed/restricted routes per remote API
 - **Version Support**: Handle API versioning in URL paths
 - **Flexibility**: Quickly launch FastAPI or Flask apps, or easily integrate into any existing framework
+
+## Install
+
+**FROM PYPI**
+
+```bash
+pip install api_doc
+```
+
+**FROM CONDA**
+
+```bash
+ conda install -c conda-forge api_doc
+```
 
 ## Quick Example
 
@@ -547,7 +562,7 @@ def database_proxy(database_name, path):
 
 ---
 
-# INSTALL/REQUIREMENTS
+# Requirements
 
 Requirements are managed through a [Pixi](https://pixi.sh/latest) "project" (similar to a conda environment). After pixi is installed use `pixi run <cmd>` to ensure the correct project is being used. For example,
 
