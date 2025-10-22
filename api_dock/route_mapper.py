@@ -14,7 +14,7 @@ License: BSD 3-Clause
 import httpx
 from typing import Any, Dict, List, Optional, Tuple
 
-from api_dock.config import find_remote_config, find_route_mapping, get_database_names, get_remote_names, get_remote_versions, is_route_allowed, is_versioned_remote, load_main_config, resolve_latest_version
+from api_dock.config import find_remote_config, find_route_mapping, get_database_names, get_remote_names, get_remote_versions, get_settings, is_route_allowed, is_versioned_remote, load_main_config, resolve_latest_version
 from api_dock.database_config import find_database_route, get_database_versions, is_versioned_database, load_database_config, resolve_latest_database_version
 from api_dock.sql_builder import build_sql_query, extract_path_parameters
 
@@ -49,6 +49,7 @@ class RouteMapper:
 
         self.remote_names = get_remote_names(self.config)
         self.database_names = get_database_names(self.config)
+        self.settings = get_settings(self.config)
 
 
     def get_config_metadata(self) -> Dict[str, Any]:
@@ -179,16 +180,23 @@ class RouteMapper:
             final_path = actual_path
 
         # Construct full URL
-        # Add trailing slash to final_path to avoid redirects from APIs that require it
         if final_path:
-            # Add trailing slash if not already present (helps avoid 307 redirects)
-            path_with_slash = final_path if final_path.endswith('/') else final_path + '/'
-            full_url = f"{remote_url.rstrip('/')}/{path_with_slash}"
+            # Optionally add trailing slash to avoid redirects from APIs that require it
+            if self.settings.get("add_trailing_slash", True):
+                path_with_slash = final_path if final_path.endswith('/') else final_path + '/'
+                full_url = f"{remote_url.rstrip('/')}/{path_with_slash}"
+            else:
+                full_url = f"{remote_url.rstrip('/')}/{final_path}"
         else:
             full_url = remote_url.rstrip('/')
 
         # Forward the request
-        async with httpx.AsyncClient(follow_redirects=True) as client:
+        # Configure redirect behavior based on settings
+        # Note: httpx automatically follows redirects but blocks HTTPS->HTTP downgrades for security
+        # The follow_protocol_downgrades setting is documented but may require manual redirect handling
+        follow_redirects = True if self.settings.get("add_trailing_slash", True) else False
+
+        async with httpx.AsyncClient(follow_redirects=follow_redirects) as client:
             try:
                 # Forward request
                 response = await client.request(

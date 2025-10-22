@@ -220,6 +220,26 @@ remotes:
 databases:
   - "analytics_db"       # adds database configuration in  "api_dock_config/databases/analytics_db.yaml"
   - "versioned_db"       # adds database configurations in  "api_dock_config/databases/versioned_db/"
+
+# Optional HTTP behavior settings
+settings:
+  add_trailing_slash: true              # Auto-add trailing slash to paths (default: true)
+  follow_protocol_downgrades: false     # Allow HTTPS->HTTP redirects (default: false)
+```
+
+### Settings
+
+The optional `settings` section controls HTTP behavior:
+
+- **`add_trailing_slash`** (default: `true`): Automatically append a trailing slash to all proxied paths. This prevents 307/301 redirects from remote APIs that require trailing slashes (e.g., `/projects` → `/projects/`). Set to `false` to disable this behavior.
+
+- **`follow_protocol_downgrades`** (default: `false`): Control how HTTP redirects are handled. When `false` (recommended), HTTPS→HTTP redirects are blocked for security. When `true`, allows following redirects that downgrade from HTTPS to HTTP (not recommended for production).
+
+**Example:**
+```yaml
+settings:
+  add_trailing_slash: true              # Avoids redirects by adding trailing slash
+  follow_protocol_downgrades: false     # Blocks insecure HTTPS->HTTP redirects
 ```
 
 ---

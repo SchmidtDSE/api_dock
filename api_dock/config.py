@@ -26,6 +26,12 @@ DEFAULT_CONFIG_FILE: str = "config.yaml"
 REMOTES_DIR: str = "remotes"
 DATABASES_DIR: str = "databases"
 
+# Default settings
+DEFAULT_SETTINGS: Dict[str, Any] = {
+    "add_trailing_slash": True,
+    "follow_protocol_downgrades": False
+}
+
 
 #
 # PUBLIC
@@ -184,6 +190,25 @@ def get_database_names(config: Dict[str, Any]) -> List[str]:
             database_names.append(database["name"])
 
     return database_names
+
+
+def get_settings(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract settings from main config with defaults.
+
+    Args:
+        config: Main configuration dictionary.
+
+    Returns:
+        Dictionary of settings with defaults applied.
+    """
+    settings = DEFAULT_SETTINGS.copy()
+    config_settings = config.get("settings", {})
+
+    # Update defaults with config values
+    if config_settings:
+        settings.update(config_settings)
+
+    return settings
 
 
 def is_versioned_remote(remote_name: str, main_config: Dict[str, Any], config_dir: Optional[str] = None) -> bool:

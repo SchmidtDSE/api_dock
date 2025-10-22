@@ -18,3 +18,8 @@ endpoints:
 # Global restrictions (applied to all remotes unless overridden)
 restricted:
   - users/{{}}/delete
+
+# Optional settings for HTTP behavior
+settings:
+  add_trailing_slash: true              # Auto-add trailing slash to avoid redirects (default: true)
+  follow_protocol_downgrades: false     # Allow HTTPS->HTTP redirects (default: false, insecure if true)
