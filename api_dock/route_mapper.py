@@ -179,8 +179,11 @@ class RouteMapper:
             final_path = actual_path
 
         # Construct full URL
+        # Add trailing slash to final_path to avoid redirects from APIs that require it
         if final_path:
-            full_url = f"{remote_url.rstrip('/')}/{final_path}"
+            # Add trailing slash if not already present (helps avoid 307 redirects)
+            path_with_slash = final_path if final_path.endswith('/') else final_path + '/'
+            full_url = f"{remote_url.rstrip('/')}/{path_with_slash}"
         else:
             full_url = remote_url.rstrip('/')
 
