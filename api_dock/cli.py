@@ -11,6 +11,7 @@ License: BSD 3-Clause
 #
 # IMPORTS
 #
+import socket
 import sys
 from pathlib import Path
 from typing import Optional
@@ -33,6 +34,7 @@ from api_dock.sql_builder import build_sql_query
 DEFAULT_HOST: str = "0.0.0.0"
 DEFAULT_PORT: int = 8000
 DEFAULT_BACKBONE: str = "fastapi"
+MAX_PORT_RETRIES: int = 4
 
 
 #
@@ -112,26 +114,36 @@ def start(config_name: Optional[str], host: str, port: int, backbone: str, log_l
         click.echo("\nRun 'api-dock init' to create default configuration")
         sys.exit(1)
 
+    # Find available port
+    available_port = _find_available_port(port, host)
+
+    if available_port is None:
+        click.echo(f"Error: Could not find available port. Tried ports {port} through {port + MAX_PORT_RETRIES}", err=True)
+        sys.exit(1)
+
+    if available_port != port:
+        click.echo(f"Port {port} in use, using port {available_port} instead")
+
     try:
         if backbone.lower() == "fastapi":
             app = create_fastapi_app(config_path)
-            click.echo(f"Starting API Dock server (FastAPI) on {host}:{port}")
+            click.echo(f"Starting API Dock server (FastAPI) on {host}:{available_port}")
             click.echo(f"Using config: {config_path}")
 
             uvicorn.run(
                 app,
                 host=host,
-                port=port,
+                port=available_port,
                 log_level=log_level
             )
         elif backbone.lower() == "flask":
             app = create_flask_app(config_path)
-            click.echo(f"Starting API Dock server (Flask) on {host}:{port}")
+            click.echo(f"Starting API Dock server (Flask) on {host}:{available_port}")
             click.echo(f"Using config: {config_path}")
 
             app.run(
                 host=host,
-                port=port,
+                port=available_port,
                 debug=(log_level == "debug")
             )
 
@@ -265,6 +277,33 @@ def main() -> None:
 #
 # INTERNAL
 #
+def _find_available_port(start_port: int, host: str, max_retries: int = MAX_PORT_RETRIES) -> Optional[int]:
+    """Find an available port starting from start_port.
+
+    Args:
+        start_port: Initial port to try.
+        host: Host address to bind to.
+        max_retries: Maximum number of ports to try (will try start_port through start_port + max_retries).
+
+    Returns:
+        Available port number if found, None otherwise.
+    """
+    for port_offset in range(max_retries + 1):
+        port = start_port + port_offset
+        try:
+            # Try to bind to the port
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((host, port))
+            sock.close()
+            return port
+        except OSError:
+            # Port is in use, try next one
+            continue
+
+    return None
+
+
 def _list_configs() -> None:
     """List available configurations."""
     click.echo("API Dock - API wrapper using configuration files")
