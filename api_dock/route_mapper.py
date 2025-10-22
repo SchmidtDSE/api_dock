@@ -141,7 +141,7 @@ class RouteMapper:
             actual_path = ""
 
         # Check if route is allowed
-        if not is_route_allowed(actual_path, self.config, remote_name, version):
+        if not is_route_allowed(actual_path, self.config, remote_name, version, method):
             return (
                 False,
                 None,

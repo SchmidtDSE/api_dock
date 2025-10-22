@@ -1,0 +1,18 @@
+name: remote_with_wildcards
+description: Remote API demonstrating wildcard restrictions
+authors:
+  - Test API Team
+url: http://127.0.0.1:8002
+
+# Demonstrate wildcard and method-aware restrictions
+restricted:
+  # Block all DELETE requests to any route starting with stuff/
+  - route: stuff/*
+    method: delete
+
+  # Block all methods to admin routes
+  - admin/*
+
+  # Block DELETE to any single-segment route
+  - route: "*"
+    method: delete

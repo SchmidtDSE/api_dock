@@ -7,3 +7,4 @@ routes:
   - users
   - users/{{}}
   - users/{{}}/profile
+  - users/{{}}/permissions

@@ -293,7 +293,7 @@ routes:
 
 ### Route Restrictions
 
-You can restrict access to specific routes using the `restricted` section:
+You can restrict access to specific routes using the `restricted` section. Restrictions support wildcards and method-specific filtering:
 
 ```yaml
 name: restricted_config
@@ -303,11 +303,31 @@ name: restricted_config
 routes:
   ...
 
+# Simple route restrictions (string format)
 restricted:
-  - admin                            # Block all admin routes
+  - admin/{{}}                       # Block all admin routes (single segment wildcard)
   - users/{{user_id}}/private        # Block private user data
-  - system/{{system_id}}/config      # Block system configuration
+  - system/*                         # Block all routes starting with system/ (prefix wildcard)
+
+# Method-aware restrictions (dict format)
+restricted:
+  - route: "*"
+    method: delete                   # Block all DELETE requests
+  - route: "stuff/*"
+    method: delete                   # Block DELETE to any route starting with stuff/
+  - route: "users/{{user_id}}"
+    method: patch                    # Block PATCH requests to user routes
 ```
+
+**Wildcard Patterns:**
+- `{{}}` or `*` - Matches any single path segment (e.g., `users/{{}}` matches `users/123`)
+- `prefix/*` - Matches all routes starting with prefix/ (e.g., `admin/*` matches `admin/dashboard`, `admin/users/123`, etc.)
+- `*` - When used alone, matches any single-segment route
+
+**Method-Specific Restrictions:**
+- Use dict format with `route` and `method` fields to restrict specific HTTP methods
+- Omit `method` field to restrict all methods for a route
+- Methods are case-insensitive (DELETE, delete, Delete all work)
 
 **For more details**, see the [Routing and Restrictions Wiki](https://github.com/yourusername/api_dock/wiki/Routing-and-Restrictions).
 

@@ -36,42 +36,52 @@ def test_route_restrictions():
         print(f"✗ Failed to load config: {e}")
         return False
 
-    # Test cases
+    # Test cases: (route, remote, method, expected, description)
     test_cases = [
         # Global restrictions (should block users/{}/delete for all remotes)
-        ("users/123/delete", "remote_with_restrictions", False, "Global restriction"),
-        ("users/456/delete", "remote_with_allowed_routes", False, "Global restriction"),
+        ("users/123/delete", "remote_with_restrictions", None, False, "Global restriction"),
+        ("users/456/delete", "remote_with_allowed_routes", None, False, "Global restriction"),
 
         # Remote-specific restrictions (remote_with_restrictions blocks users/{}/permissions)
-        ("users/123/permissions", "remote_with_restrictions", False, "Remote-specific restriction"),
-        ("users/123/permissions", "remote_with_allowed_routes", True, "Not restricted on this remote"),
+        ("users/123/permissions", "remote_with_restrictions", None, False, "Remote-specific restriction"),
+        ("users/123/permissions", "remote_with_allowed_routes", None, True, "Not restricted on this remote"),
 
         # Allowed routes (remote_with_allowed_routes only allows specific patterns)
-        ("users", "remote_with_allowed_routes", True, "Explicitly allowed"),
-        ("users/123", "remote_with_allowed_routes", True, "Explicitly allowed"),
-        ("users/123/profile", "remote_with_allowed_routes", True, "Explicitly allowed"),
-        ("users/123/settings", "remote_with_allowed_routes", False, "Not in allowed list"),
-        ("admin/dashboard", "remote_with_allowed_routes", False, "Not in allowed list"),
+        ("users", "remote_with_allowed_routes", None, True, "Explicitly allowed"),
+        ("users/123", "remote_with_allowed_routes", None, True, "Explicitly allowed"),
+        ("users/123/profile", "remote_with_allowed_routes", None, True, "Explicitly allowed"),
+        ("users/123/settings", "remote_with_allowed_routes", None, False, "Not in allowed list"),
+        ("admin/dashboard", "remote_with_allowed_routes", None, False, "Not in allowed list"),
 
         # Custom mapping remote (should respect restrictions)
-        ("users/123/permissions", "remote_with_custom_mapping", True, "Should be allowed"),
-        ("users/123/delete", "remote_with_custom_mapping", False, "Should be restricted"),
+        ("users/123/permissions", "remote_with_custom_mapping", None, True, "Should be allowed"),
+        ("users/123/delete", "remote_with_custom_mapping", None, False, "Should be restricted"),
 
         # Admin routes (should be blocked for remote_with_restrictions only)
-        ("admin/dashboard", "remote_with_restrictions", False, "Admin routes restricted"),
-        ("admin/dashboard", "remote_with_custom_mapping", True, "Admin not restricted here"),
+        ("admin/dashboard", "remote_with_restrictions", None, False, "Admin routes restricted"),
+        ("admin/dashboard", "remote_with_custom_mapping", None, True, "Admin not restricted here"),
+
+        # Wildcard tests - * for single segment
+        ("users/123/delete", "remote_with_restrictions", None, False, "Wildcard pattern match"),
+        ("admin/settings", "remote_with_restrictions", None, False, "Wildcard admin/* pattern"),
+
+        # Method-aware restrictions (if config supports them)
+        ("api/test", "remote_with_restrictions", "GET", True, "GET should be allowed"),
+        ("api/test", "remote_with_restrictions", "DELETE", True, "DELETE allowed (no method restriction)"),
     ]
 
     passed = 0
     failed = 0
 
-    for route, remote, expected, description in test_cases:
-        result = is_route_allowed(route, config, remote)
+    for route, remote, method, expected, description in test_cases:
+        result = is_route_allowed(route, config, remote, method=method)
         if result == expected:
-            print(f"✓ {route} on {remote}: {result} ({description})")
+            method_str = f" [{method}]" if method else ""
+            print(f"✓ {route}{method_str} on {remote}: {result} ({description})")
             passed += 1
         else:
-            print(f"✗ {route} on {remote}: expected {expected}, got {result} ({description})")
+            method_str = f" [{method}]" if method else ""
+            print(f"✗ {route}{method_str} on {remote}: expected {expected}, got {result} ({description})")
             failed += 1
 
     print(f"\nResults: {passed} passed, {failed} failed")

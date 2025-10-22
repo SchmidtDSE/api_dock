@@ -6,9 +6,11 @@ url: http://127.0.0.1:8003
 restricted:
   - users/{{}}/delete
 routes:
-  - route: {{route_name}}/users/{user_id}/permissions
-    remote_route: user-permissions/{{user_id}}
+  - users/{{}}/permissions
+  - admin/{{}}
+  - route: "{{route_name}}/users/{{user_id}}/permissions"
+    remote_route: "user-permissions/{{user_id}}"
     method: get
-  - route: {{route_name}}/users/{user_id}/profile
-    remote_route: profiles/{{user_id}}
+  - route: "{{route_name}}/users/{{user_id}}/profile"
+    remote_route: "profiles/{{user_id}}"
     method: get

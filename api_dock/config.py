@@ -256,7 +256,7 @@ def resolve_latest_version(versions: List[str]) -> Optional[str]:
         return sorted_versions[0]
 
 
-def is_route_allowed(route: str, config: Dict[str, Any], remote_name: Optional[str] = None, version: Optional[str] = None) -> bool:
+def is_route_allowed(route: str, config: Dict[str, Any], remote_name: Optional[str] = None, version: Optional[str] = None, method: Optional[str] = None) -> bool:
     """Check if a route is allowed based on configuration restrictions.
 
     Args:
@@ -264,6 +264,7 @@ def is_route_allowed(route: str, config: Dict[str, Any], remote_name: Optional[s
         config: Main configuration dictionary.
         remote_name: Name of the remote API (for remote-specific restrictions).
         version: Version string for versioned remotes.
+        method: HTTP method (e.g., "GET", "POST", "DELETE").
 
     Returns:
         True if route is allowed, False otherwise.
@@ -281,8 +282,22 @@ def is_route_allowed(route: str, config: Dict[str, Any], remote_name: Optional[s
 
     if remote_name:
         try:
+            # Try to infer config_dir by checking which directory exists
+            # This is a heuristic to support both default and custom config locations
+            config_dir = None
+            remotes = config.get("remotes", [])
+            if remotes:
+                first_remote = remotes[0] if isinstance(remotes[0], str) else remotes[0].get("name") if isinstance(remotes[0], dict) else None
+                if first_remote:
+                    # Try common locations
+                    for potential_dir in [DEFAULT_CONFIG_DIR, "config", "."]:
+                        test_path = os.path.join(potential_dir, REMOTES_DIR, f"{first_remote}.yaml")
+                        if os.path.exists(test_path):
+                            config_dir = potential_dir
+                            break
+
             # Load the remote config to check for restrictions/routes
-            remote_config = find_remote_config(remote_name, config, version=version)
+            remote_config = find_remote_config(remote_name, config, config_dir=config_dir, version=version)
             remote_restricted = remote_config.get("restricted", [])
             remote_routes = remote_config.get("routes", [])
         except FileNotFoundError:
@@ -293,13 +308,20 @@ def is_route_allowed(route: str, config: Dict[str, Any], remote_name: Optional[s
     # Remote-specific routes take precedence over global routes
     allowed_routes = remote_routes if remote_routes else global_routes
     if allowed_routes:
-        return _route_matches_patterns(route, allowed_routes)
+        # Check whitelist first
+        if not _route_matches_patterns(route, allowed_routes, method):
+            return False
+        # Even if route is in whitelist, still check restrictions (both global and remote)
+        all_restrictions = global_restricted + remote_restricted
+        if all_restrictions and _route_matches_patterns(route, all_restrictions, method):
+            return False
+        return True
 
     # Otherwise, check against restricted patterns (blacklist)
-    # Remote-specific restrictions take precedence over global restrictions
-    restricted_routes = remote_restricted if remote_restricted else global_restricted
-    if restricted_routes:
-        return not _route_matches_patterns(route, restricted_routes)
+    # Combine both global and remote restrictions
+    all_restrictions = global_restricted + remote_restricted
+    if all_restrictions:
+        return not _route_matches_patterns(route, all_restrictions, method)
 
     # If no restrictions, allow all routes
     return True
@@ -368,41 +390,74 @@ def _load_yaml_file(file_path: str) -> Dict[str, Any]:
         raise yaml.YAMLError(f"Invalid YAML in {file_path}: {e}")
 
 
-def _route_matches_patterns(route: str, patterns: List[str]) -> bool:
+def _route_matches_patterns(route: str, patterns: List[Union[str, dict]], method: Optional[str] = None) -> bool:
     """Check if a route matches any of the given patterns.
 
     Args:
         route: The route to check.
-        patterns: List of patterns to match against.
+        patterns: List of patterns to match against (strings or dicts with route/method).
+        method: HTTP method to check (optional).
 
     Returns:
         True if route matches any pattern, False otherwise.
     """
     for pattern in patterns:
-        if _route_matches_pattern(route, pattern):
+        if _route_matches_pattern(route, pattern, method):
             return True
     return False
 
 
-def _route_matches_pattern(route: str, pattern: str) -> bool:
+def _route_matches_pattern(route: str, pattern: Union[str, dict], method: Optional[str] = None) -> bool:
     """Check if a route matches a specific pattern.
 
-    Patterns use {{}} as wildcards for path segments.
+    Patterns use {{}} or * as wildcards for path segments.
+    Supports method-specific matching when pattern is a dict.
     Examples:
         - "users/{{}}/delete" matches "users/123/delete"
-        - "users/{{}}" matches "users/123"
-        - "users/{{}}/permissions" matches "users/123/permissions"
+        - "users/*/delete" matches "users/123/delete"
+        - "users/*" matches "users/123", "users/123/profile", etc. (prefix match)
+        - {"route": "users/*", "method": "delete"} matches DELETE to "users/123"
+        - "*" matches any single segment route
+        - {"route": "*", "method": "delete"} matches DELETE to any single segment route
 
     Args:
         route: The route to check.
-        pattern: The pattern to match against.
+        pattern: The pattern to match against (string or dict with route/method).
+        method: HTTP method to check (optional, used with dict patterns).
 
     Returns:
         True if route matches pattern, False otherwise.
     """
-    # Handle case where pattern is not a string (dict, list, etc.)
+    # Handle dict format (with method specified)
+    if isinstance(pattern, dict):
+        pattern_route = pattern.get("route", "")
+        pattern_method = pattern.get("method", "").upper() if pattern.get("method") else None
+
+        # If method specified in pattern, it must match
+        if pattern_method and method and pattern_method != method.upper():
+            return False
+
+        pattern = pattern_route
+
+    # Handle case where pattern is not a string at this point
     if not isinstance(pattern, str):
         return False
+
+    # Handle trailing wildcard for prefix matching
+    if pattern.endswith("/*"):
+        prefix = pattern[:-2].strip("/")
+        route_normalized = route.strip("/")
+
+        # Empty prefix means match everything
+        if not prefix:
+            return True
+
+        return route_normalized.startswith(prefix + "/") or route_normalized == prefix
+
+    # Handle exact wildcard match
+    if pattern.strip("/") == "*":
+        # Single * matches any single-segment route
+        return len(route.strip("/").split("/")) == 1
 
     route_parts = route.strip("/").split("/")
     pattern_parts = pattern.strip("/").split("/")
@@ -411,9 +466,9 @@ def _route_matches_pattern(route: str, pattern: str) -> bool:
         return False
 
     for route_part, pattern_part in zip(route_parts, pattern_parts):
-        # Check if pattern part is a variable (starts and ends with double braces)
-        if pattern_part.startswith("{{") and pattern_part.endswith("}}"):
-            # Variable matches any value
+        # Check if pattern part is a wildcard
+        if pattern_part == "*" or (pattern_part.startswith("{{") and pattern_part.endswith("}}")):
+            # Wildcard matches any value
             continue
         elif pattern_part != route_part:
             # Literal part must match exactly
