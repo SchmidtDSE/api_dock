@@ -418,7 +418,7 @@ def _route_matches_pattern(route: str, pattern: Union[str, dict], method: Option
         - "users/*" matches "users/123", "users/123/profile", etc. (prefix match)
         - {"route": "users/*", "method": "delete"} matches DELETE to "users/123"
         - "*" matches any single segment route
-        - {"route": "*", "method": "delete"} matches DELETE to any single segment route
+        - {"route": "*", "method": "delete"} matches DELETE to ANY route (all routes)
 
     Args:
         route: The route to check.
@@ -429,6 +429,7 @@ def _route_matches_pattern(route: str, pattern: Union[str, dict], method: Option
         True if route matches pattern, False otherwise.
     """
     # Handle dict format (with method specified)
+    is_method_aware = False
     if isinstance(pattern, dict):
         pattern_route = pattern.get("route", "")
         pattern_method = pattern.get("method", "").upper() if pattern.get("method") else None
@@ -437,6 +438,7 @@ def _route_matches_pattern(route: str, pattern: Union[str, dict], method: Option
         if pattern_method and method and pattern_method != method.upper():
             return False
 
+        is_method_aware = True
         pattern = pattern_route
 
     # Handle case where pattern is not a string at this point
@@ -456,8 +458,12 @@ def _route_matches_pattern(route: str, pattern: Union[str, dict], method: Option
 
     # Handle exact wildcard match
     if pattern.strip("/") == "*":
-        # Single * matches any single-segment route
-        return len(route.strip("/").split("/")) == 1
+        # When used with method restriction (dict format), * matches ALL routes
+        # When used alone (string format), * matches only single-segment routes
+        if is_method_aware:
+            return True  # Match all routes when method-aware
+        else:
+            return len(route.strip("/").split("/")) == 1  # Match only single-segment routes
 
     route_parts = route.strip("/").split("/")
     pattern_parts = pattern.strip("/").split("/")

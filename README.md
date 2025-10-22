@@ -322,10 +322,12 @@ restricted:
 **Wildcard Patterns:**
 - `{{}}` or `*` - Matches any single path segment (e.g., `users/{{}}` matches `users/123`)
 - `prefix/*` - Matches all routes starting with prefix/ (e.g., `admin/*` matches `admin/dashboard`, `admin/users/123`, etc.)
-- `*` - When used alone, matches any single-segment route
+- `*` - When used alone (string format), matches any single-segment route
+- `{route: "*", method: "X"}` - When used with a method (dict format), matches ALL routes regardless of path length
 
 **Method-Specific Restrictions:**
 - Use dict format with `route` and `method` fields to restrict specific HTTP methods
+- When `{route: "*", method: "X"}` is used, it blocks the specified method on ALL routes
 - Omit `method` field to restrict all methods for a route
 - Methods are case-insensitive (DELETE, delete, Delete all work)
 
