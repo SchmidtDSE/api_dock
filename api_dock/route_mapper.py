@@ -185,7 +185,7 @@ class RouteMapper:
             full_url = remote_url.rstrip('/')
 
         # Forward the request
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
             try:
                 # Forward request
                 response = await client.request(
