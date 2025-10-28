@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "api_dock"
-version = "0.2.0"
+version = "0.2.1"
 description = "A flexible API gateway that allows you to proxy requests to multiple remote APIs and Databases"
 readme = "README.md"
 license = {text = "BSd 3-clause"}

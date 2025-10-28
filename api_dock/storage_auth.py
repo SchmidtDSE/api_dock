@@ -272,14 +272,22 @@ def _setup_gcs_auth(conn: Any, metadata: Optional[Dict[str, Any]] = None) -> boo
     Attempts to configure GCS access using credential chain which automatically
     discovers credentials from environment variables, service account files, etc.
 
+    Supports metadata for advanced configuration:
+    - service_account: Path to service account JSON file (overrides GOOGLE_APPLICATION_CREDENTIALS)
+    - key_id: HMAC access key ID (overrides GCS_ACCESS_KEY_ID)
+    - secret: HMAC secret key (overrides GCS_SECRET_ACCESS_KEY)
+    - endpoint: Custom endpoint for GCS-compatible storage
+
     Args:
         conn: DuckDB connection object.
-        metadata: Optional metadata dict (currently unused for GCS, reserved for future).
+        metadata: Optional metadata dict with GCS-specific configuration.
 
     Returns:
         True if setup succeeded, False if it failed (but query may still work with public files).
     """
     try:
+        import os
+
         if metadata is None:
             metadata = {}
 
@@ -287,17 +295,45 @@ def _setup_gcs_auth(conn: Any, metadata: Optional[Dict[str, Any]] = None) -> boo
         conn.execute("INSTALL httpfs;")
         conn.execute("LOAD httpfs;")
 
-        # Configure GCS authentication using credential chain
-        # This automatically discovers credentials from:
-        # - Environment variables (GCS_ACCESS_KEY_ID, GCS_SECRET_ACCESS_KEY)
-        # - Service account files (GOOGLE_APPLICATION_CREDENTIALS)
-        # - HMAC keys from GCS settings
-        conn.execute("""
-            CREATE OR REPLACE SECRET (
-                TYPE gcs,
-                PROVIDER credential_chain
-            );
-        """)
+        # Check if explicit credentials are provided in metadata
+        key_id = metadata.get('key_id')
+        secret = metadata.get('secret')
+        service_account = metadata.get('service_account')
+        endpoint = metadata.get('endpoint')
+
+        # Priority for service account:
+        # 1. Metadata service_account path
+        # 2. GOOGLE_APPLICATION_CREDENTIALS env var
+        if service_account:
+            # Set environment variable for this session
+            os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = service_account
+
+        # Configure GCS authentication
+        if key_id and secret:
+            # Use explicit HMAC credentials from config
+            secret_parts = [
+                "TYPE gcs",
+                f"KEY_ID '{key_id}'",
+                f"SECRET '{secret}'"
+            ]
+
+            if endpoint:
+                secret_parts.append(f"ENDPOINT '{endpoint}'")
+
+            secret_sql = f"CREATE OR REPLACE SECRET ({', '.join(secret_parts)});"
+            conn.execute(secret_sql)
+        else:
+            # Use credential chain (environment variables, service account, etc.)
+            # This automatically discovers credentials from:
+            # - Environment variables (GCS_ACCESS_KEY_ID, GCS_SECRET_ACCESS_KEY)
+            # - Service account files (GOOGLE_APPLICATION_CREDENTIALS)
+            # - HMAC keys from GCS settings
+            conn.execute("""
+                CREATE OR REPLACE SECRET (
+                    TYPE gcs,
+                    PROVIDER credential_chain
+                );
+            """)
         return True
     except Exception:
         # Authentication setup failed, but public GCS files may still work

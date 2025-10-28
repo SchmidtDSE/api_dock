@@ -137,7 +137,24 @@ export AWS_PROFILE=my-profile
 
 ## Google Cloud Storage (GCS) Authentication
 
-### Method 1: Service Account (Recommended)
+### Method 1: Config-Based Service Account (Recommended)
+
+Specify the service account directly in your database configuration:
+
+```yaml
+# api_dock_config/databases/my_db.yaml
+tables:
+  gcs_data:
+    uri: gs://my-bucket/data.parquet
+    service_account: /path/to/service-account-key.json
+```
+
+**Benefits:**
+- Per-table authentication
+- Different buckets can use different service accounts
+- No global environment variables needed
+
+### Method 2: Environment Variable Service Account
 
 1. Create a service account with Storage Object Viewer role
 2. Download JSON key file
@@ -147,7 +164,24 @@ export AWS_PROFILE=my-profile
 export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account-key.json"
 ```
 
-### Method 2: HMAC Keys
+### Method 3: Config-Based HMAC Keys
+
+Specify HMAC credentials in your database configuration:
+
+```yaml
+tables:
+  gcs_data:
+    uri: gs://my-bucket/data.parquet
+    key_id: GOOG1E...
+    secret: your-hmac-secret-key
+```
+
+**Use when:**
+- Using HMAC keys instead of service accounts
+- Need per-table credential isolation
+- Testing with different GCS accounts
+
+### Method 4: Environment Variable HMAC Keys
 
 1. Generate HMAC keys in GCS console
 2. Set environment variables:
@@ -157,13 +191,13 @@ export GCS_ACCESS_KEY_ID="GOOG1E..."
 export GCS_SECRET_ACCESS_KEY="..."
 ```
 
-### Method 3: gcloud CLI
+### Method 5: gcloud CLI
 
 ```bash
 gcloud auth application-default login
 ```
 
-### Method 4: Workload Identity (GKE)
+### Method 6: Workload Identity (GKE)
 
 When running on Google Kubernetes Engine, use Workload Identity:
 
@@ -171,6 +205,28 @@ When running on Google Kubernetes Engine, use Workload Identity:
 # No environment configuration needed
 # GKE automatically injects credentials
 ```
+
+### Method 7: GCS-Compatible Storage (MinIO, etc.)
+
+For GCS-compatible object storage, specify custom endpoint:
+
+```yaml
+tables:
+  minio_data:
+    uri: gs://bucket/data.parquet
+    endpoint: https://minio.example.com
+    key_id: minioadmin
+    secret: minioadmin
+```
+
+### Authentication Priority
+
+1. **Config `service_account`** (highest priority)
+2. **Config `key_id` + `secret`**
+3. `GOOGLE_APPLICATION_CREDENTIALS` environment variable
+4. `GCS_ACCESS_KEY_ID` + `GCS_SECRET_ACCESS_KEY` environment variables
+5. gcloud CLI credentials
+6. Workload Identity (GKE)
 
 ---
 
