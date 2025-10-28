@@ -1,0 +1,273 @@
+"""
+
+Storage Authentication Module for API Dock
+
+Handles authentication setup for various cloud storage backends (AWS S3, GCS, Azure, HTTP/HTTPS)
+in DuckDB queries. Supports both public and private files with credential chain authentication.
+
+License: BSD 3-Clause
+
+"""
+
+#
+# IMPORTS
+#
+import re
+from typing import Any, Dict, List, Optional, Set
+
+
+#
+# CONSTANTS
+#
+# Storage backend detection patterns
+S3_PATTERN = re.compile(r'^s3[a]?://', re.IGNORECASE)
+GCS_PATTERN = re.compile(r'^gs://', re.IGNORECASE)
+AZURE_PATTERN = re.compile(r'^az[ure]*://', re.IGNORECASE)
+HTTP_PATTERN = re.compile(r'^https?://', re.IGNORECASE)
+
+# Storage backend types
+BACKEND_S3 = 's3'
+BACKEND_GCS = 'gcs'
+BACKEND_AZURE = 'azure'
+BACKEND_HTTP = 'http'
+BACKEND_LOCAL = 'local'
+
+
+#
+# PUBLIC
+#
+def detect_storage_backend(uri: str) -> str:
+    """Detect the storage backend from a URI.
+
+    Args:
+        uri: File URI or path (e.g., "s3://bucket/file", "gs://bucket/file", "/path/to/file")
+
+    Returns:
+        Storage backend type: 's3', 'gcs', 'azure', 'http', or 'local'
+    """
+    if S3_PATTERN.match(uri):
+        return BACKEND_S3
+    elif GCS_PATTERN.match(uri):
+        return BACKEND_GCS
+    elif AZURE_PATTERN.match(uri):
+        return BACKEND_AZURE
+    elif HTTP_PATTERN.match(uri):
+        return BACKEND_HTTP
+    else:
+        return BACKEND_LOCAL
+
+
+def extract_table_uris(database_config: Dict[str, Any]) -> List[str]:
+    """Extract all table URIs from database configuration.
+
+    Args:
+        database_config: Database configuration dictionary with 'tables' section.
+
+    Returns:
+        List of table URIs/paths.
+    """
+    tables = database_config.get('tables', {})
+    return list(tables.values())
+
+
+def detect_required_backends(table_uris: List[str]) -> Set[str]:
+    """Detect which storage backends are needed for a list of table URIs.
+
+    Args:
+        table_uris: List of table URIs/paths.
+
+    Returns:
+        Set of required backend types (e.g., {'s3', 'gcs', 'local'})
+    """
+    backends = set()
+    for uri in table_uris:
+        backend = detect_storage_backend(uri)
+        backends.add(backend)
+    return backends
+
+
+def setup_storage_authentication(conn: Any, backends: Set[str]) -> Dict[str, bool]:
+    """Setup authentication for required storage backends in DuckDB connection.
+
+    This function attempts to configure authentication for each required backend.
+    It gracefully handles failures, allowing queries to proceed with public files
+    or when credentials are not needed.
+
+    Supported backends:
+    - S3: Uses AWS credential chain (env vars, config files, IAM roles)
+    - GCS: Uses GCS credential chain (service account, HMAC keys)
+    - Azure: Uses Azure credential chain (env vars, managed identity)
+    - HTTP/HTTPS: Uses httpfs extension (supports public files)
+
+    Args:
+        conn: DuckDB connection object.
+        backends: Set of required backend types.
+
+    Returns:
+        Dictionary mapping backend names to setup success status.
+        True means authentication was configured, False means it failed but
+        the query may still work with public files.
+    """
+    results = {}
+
+    # Setup S3 authentication (AWS)
+    if BACKEND_S3 in backends:
+        results[BACKEND_S3] = _setup_s3_auth(conn)
+
+    # Setup GCS authentication (Google Cloud Storage)
+    if BACKEND_GCS in backends:
+        results[BACKEND_GCS] = _setup_gcs_auth(conn)
+
+    # Setup Azure authentication
+    if BACKEND_AZURE in backends:
+        results[BACKEND_AZURE] = _setup_azure_auth(conn)
+
+    # Setup HTTP/HTTPS support
+    if BACKEND_HTTP in backends:
+        results[BACKEND_HTTP] = _setup_http_support(conn)
+
+    # Local files don't need authentication
+    if BACKEND_LOCAL in backends:
+        results[BACKEND_LOCAL] = True
+
+    return results
+
+
+#
+# INTERNAL
+#
+def _setup_s3_auth(conn: Any) -> bool:
+    """Setup AWS S3 authentication using credential chain.
+
+    Attempts to configure S3 access using AWS credential chain which automatically
+    discovers credentials from environment variables, config files, IAM roles, etc.
+
+    Args:
+        conn: DuckDB connection object.
+
+    Returns:
+        True if setup succeeded, False if it failed (but query may still work with public files).
+    """
+    try:
+        conn.execute("INSTALL aws;")
+        conn.execute("LOAD aws;")
+
+        # Configure S3 authentication using AWS credential chain
+        # This automatically discovers credentials from:
+        # - Environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN)
+        # - AWS config files (~/.aws/credentials, ~/.aws/config)
+        # - IAM roles (EC2, ECS, EKS, Lambda)
+        # - SSO credentials
+        # - Other AWS SDK credential providers
+        conn.execute("""
+            CREATE OR REPLACE SECRET (
+                TYPE s3,
+                PROVIDER credential_chain
+            );
+        """)
+        return True
+    except Exception:
+        # Authentication setup failed, but public S3 files may still work
+        return False
+
+
+def _setup_gcs_auth(conn: Any) -> bool:
+    """Setup GCS authentication using credential chain.
+
+    Attempts to configure GCS access using credential chain which automatically
+    discovers credentials from environment variables, service account files, etc.
+
+    Args:
+        conn: DuckDB connection object.
+
+    Returns:
+        True if setup succeeded, False if it failed (but query may still work with public files).
+    """
+    try:
+        # Install httpfs extension (required for GCS)
+        conn.execute("INSTALL httpfs;")
+        conn.execute("LOAD httpfs;")
+
+        # Configure GCS authentication using credential chain
+        # This automatically discovers credentials from:
+        # - Environment variables (GCS_ACCESS_KEY_ID, GCS_SECRET_ACCESS_KEY)
+        # - Service account files (GOOGLE_APPLICATION_CREDENTIALS)
+        # - HMAC keys from GCS settings
+        conn.execute("""
+            CREATE OR REPLACE SECRET (
+                TYPE gcs,
+                PROVIDER credential_chain
+            );
+        """)
+        return True
+    except Exception:
+        # Authentication setup failed, but public GCS files may still work
+        return False
+
+
+def _setup_azure_auth(conn: Any) -> bool:
+    """Setup Azure Blob Storage authentication using credential chain.
+
+    Attempts to configure Azure access using credential chain which automatically
+    discovers credentials from environment variables, managed identity, etc.
+
+    Args:
+        conn: DuckDB connection object.
+
+    Returns:
+        True if setup succeeded, False if it failed (but query may still work with public files).
+    """
+    try:
+        conn.execute("INSTALL azure;")
+        conn.execute("LOAD azure;")
+
+        # Configure Azure authentication using credential chain
+        # This automatically discovers credentials from:
+        # - Environment variables (AZURE_STORAGE_CONNECTION_STRING, AZURE_STORAGE_ACCOUNT, etc.)
+        # - Managed Identity (when running on Azure)
+        # - Azure CLI credentials
+        conn.execute("""
+            CREATE OR REPLACE SECRET (
+                TYPE azure,
+                PROVIDER credential_chain
+            );
+        """)
+        return True
+    except Exception:
+        # Authentication setup failed, but public Azure files may still work
+        return False
+
+
+def _setup_http_support(conn: Any) -> bool:
+    """Setup HTTP/HTTPS support.
+
+    Installs httpfs extension for HTTP/HTTPS access. Note that HTTP authentication
+    (bearer tokens, custom headers) can be configured separately if needed.
+
+    Args:
+        conn: DuckDB connection object.
+
+    Returns:
+        True if setup succeeded, False if it failed.
+    """
+    try:
+        # Install httpfs extension (supports HTTP/HTTPS)
+        conn.execute("INSTALL httpfs;")
+        conn.execute("LOAD httpfs;")
+
+        # Note: HTTP authentication (if needed) can be configured with:
+        # CREATE SECRET http_auth (
+        #     TYPE http,
+        #     BEARER_TOKEN 'token'
+        # );
+        # or
+        # CREATE SECRET http_auth (
+        #     TYPE http,
+        #     EXTRA_HTTP_HEADERS MAP {
+        #         'Authorization': 'Bearer token'
+        #     }
+        # );
+
+        return True
+    except Exception:
+        return False

@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from api_dock.config import find_remote_config, find_route_mapping, get_database_names, get_remote_names, get_remote_versions, get_settings, is_route_allowed, is_versioned_remote, load_main_config, resolve_latest_version
 from api_dock.database_config import find_database_route, get_database_versions, is_versioned_database, load_database_config, resolve_latest_database_version
 from api_dock.sql_builder import build_sql_query, extract_path_parameters
+from api_dock.storage_auth import detect_required_backends, extract_table_uris, setup_storage_authentication
 
 
 #
@@ -332,6 +333,23 @@ class RouteMapper:
 
             # Execute query and fetch results
             conn = duckdb.connect(database=':memory:')
+
+            # Setup authentication for required storage backends
+            # Detects backends from table URIs (s3://, gs://, azure://, http://, local)
+            # and configures authentication using credential chains
+            table_uris = extract_table_uris(database_config)
+            required_backends = detect_required_backends(table_uris)
+
+            # Setup authentication for each backend
+            # This automatically discovers credentials from:
+            # - S3: AWS env vars, config files, IAM roles, SSO
+            # - GCS: GCS env vars, service account files, HMAC keys
+            # - Azure: Azure env vars, managed identity, CLI credentials
+            # - HTTP/HTTPS: httpfs extension (custom headers can be added if needed)
+            #
+            # Note: Authentication setup failures are graceful - public files will still work
+            auth_results = setup_storage_authentication(conn, required_backends)
+
             result = conn.execute(sql_query).fetchall()
             columns = [desc[0] for desc in conn.description] if conn.description else []
             conn.close()
