@@ -84,15 +84,52 @@ def get_database_names(config: Dict[str, Any]) -> List[str]:
 def get_table_definition(table_name: str, database_config: Dict[str, Any]) -> Optional[str]:
     """Get the file path for a table from database configuration.
 
+    Supports both string URIs and dict-based definitions:
+    - String format: "table_name: s3://bucket/file.parquet"
+    - Dict format: "table_name: {uri: s3://bucket/file.parquet, region: us-east-2}"
+
     Args:
         table_name: Name of the table.
         database_config: Database configuration dictionary.
 
     Returns:
-        File path for the table, or None if not found.
+        File path/URI for the table, or None if not found.
     """
     tables = database_config.get("tables", {})
-    return tables.get(table_name)
+    table_def = tables.get(table_name)
+
+    # Handle both string and dict formats
+    if isinstance(table_def, str):
+        return table_def
+    elif isinstance(table_def, dict):
+        return table_def.get("uri") or table_def.get("path")
+    else:
+        return None
+
+
+def get_table_metadata(table_name: str, database_config: Dict[str, Any]) -> Dict[str, Any]:
+    """Get metadata for a table from database configuration.
+
+    Returns metadata like region, auth headers, etc. if table is defined as a dict.
+
+    Args:
+        table_name: Name of the table.
+        database_config: Database configuration dictionary.
+
+    Returns:
+        Dictionary containing table metadata (empty dict if table is string format).
+        Possible keys: region, auth_headers, method, etc.
+    """
+    tables = database_config.get("tables", {})
+    table_def = tables.get(table_name)
+
+    if isinstance(table_def, dict):
+        # Return all metadata except the URI/path itself
+        metadata = {k: v for k, v in table_def.items() if k not in ['uri', 'path']}
+        return metadata
+    else:
+        # String format has no metadata
+        return {}
 
 
 def get_named_query(query_name: str, database_config: Dict[str, Any]) -> Optional[str]:

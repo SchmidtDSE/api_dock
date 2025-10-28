@@ -67,8 +67,17 @@ routes:
 ```bash
 export AWS_ACCESS_KEY_ID="AKIAIOSFODNN7EXAMPLE"
 export AWS_SECRET_ACCESS_KEY="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
-export AWS_DEFAULT_REGION="us-east-1"  # Optional but recommended
+export AWS_DEFAULT_REGION="us-east-2"  # IMPORTANT: Set to your bucket's actual region!
+# Alternative: export AWS_REGION="us-east-2"
 export AWS_SESSION_TOKEN="..."  # Only needed for temporary credentials
+```
+
+**Why Region Matters:**
+Setting the correct region is crucial to avoid 301 (Moved Permanently) redirects. If your bucket is in `us-east-2` but you don't set the region (or set it to `us-east-1`), DuckDB will initially try `us-east-1` and get redirected, which causes errors.
+
+**To find your bucket's region:**
+```bash
+aws s3api get-bucket-location --bucket your-bucket-name
 ```
 
 ### Method 2: AWS Configuration Files (Recommended for Development)
@@ -314,6 +323,40 @@ If authentication setup fails (e.g., no credentials configured), the system:
 
 ## Troubleshooting
 
+### "HTTP Error: 301 (Moved Permanently) - Bad Request - S3 region being set incorrectly"
+
+**Cause**: Your S3 bucket is in a different region than configured (or defaulting to us-east-1).
+
+**Error message example:**
+```
+Database query error: HTTP Error: Unable to connect to URL "https://bucket.s3.us-east-1.amazonaws.com/file.parquet":
+301 (Moved Permanently).
+Bad Request - this can be caused by the S3 region being set incorrectly.
+* Provided region is: "us-east-1"
+* Correct region is: "us-east-2"
+```
+
+**Solutions**:
+1. Set the correct AWS region environment variable:
+   ```bash
+   export AWS_DEFAULT_REGION="us-east-2"
+   # or
+   export AWS_REGION="us-east-2"
+   ```
+
+2. Find your bucket's region:
+   ```bash
+   aws s3api get-bucket-location --bucket your-bucket-name
+   ```
+
+3. Update your AWS config file (`~/.aws/config`):
+   ```ini
+   [default]
+   region = us-east-2
+   ```
+
+4. Restart API Dock after setting the region
+
 ### "Database query error: IO Error: Unable to open file"
 
 **Cause**: File doesn't exist or credentials are not configured.
@@ -323,6 +366,7 @@ If authentication setup fails (e.g., no credentials configured), the system:
 2. Check if file is public or private
 3. If private, configure credentials as shown above
 4. Verify bucket/container permissions
+5. **For S3**: Check if you're getting a 301 redirect (see above)
 
 ### "Secret Validation Failure"
 

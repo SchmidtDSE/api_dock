@@ -2163,8 +2163,8 @@ packages:
   timestamp: 1758634638734
 - pypi: ./
   name: api-dock
-  version: 0.1.0
-  sha256: b47ac40fa2f401a21c7d3c8a7fd20bd0f129d9aac1b72f0f98065c61e7ae120b
+  version: 0.2.0
+  sha256: 231268717ff508f7c90ea655eedf1857729d973c7b6c96d505b9a23e0ba45941
   requires_dist:
   - click
   - fastapi

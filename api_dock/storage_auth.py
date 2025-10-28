@@ -60,6 +60,10 @@ def detect_storage_backend(uri: str) -> str:
 def extract_table_uris(database_config: Dict[str, Any]) -> List[str]:
     """Extract all table URIs from database configuration.
 
+    Supports both string and dict table definitions:
+    - String: "table: s3://bucket/file.parquet"
+    - Dict: "table: {uri: s3://bucket/file.parquet, region: us-east-2}"
+
     Args:
         database_config: Database configuration dictionary with 'tables' section.
 
@@ -67,7 +71,56 @@ def extract_table_uris(database_config: Dict[str, Any]) -> List[str]:
         List of table URIs/paths.
     """
     tables = database_config.get('tables', {})
-    return list(tables.values())
+    uris = []
+
+    for table_def in tables.values():
+        if isinstance(table_def, str):
+            uris.append(table_def)
+        elif isinstance(table_def, dict):
+            uri = table_def.get('uri') or table_def.get('path')
+            if uri:
+                uris.append(uri)
+
+    return uris
+
+
+def extract_table_metadata_by_backend(database_config: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Extract table metadata grouped by storage backend.
+
+    Args:
+        database_config: Database configuration dictionary with 'tables' section.
+
+    Returns:
+        Dictionary mapping backend types to their aggregated metadata.
+        Example: {'s3': {'region': 'us-east-2'}, 'http': {'auth_headers': {...}}}
+    """
+    tables = database_config.get('tables', {})
+    backend_metadata = {}
+
+    for table_def in tables.values():
+        # Get URI and metadata
+        if isinstance(table_def, str):
+            uri = table_def
+            metadata = {}
+        elif isinstance(table_def, dict):
+            uri = table_def.get('uri') or table_def.get('path')
+            metadata = {k: v for k, v in table_def.items() if k not in ['uri', 'path']}
+        else:
+            continue
+
+        if not uri:
+            continue
+
+        # Detect backend and store metadata
+        backend = detect_storage_backend(uri)
+
+        if backend not in backend_metadata:
+            backend_metadata[backend] = {}
+
+        # Merge metadata (later tables can override earlier ones)
+        backend_metadata[backend].update(metadata)
+
+    return backend_metadata
 
 
 def detect_required_backends(table_uris: List[str]) -> Set[str]:
@@ -86,7 +139,7 @@ def detect_required_backends(table_uris: List[str]) -> Set[str]:
     return backends
 
 
-def setup_storage_authentication(conn: Any, backends: Set[str]) -> Dict[str, bool]:
+def setup_storage_authentication(conn: Any, backends: Set[str], metadata: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, bool]:
     """Setup authentication for required storage backends in DuckDB connection.
 
     This function attempts to configure authentication for each required backend.
@@ -102,29 +155,38 @@ def setup_storage_authentication(conn: Any, backends: Set[str]) -> Dict[str, boo
     Args:
         conn: DuckDB connection object.
         backends: Set of required backend types.
+        metadata: Optional dictionary mapping backend types to their configuration metadata.
+                 Example: {'s3': {'region': 'us-east-2'}, 'http': {'auth_headers': {...}}}
 
     Returns:
         Dictionary mapping backend names to setup success status.
         True means authentication was configured, False means it failed but
         the query may still work with public files.
     """
+    if metadata is None:
+        metadata = {}
+
     results = {}
 
     # Setup S3 authentication (AWS)
     if BACKEND_S3 in backends:
-        results[BACKEND_S3] = _setup_s3_auth(conn)
+        s3_metadata = metadata.get(BACKEND_S3, {})
+        results[BACKEND_S3] = _setup_s3_auth(conn, s3_metadata)
 
     # Setup GCS authentication (Google Cloud Storage)
     if BACKEND_GCS in backends:
-        results[BACKEND_GCS] = _setup_gcs_auth(conn)
+        gcs_metadata = metadata.get(BACKEND_GCS, {})
+        results[BACKEND_GCS] = _setup_gcs_auth(conn, gcs_metadata)
 
     # Setup Azure authentication
     if BACKEND_AZURE in backends:
-        results[BACKEND_AZURE] = _setup_azure_auth(conn)
+        azure_metadata = metadata.get(BACKEND_AZURE, {})
+        results[BACKEND_AZURE] = _setup_azure_auth(conn, azure_metadata)
 
     # Setup HTTP/HTTPS support
     if BACKEND_HTTP in backends:
-        results[BACKEND_HTTP] = _setup_http_support(conn)
+        http_metadata = metadata.get(BACKEND_HTTP, {})
+        results[BACKEND_HTTP] = _setup_http_support(conn, http_metadata)
 
     # Local files don't need authentication
     if BACKEND_LOCAL in backends:
@@ -136,21 +198,42 @@ def setup_storage_authentication(conn: Any, backends: Set[str]) -> Dict[str, boo
 #
 # INTERNAL
 #
-def _setup_s3_auth(conn: Any) -> bool:
+def _setup_s3_auth(conn: Any, metadata: Optional[Dict[str, Any]] = None) -> bool:
     """Setup AWS S3 authentication using credential chain.
 
     Attempts to configure S3 access using AWS credential chain which automatically
     discovers credentials from environment variables, config files, IAM roles, etc.
 
+    Region configuration priority:
+    1. metadata['region'] (from database config)
+    2. AWS_DEFAULT_REGION or AWS_REGION environment variable
+    3. None (DuckDB auto-detect, may cause 301 redirects)
+
     Args:
         conn: DuckDB connection object.
+        metadata: Optional metadata dict that may contain 'region' key.
 
     Returns:
         True if setup succeeded, False if it failed (but query may still work with public files).
     """
     try:
+        import os
+
+        if metadata is None:
+            metadata = {}
+
         conn.execute("INSTALL aws;")
         conn.execute("LOAD aws;")
+
+        # Determine AWS region with priority:
+        # 1. Config file metadata (most specific)
+        # 2. Environment variables
+        # 3. None (auto-detect)
+        aws_region = (
+            metadata.get('region') or
+            os.environ.get('AWS_DEFAULT_REGION') or
+            os.environ.get('AWS_REGION')
+        )
 
         # Configure S3 authentication using AWS credential chain
         # This automatically discovers credentials from:
@@ -159,19 +242,31 @@ def _setup_s3_auth(conn: Any) -> bool:
         # - IAM roles (EC2, ECS, EKS, Lambda)
         # - SSO credentials
         # - Other AWS SDK credential providers
-        conn.execute("""
-            CREATE OR REPLACE SECRET (
-                TYPE s3,
-                PROVIDER credential_chain
-            );
-        """)
+        if aws_region:
+            # If region is specified, include it in the secret
+            conn.execute(f"""
+                CREATE OR REPLACE SECRET (
+                    TYPE s3,
+                    PROVIDER credential_chain,
+                    REGION '{aws_region}'
+                );
+            """)
+        else:
+            # No region specified, let DuckDB auto-detect
+            # Note: This may cause 301 redirects if bucket is in a different region
+            conn.execute("""
+                CREATE OR REPLACE SECRET (
+                    TYPE s3,
+                    PROVIDER credential_chain
+                );
+            """)
         return True
     except Exception:
         # Authentication setup failed, but public S3 files may still work
         return False
 
 
-def _setup_gcs_auth(conn: Any) -> bool:
+def _setup_gcs_auth(conn: Any, metadata: Optional[Dict[str, Any]] = None) -> bool:
     """Setup GCS authentication using credential chain.
 
     Attempts to configure GCS access using credential chain which automatically
@@ -179,11 +274,15 @@ def _setup_gcs_auth(conn: Any) -> bool:
 
     Args:
         conn: DuckDB connection object.
+        metadata: Optional metadata dict (currently unused for GCS, reserved for future).
 
     Returns:
         True if setup succeeded, False if it failed (but query may still work with public files).
     """
     try:
+        if metadata is None:
+            metadata = {}
+
         # Install httpfs extension (required for GCS)
         conn.execute("INSTALL httpfs;")
         conn.execute("LOAD httpfs;")
@@ -205,7 +304,7 @@ def _setup_gcs_auth(conn: Any) -> bool:
         return False
 
 
-def _setup_azure_auth(conn: Any) -> bool:
+def _setup_azure_auth(conn: Any, metadata: Optional[Dict[str, Any]] = None) -> bool:
     """Setup Azure Blob Storage authentication using credential chain.
 
     Attempts to configure Azure access using credential chain which automatically
@@ -213,11 +312,15 @@ def _setup_azure_auth(conn: Any) -> bool:
 
     Args:
         conn: DuckDB connection object.
+        metadata: Optional metadata dict (currently unused for Azure, reserved for future).
 
     Returns:
         True if setup succeeded, False if it failed (but query may still work with public files).
     """
     try:
+        if metadata is None:
+            metadata = {}
+
         conn.execute("INSTALL azure;")
         conn.execute("LOAD azure;")
 
@@ -238,35 +341,51 @@ def _setup_azure_auth(conn: Any) -> bool:
         return False
 
 
-def _setup_http_support(conn: Any) -> bool:
+def _setup_http_support(conn: Any, metadata: Optional[Dict[str, Any]] = None) -> bool:
     """Setup HTTP/HTTPS support.
 
-    Installs httpfs extension for HTTP/HTTPS access. Note that HTTP authentication
-    (bearer tokens, custom headers) can be configured separately if needed.
+    Installs httpfs extension for HTTP/HTTPS access. If metadata contains
+    auth_headers or bearer_token, configures HTTP authentication.
 
     Args:
         conn: DuckDB connection object.
+        metadata: Optional metadata dict that may contain:
+                 - bearer_token: Bearer token for Authorization header
+                 - auth_headers: Dict of custom HTTP headers
 
     Returns:
         True if setup succeeded, False if it failed.
     """
     try:
+        if metadata is None:
+            metadata = {}
+
         # Install httpfs extension (supports HTTP/HTTPS)
         conn.execute("INSTALL httpfs;")
         conn.execute("LOAD httpfs;")
 
-        # Note: HTTP authentication (if needed) can be configured with:
-        # CREATE SECRET http_auth (
-        #     TYPE http,
-        #     BEARER_TOKEN 'token'
-        # );
-        # or
-        # CREATE SECRET http_auth (
-        #     TYPE http,
-        #     EXTRA_HTTP_HEADERS MAP {
-        #         'Authorization': 'Bearer token'
-        #     }
-        # );
+        # Setup HTTP authentication if provided
+        bearer_token = metadata.get('bearer_token')
+        auth_headers = metadata.get('auth_headers')
+
+        if bearer_token:
+            # Use bearer token authentication
+            conn.execute(f"""
+                CREATE OR REPLACE SECRET http_auth (
+                    TYPE http,
+                    BEARER_TOKEN '{bearer_token}'
+                );
+            """)
+        elif auth_headers:
+            # Use custom headers
+            # Convert dict to DuckDB MAP format
+            headers_str = ', '.join([f"'{k}': '{v}'" for k, v in auth_headers.items()])
+            conn.execute(f"""
+                CREATE OR REPLACE SECRET http_auth (
+                    TYPE http,
+                    EXTRA_HTTP_HEADERS MAP {{{headers_str}}}
+                );
+            """)
 
         return True
     except Exception:

@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from api_dock.config import find_remote_config, find_route_mapping, get_database_names, get_remote_names, get_remote_versions, get_settings, is_route_allowed, is_versioned_remote, load_main_config, resolve_latest_version
 from api_dock.database_config import find_database_route, get_database_versions, is_versioned_database, load_database_config, resolve_latest_database_version
 from api_dock.sql_builder import build_sql_query, extract_path_parameters
-from api_dock.storage_auth import detect_required_backends, extract_table_uris, setup_storage_authentication
+from api_dock.storage_auth import detect_required_backends, extract_table_metadata_by_backend, extract_table_uris, setup_storage_authentication
 
 
 #
@@ -340,22 +340,32 @@ class RouteMapper:
             table_uris = extract_table_uris(database_config)
             required_backends = detect_required_backends(table_uris)
 
+            # Extract table metadata (region, auth headers, etc.) grouped by backend
+            backend_metadata = extract_table_metadata_by_backend(database_config)
+
             # Setup authentication for each backend
             # This automatically discovers credentials from:
-            # - S3: AWS env vars, config files, IAM roles, SSO
+            # - S3: AWS env vars, config files, IAM roles, SSO (+ region from config or env)
             # - GCS: GCS env vars, service account files, HMAC keys
             # - Azure: Azure env vars, managed identity, CLI credentials
-            # - HTTP/HTTPS: httpfs extension (custom headers can be added if needed)
+            # - HTTP/HTTPS: httpfs extension (+ custom headers/bearer token from config)
             #
+            # Metadata from config takes precedence over environment variables
             # Note: Authentication setup failures are graceful - public files will still work
-            auth_results = setup_storage_authentication(conn, required_backends)
+            auth_results = setup_storage_authentication(conn, required_backends, backend_metadata)
 
             result = conn.execute(sql_query).fetchall()
             columns = [desc[0] for desc in conn.description] if conn.description else []
             conn.close()
 
-            # Convert to list of dictionaries
-            response_data = [dict(zip(columns, row)) for row in result]
+            # Convert to list of dictionaries with JSON-safe values
+            response_data = []
+            for row in result:
+                row_dict = {}
+                for col, val in zip(columns, row):
+                    # Convert non-JSON-serializable types to strings
+                    row_dict[col] = _make_json_safe(val)
+                response_data.append(row_dict)
 
             return (True, response_data, 200, None)
 
@@ -476,3 +486,33 @@ class RouteMapper:
 #
 # INTERNAL
 #
+def _make_json_safe(value: Any) -> Any:
+    """Convert non-JSON-serializable values to JSON-safe types.
+
+    Handles datetime objects, dates, decimals, and other common types
+    that DuckDB returns but aren't directly JSON serializable.
+
+    Args:
+        value: Value to convert.
+
+    Returns:
+        JSON-safe version of the value.
+    """
+    from datetime import date, datetime
+    from decimal import Decimal
+
+    if value is None:
+        return None
+    elif isinstance(value, (datetime, date)):
+        # Convert datetime/date to ISO format string
+        return value.isoformat()
+    elif isinstance(value, Decimal):
+        # Convert Decimal to float
+        return float(value)
+    elif isinstance(value, bytes):
+        # Convert bytes to base64 string
+        import base64
+        return base64.b64encode(value).decode('utf-8')
+    else:
+        # Return as-is for JSON-safe types (str, int, float, bool, list, dict)
+        return value
