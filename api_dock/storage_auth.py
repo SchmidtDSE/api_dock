@@ -381,13 +381,14 @@ def _setup_http_support(conn: Any, metadata: Optional[Dict[str, Any]] = None) ->
     """Setup HTTP/HTTPS support.
 
     Installs httpfs extension for HTTP/HTTPS access. If metadata contains
-    auth_headers or bearer_token, configures HTTP authentication.
+    auth_headers, bearer_token, or cookies, configures HTTP authentication.
 
     Args:
         conn: DuckDB connection object.
         metadata: Optional metadata dict that may contain:
                  - bearer_token: Bearer token for Authorization header
                  - auth_headers: Dict of custom HTTP headers
+                 - cookies: Dict of cookies to send with requests
 
     Returns:
         True if setup succeeded, False if it failed.
@@ -402,20 +403,26 @@ def _setup_http_support(conn: Any, metadata: Optional[Dict[str, Any]] = None) ->
 
         # Setup HTTP authentication if provided
         bearer_token = metadata.get('bearer_token')
-        auth_headers = metadata.get('auth_headers')
+        auth_headers = metadata.get('auth_headers', {})
+        cookies = metadata.get('cookies', {})
 
+        # Build headers dict
+        headers = dict(auth_headers) if auth_headers else {}
+
+        # Add bearer token to headers if provided
         if bearer_token:
-            # Use bearer token authentication
-            conn.execute(f"""
-                CREATE OR REPLACE SECRET http_auth (
-                    TYPE http,
-                    BEARER_TOKEN '{bearer_token}'
-                );
-            """)
-        elif auth_headers:
-            # Use custom headers
+            headers['Authorization'] = f'Bearer {bearer_token}'
+
+        # Add cookies to headers if provided
+        # Cookies are sent via the Cookie header
+        if cookies:
+            cookie_str = '; '.join([f'{k}={v}' for k, v in cookies.items()])
+            headers['Cookie'] = cookie_str
+
+        # Create HTTP secret with headers if any are configured
+        if headers:
             # Convert dict to DuckDB MAP format
-            headers_str = ', '.join([f"'{k}': '{v}'" for k, v in auth_headers.items()])
+            headers_str = ', '.join([f"'{k}': '{v}'" for k, v in headers.items()])
             conn.execute(f"""
                 CREATE OR REPLACE SECRET http_auth (
                     TYPE http,
