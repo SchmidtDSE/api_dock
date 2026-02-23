@@ -101,7 +101,8 @@ def _add_remote_routes(app: Flask, route_mapper: RouteMapper) -> None:
             success, response_data, status_code, error_message = asyncio.run(
                 route_mapper.map_database_route(
                     database_name=remote_name,
-                    path=""
+                    path="",
+                    query_params=dict(request.args)
                 )
             )
         else:
@@ -145,7 +146,8 @@ def _add_remote_routes(app: Flask, route_mapper: RouteMapper) -> None:
             success, response_data, status_code, error_message = asyncio.run(
                 route_mapper.map_database_route(
                     database_name=remote_name,
-                    path=path
+                    path=path,
+                    query_params=dict(request.args)
                 )
             )
         else:

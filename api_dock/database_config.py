@@ -239,6 +239,77 @@ def find_database_route(path: str, database_config: Dict[str, Any]) -> Optional[
     return None
 
 
+def validate_route_config(route_config: Dict[str, Any]) -> bool:
+    """Validate route configuration with new declarative parameter format.
+
+    Args:
+        route_config: Route configuration dictionary.
+
+    Returns:
+        True if configuration is valid, False otherwise.
+    """
+    # Validate basic route structure
+    if not isinstance(route_config, dict):
+        return False
+
+    # Check for required route field
+    if 'route' not in route_config:
+        return False
+
+    # Validate query_params structure if present
+    if 'query_params' in route_config:
+        query_params = route_config['query_params']
+        if not isinstance(query_params, list):
+            return False
+
+        for param_item in query_params:
+            if not isinstance(param_item, dict):
+                return False
+
+            # Each parameter should have exactly one key (the parameter name)
+            if len(param_item) != 1:
+                return False
+
+            param_name, param_config = next(iter(param_item.items()))
+
+            # Validate parameter configuration structure
+            if not isinstance(param_config, dict):
+                return False
+
+            # Check for valid configuration keys
+            valid_keys = {'sql', 'response', 'conditional', 'action', 'required', 'default', 'missing_response'}
+            if not any(key in param_config for key in valid_keys):
+                return False
+
+            # Validate conditional structure if present
+            if 'conditional' in param_config:
+                conditional = param_config['conditional']
+                if not isinstance(conditional, dict):
+                    return False
+
+                # Each conditional value should have sql, response, or action
+                for condition_key, condition_config in conditional.items():
+                    if not isinstance(condition_config, dict):
+                        return False
+                    valid_condition_keys = {'sql', 'response', 'action'}
+                    if not any(key in condition_config for key in valid_condition_keys):
+                        return False
+
+            # Validate action structure if present
+            if 'action' in param_config:
+                action = param_config['action']
+                if not isinstance(action, (str, dict)):
+                    return False
+
+            # Validate missing_response structure if present
+            if 'missing_response' in param_config:
+                missing_response = param_config['missing_response']
+                if not isinstance(missing_response, dict):
+                    return False
+
+    return True
+
+
 #
 # INTERNAL
 #

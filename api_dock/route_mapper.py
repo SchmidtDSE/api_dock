@@ -236,17 +236,21 @@ class RouteMapper:
     async def map_database_route(
             self,
             database_name: str,
-            path: str) -> Tuple[bool, Any, int, Optional[str]]:
-        """Execute a SQL query for a database route.
+            path: str,
+            query_params: Optional[Dict[str, str]] = None) -> Tuple[bool, Any, int, Optional[str]]:
+        """Execute a SQL query for a database route with query parameter support.
 
         Args:
             database_name: Name of the database.
             path: The path to match against database routes.
+            query_params: Optional dictionary of query parameters from URL.
 
         Returns:
             Tuple of (success, response_data, status_code, error_message).
             If success is False, error_message contains the reason.
         """
+        if query_params is None:
+            query_params = {}
         # Validate database exists
         if database_name not in self.database_names:
             return (False, None, 404, f"Database '{database_name}' not found")
@@ -320,10 +324,21 @@ class RouteMapper:
         route_pattern = route_config.get("route", "")
         path_params = extract_path_parameters(actual_path, route_pattern)
 
-        # Build SQL query
-        sql_template = route_config.get("sql", "")
+        # Process query parameters with declarative configuration
         try:
-            sql_query = build_sql_query(sql_template, database_config, path_params)
+            from api_dock.sql_builder import process_query_parameters
+            should_return_early, response_data, status_code, error_message = process_query_parameters(
+                route_config, query_params, path_params
+            )
+            if should_return_early:
+                return (True, response_data, status_code, error_message)
+        except Exception as e:
+            return (False, None, 500, f"Query parameter processing error: {str(e)}")
+
+        # Build SQL query with new fragment-based approach
+        try:
+            from api_dock.sql_builder import build_sql_query
+            sql_query = build_sql_query(route_config, database_config, path_params, query_params)
         except ValueError as e:
             return (False, None, 500, f"SQL query error: {str(e)}")
 
