@@ -106,7 +106,8 @@ def _add_remote_routes(app: FastAPI, route_mapper: RouteMapper) -> None:
             # Handle as database route
             success, response_data, status_code, error_message = await route_mapper.map_database_route(
                 database_name=remote_name,
-                path=path
+                path=path,
+                query_params=dict(request.query_params)
             )
         else:
             # Handle as remote API route
