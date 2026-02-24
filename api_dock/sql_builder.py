@@ -58,7 +58,12 @@ def build_sql_query(
         sql_template = resolved_query
 
     # Substitute table references [[table_name]] with FROM clauses
-    sql_with_tables = _substitute_table_references(sql_template, database_config)
+    # Strip whitespace/newlines from base SQL (YAML block scalars add trailing \n)
+    sql_with_tables = _substitute_table_references(sql_template, database_config).strip()
+
+    # Resolve default values for value-only params so they're available for substitution
+    all_params = {**path_params, **query_params}
+    all_params = _apply_default_values(route_config, all_params)
 
     # Build WHERE clause fragments from query parameters
     where_fragments = build_where_clause_from_params(route_config, query_params, path_params)
@@ -74,8 +79,12 @@ def build_sql_query(
             where_clause = ' WHERE ' + ' AND '.join(where_fragments)
         sql_with_tables += where_clause
 
+    # Build post-WHERE append fragments (ORDER BY, LIMIT, etc.)
+    append_fragments = build_append_clause_from_params(route_config, query_params, path_params)
+    if append_fragments:
+        sql_with_tables += ' ' + ' '.join(append_fragments)
+
     # Substitute remaining path parameters {{param_name}} with values
-    all_params = {**path_params, **query_params}
     sql_with_params = _substitute_variables_in_string(sql_with_tables, all_params)
 
     return sql_with_params
@@ -238,8 +247,14 @@ def build_where_clause_from_params(
         param_name, param_config = next(iter(param_item.items()))
         param_value = query_params.get(param_name)
 
-        # Skip parameters that have response or action configurations
+        # Skip parameters that have response, action, or sql_append configurations
         if 'response' in param_config:
+            continue
+        if 'sql_append' in param_config:
+            continue
+
+        # Skip value-only params (only have 'default', no sql/response/conditional/action)
+        if 'sql' not in param_config and 'conditional' not in param_config and 'response' not in param_config and 'action' not in param_config:
             continue
 
         # Handle conditional parameters that have SQL
@@ -248,8 +263,9 @@ def build_where_clause_from_params(
             if param_value in conditional_config and 'sql' in conditional_config[param_value]:
                 sql_fragment = conditional_config[param_value]['sql']
                 if sql_fragment:  # Skip empty SQL fragments
-                    substituted_fragment = _substitute_variables_in_string(sql_fragment, all_params)
-                    where_fragments.append(substituted_fragment)
+                    substituted_fragment = _substitute_variables_in_string(sql_fragment, all_params).strip()
+                    if substituted_fragment:
+                        where_fragments.append(substituted_fragment)
             continue
 
         # Handle regular SQL parameters
@@ -261,17 +277,72 @@ def build_where_clause_from_params(
                 # Use provided value or default
                 effective_value = param_value if param_value is not None else param_config['default']
                 effective_params = {**all_params, param_name: effective_value}
-                substituted_fragment = _substitute_variables_in_string(sql_fragment, effective_params)
+                substituted_fragment = _substitute_variables_in_string(sql_fragment, effective_params).strip()
                 if substituted_fragment:  # Skip empty fragments
                     where_fragments.append(substituted_fragment)
 
             # Handle optional parameters (only include if provided)
             elif param_value is not None:
-                substituted_fragment = _substitute_variables_in_string(sql_fragment, all_params)
+                substituted_fragment = _substitute_variables_in_string(sql_fragment, all_params).strip()
                 if substituted_fragment:  # Skip empty fragments
                     where_fragments.append(substituted_fragment)
 
     return where_fragments
+
+
+def build_append_clause_from_params(
+        route_config: Dict[str, Any],
+        query_params: Dict[str, str],
+        path_params: Dict[str, str]
+) -> List[str]:
+    """Build post-WHERE SQL fragments from sql_append parameter configurations.
+
+    Collects sql_append fragments (ORDER BY, LIMIT, OFFSET, etc.) in config order.
+    Uses raw (unquoted) substitution since these values are identifiers, keywords,
+    or integers — not string literals.
+
+    Args:
+        route_config: Route configuration dictionary with query_params section.
+        query_params: Dictionary of query parameters from URL.
+        path_params: Dictionary of path parameters.
+
+    Returns:
+        List of SQL fragments to append after WHERE clause, in config order.
+    """
+    query_param_configs = route_config.get('query_params', [])
+    append_fragments = []
+
+    # Combine all params and apply defaults for cross-param references
+    all_params = {**path_params, **query_params}
+    all_params = _apply_default_values(route_config, all_params)
+
+    for param_item in query_param_configs:
+        if not isinstance(param_item, dict) or len(param_item) != 1:
+            continue
+
+        param_name, param_config = next(iter(param_item.items()))
+
+        if 'sql_append' not in param_config:
+            continue
+
+        param_value = query_params.get(param_name)
+        sql_append_fragment = param_config['sql_append']
+
+        # Handle parameters with default values (always include)
+        if 'default' in param_config:
+            effective_value = param_value if param_value is not None else str(param_config['default'])
+            effective_params = {**all_params, param_name: effective_value}
+            substituted = _substitute_variables_raw(sql_append_fragment, effective_params).strip()
+            if substituted:
+                append_fragments.append(substituted)
+
+        # Handle optional parameters (only include if provided)
+        elif param_value is not None:
+            substituted = _substitute_variables_raw(sql_append_fragment, all_params).strip()
+            if substituted:
+                append_fragments.append(substituted)
+
+    return append_fragments
 
 
 def execute_parameter_action(action_config: Dict[str, Any], all_params: Dict[str, str]) -> Any:
@@ -451,6 +522,82 @@ def _substitute_variables_in_string(template: str, params: Dict[str, str]) -> st
             else:
                 safe_value = str(param_value)
             result = result.replace(placeholder, safe_value)
+    return result
+
+
+def _substitute_variables_raw(template: str, params: Dict[str, str]) -> str:
+    """Substitute {{variable}} placeholders WITHOUT SQL quote-escaping.
+
+    Used for sql_append fragments where values are column names, sort directions
+    (ASC/DESC), or integer limits — not string literals that need quoting.
+
+    Values are sanitized to prevent SQL injection: only alphanumeric characters,
+    underscores, dots, spaces, and common SQL tokens are allowed.
+
+    Args:
+        template: String template with {{variable}} placeholders.
+        params: Dictionary of parameter values.
+
+    Returns:
+        String with variables substituted (unquoted).
+    """
+    result = template
+    for param_name, param_value in params.items():
+        placeholder = f"{{{{{param_name}}}}}"
+        if placeholder in result:
+            sanitized = _sanitize_sql_identifier(str(param_value))
+            result = result.replace(placeholder, sanitized)
+    return result
+
+
+def _sanitize_sql_identifier(value: str) -> str:
+    """Sanitize a value for use as a SQL identifier, keyword, or integer.
+
+    Allows: alphanumeric, underscores, dots, spaces, commas, and
+    common SQL keywords (ASC, DESC). Rejects anything else to prevent injection.
+
+    Args:
+        value: The raw value to sanitize.
+
+    Returns:
+        Sanitized value safe for use in ORDER BY, LIMIT, OFFSET, etc.
+
+    Raises:
+        ValueError: If value contains disallowed characters.
+    """
+    import re as _re
+    # Allow alphanumeric, underscores, dots, parens, commas, spaces, single hyphens
+    # Reject double dashes (SQL comment), semicolons, quotes, etc.
+    if '--' in value or not _re.match(r'^[a-zA-Z0-9_.(), \-]+$', value):
+        raise ValueError(f"Invalid sql_append value: {value!r}")
+    return value
+
+
+def _apply_default_values(route_config: Dict[str, Any], params: Dict[str, str]) -> Dict[str, str]:
+    """Apply default values from query_params config for params not already present.
+
+    This makes default values from value-only params (and sql/sql_append params)
+    available for cross-parameter variable substitution.
+
+    Args:
+        route_config: Route configuration dictionary with query_params section.
+        params: Current combined parameters (path + query).
+
+    Returns:
+        New params dict with defaults applied for missing keys.
+    """
+    query_param_configs = route_config.get('query_params', [])
+    result = dict(params)
+
+    for param_item in query_param_configs:
+        if not isinstance(param_item, dict) or len(param_item) != 1:
+            continue
+
+        param_name, param_config = next(iter(param_item.items()))
+
+        if param_name not in result and 'default' in param_config:
+            result[param_name] = str(param_config['default'])
+
     return result
 
 

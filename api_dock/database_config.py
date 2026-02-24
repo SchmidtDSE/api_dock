@@ -277,7 +277,7 @@ def validate_route_config(route_config: Dict[str, Any]) -> bool:
                 return False
 
             # Check for valid configuration keys
-            valid_keys = {'sql', 'response', 'conditional', 'action', 'required', 'default', 'missing_response'}
+            valid_keys = {'sql', 'sql_append', 'response', 'conditional', 'action', 'required', 'default', 'missing_response'}
             if not any(key in param_config for key in valid_keys):
                 return False
 
