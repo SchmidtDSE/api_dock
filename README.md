@@ -14,6 +14,7 @@ API Dock (API(s) + (data)Base(s)/base-(for)-API(s)) a flexible API gateway that 
   - [Main Configuration](#main-configuration-api_dock_configconfigyaml)
   - [Remote Configurations](#remote-configurations)
   - [SQL Database Support](#sql-database-support)
+  - [URL Query Parameters](#url-query-parameters)
 - [Using RouteMapper in Your Own Projects](#using-routemapper-in-your-own-projects)
   - [Basic Integration](#basic-integration)
   - [Framework Examples](#framework-examples)
@@ -29,6 +30,7 @@ API Dock (API(s) + (data)Base(s)/base-(for)-API(s)) a flexible API gateway that 
 - **YAML Configuration**: Simple, human-readable configuration files
 - **Access Control**: Define allowed/restricted routes per remote API
 - **Version Support**: Handle API versioning in URL paths
+- **URL Query Parameters**: Declarative query parameter support for database routes with filtering, sorting, pagination, conditional logic, and direct responses
 - **Flexibility**: Quickly launch FastAPI or Flask apps, or easily integrate into any existing framework
 
 ## Install
@@ -444,6 +446,216 @@ routes:
 ```
 
 **For more details**, see the [SQL Database Support Wiki](https://github.com/yourusername/api_dock/wiki/SQL-Database-Support).
+
+---
+
+## URL Query Parameters
+
+Database routes support declarative URL query parameters via the `query_params` section. This lets you add filtering, sorting, pagination, conditional logic, and direct responses — all driven by the URL query string.
+
+Routes without a `query_params` section work exactly as before (full backward compatibility).
+
+### Basic Filtering with `sql`
+
+Use `sql` to add WHERE clause fragments. Each fragment is joined with `AND`. Optional by default — only included if the parameter is in the URL.
+
+```yaml
+routes:
+  - route: users
+    sql: SELECT * FROM [[users]]
+    query_params:
+      - age:
+          sql: age = {{age}}            # optional — only if ?age= provided
+      - department:
+          sql: department = '{{department}}'
+      - height:
+          sql: height < {{height}}
+          default: 200                  # always included (uses 200 if not in URL)
+```
+
+```bash
+GET /db/users?age=25&department=engineering
+# SQL: SELECT * FROM users WHERE age = 25 AND height < 200 AND department = 'engineering'
+
+GET /db/users
+# SQL: SELECT * FROM users WHERE height < 200
+```
+
+### Sorting and Pagination with `sql_append`
+
+Use `sql_append` to append clauses *after* the WHERE clause — for `ORDER BY`, `LIMIT`, `OFFSET`, etc. Fragments are appended in the order they appear in the YAML config, so **the YAML order must match valid SQL order** (ORDER BY before LIMIT before OFFSET).
+
+`sql_append` templates can reference `{{variables}}` from other parameters, including **value-only parameters** — params that only have a `default` and exist solely to provide a variable for other templates.
+
+```yaml
+routes:
+  - route: users
+    sql: SELECT * FROM [[users]]
+    query_params:
+      # WHERE clause params
+      - department:
+          sql: department = '{{department}}'
+      # Post-WHERE params
+      - sort:
+          sql_append: ORDER BY {{sort}} {{sort_direction}}
+          default: created_date
+      - sort_direction:
+          default: DESC               # value-only param — feeds into sort's template
+      - limit:
+          sql_append: LIMIT {{limit}}
+          default: 50
+      - offset:
+          sql_append: OFFSET {{offset}}  # optional — only if ?offset= provided
+```
+
+```bash
+GET /db/users?department=engineering&sort=name&sort_direction=ASC&limit=10
+# SQL: SELECT * FROM users WHERE department = 'engineering' ORDER BY name ASC LIMIT 10
+
+GET /db/users
+# SQL: SELECT * FROM users ORDER BY created_date DESC LIMIT 50
+
+GET /db/users?limit=20&offset=40
+# SQL: SELECT * FROM users ORDER BY created_date DESC LIMIT 20 OFFSET 40
+```
+
+### Required Parameters
+
+Use `required: true` to return a `400` error if the parameter is missing. Optionally provide a custom error response with `missing_response`.
+
+```yaml
+query_params:
+  - report_type:
+      sql: report_type = {{report_type}}
+      required: true
+      missing_response:
+          error: "report_type is required"
+          valid_types: ["summary", "detailed"]
+          http_status: 400
+```
+
+```bash
+GET /db/reports
+# Response (400): {"error": "report_type is required", "valid_types": [...], "http_status": 400}
+```
+
+### Direct Responses with `response`
+
+Use `response` to return a fixed JSON or string response immediately when the parameter is present (no SQL is executed).
+
+```yaml
+query_params:
+  - debug:
+      response:
+          message: Debug mode enabled
+          info: "This endpoint queries the users table"
+  - sleeping:
+      response: "Wake up! This endpoint is disabled during sleep mode."
+```
+
+```bash
+GET /db/users?debug=anything
+# Response (200): {"message": "Debug mode enabled", "info": "This endpoint queries the users table"}
+
+GET /db/users?sleeping=true
+# Response (200): "Wake up! This endpoint is disabled during sleep mode."
+```
+
+### Conditional Logic with `conditional`
+
+Use `conditional` to branch on the parameter's value. Each branch can lead to a `sql` fragment, a `response`, or an `action`.
+
+```yaml
+query_params:
+  - enrolled:
+      conditional:
+          true:
+              sql: enrolled = true       # adds to WHERE clause
+          false:
+              sql: enrolled = false
+          pending:
+              response:
+                  message: "Pending users cannot be queried"
+                  action: "Contact admin"
+          default:
+              response: "Unknown enrollment status"
+```
+
+```bash
+GET /db/users?enrolled=true
+# SQL: SELECT * FROM users WHERE enrolled = true
+
+GET /db/users?enrolled=pending
+# Response (200): {"message": "Pending users cannot be queried", "action": "Contact admin"}
+
+GET /db/users?enrolled=xyz
+# Response (200): "Unknown enrollment status"
+```
+
+### Complete Example
+
+Combining all parameter types in a single route:
+
+```yaml
+name: my_database
+tables:
+  users: s3://bucket/users.parquet
+
+routes:
+  - route: users/search
+    sql: SELECT * FROM [[users]]
+    query_params:
+      # WHERE clause filters
+      - name:
+          sql: name ILIKE '%{{name}}%'
+      - age_min:
+          sql: age >= {{age_min}}
+      - age_max:
+          sql: age <= {{age_max}}
+      - department:
+          sql: department = '{{department}}'
+      # Sorting and pagination (sql_append)
+      - sort:
+          sql_append: ORDER BY {{sort}} {{sort_direction}}
+          default: created_date
+      - sort_direction:
+          default: DESC
+      - limit:
+          sql_append: LIMIT {{limit}}
+          default: 50
+      - offset:
+          sql_append: OFFSET {{offset}}
+      # Direct response
+      - sleeping:
+          response: "Search is disabled during sleep mode."
+```
+
+```bash
+# Full search with filters, sorting, and pagination
+GET /my_database/users/search?name=john&age_min=21&age_max=65&sort=age&sort_direction=ASC&limit=20&offset=40
+# SQL: SELECT * FROM users
+#      WHERE name ILIKE '%john%' AND age >= 21 AND age <= 65
+#      ORDER BY age ASC LIMIT 20 OFFSET 40
+
+# Just defaults
+GET /my_database/users/search
+# SQL: SELECT * FROM users ORDER BY created_date DESC LIMIT 50
+
+# Direct response, no SQL
+GET /my_database/users/search?sleeping=true
+# Response: "Search is disabled during sleep mode."
+```
+
+### Processing Order
+
+Parameters are processed in this order (first match wins for early returns):
+
+1. `response` parameters — return immediately if parameter present
+2. `conditional` parameters — evaluate value, may return response or add SQL
+3. `required` parameters — return 400 if missing
+4. `sql` parameters — build WHERE clause fragments
+5. `sql_append` parameters — append post-WHERE clauses (ORDER BY, LIMIT, etc.)
+6. Execute final SQL query
 
 ---
 
