@@ -132,6 +132,45 @@ def get_table_metadata(table_name: str, database_config: Dict[str, Any]) -> Dict
         return {}
 
 
+def merge_query_params(route_config: Dict[str, Any], database_config: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge top-level query_params into route config.
+
+    Top-level query_params from the database config are applied to every route.
+    Route-level params take precedence: if a route defines a param with the same
+    name as a top-level param, the route version wins. Non-overridden top-level
+    params are appended after route params.
+
+    Args:
+        route_config: Route configuration dictionary.
+        database_config: Database configuration dictionary (may contain top-level query_params).
+
+    Returns:
+        Route config dict with merged query_params. Returns original route_config
+        if no top-level query_params exist.
+    """
+    top_level = database_config.get("query_params", [])
+    if not top_level:
+        return route_config
+
+    route_params = route_config.get("query_params", [])
+
+    # Get names already defined at route level
+    route_param_names = set()
+    for item in route_params:
+        if isinstance(item, dict) and len(item) == 1:
+            route_param_names.add(next(iter(item)))
+
+    # Append non-overridden top-level params after route params
+    merged = list(route_params)
+    for item in top_level:
+        if isinstance(item, dict) and len(item) == 1:
+            name = next(iter(item))
+            if name not in route_param_names:
+                merged.append(item)
+
+    return {**route_config, "query_params": merged}
+
+
 def get_named_query(query_name: str, database_config: Dict[str, Any]) -> Optional[str]:
     """Get a named query from database configuration.
 

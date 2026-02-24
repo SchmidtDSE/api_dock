@@ -1,0 +1,127 @@
+name: test_users
+description: Test database demonstrating declarative query parameter support
+authors:
+  - API Dock Team
+
+tables:
+  users: databases/users.parquet
+  enrollments: databases/enrollments.parquet
+
+# Example actions for demonstration (would need actual implementation)
+actions:
+  send_enrollment_invite:
+    method: api_dock.actions.enrollment.send_invitation
+    description: Send enrollment invitation email
+
+  check_enrollment_status:
+    method: api_dock.actions.enrollment.check_status
+    description: Check and update enrollment status
+
+routes:
+  # Basic user listing with flexible filtering
+  - route: users
+    sql: SELECT * FROM [[users]] ORDER BY created_date DESC
+    query_params:
+      - age:
+          sql: age = {{age}}
+      - height:
+          sql: height < {{height}}
+          default: 200  # Always apply height filter
+      - department:
+          sql: department = '{{department}}'
+      - enrolled:
+          conditional:
+              true:
+                  sql: enrolled = true
+              false:
+                  sql: enrolled = false
+              pending:
+                  sql: enrollment_status = 'pending'
+      - debug:
+          response:
+              message: Debug mode enabled
+              timestamp: "{{current_time}}"
+              applied_filters: "Would show which parameters were used"
+
+  # User enrollment management with custom actions
+  - route: users/{{user_id}}/enrollment
+    sql: SELECT u.*, e.* FROM [[users]] u LEFT JOIN [[enrollments]] e ON u.id = e.user_id WHERE u.id = {{user_id}}
+    query_params:
+      - action:
+          conditional:
+              invite:
+                  action: send_enrollment_invite
+              check:
+                  action: check_enrollment_status
+              status:
+                  sql: ""  # Use base query for status check
+      - force:
+          conditional:
+              true:
+                  response:
+                      message: "Force enrollment initiated"
+                      warning: "This bypasses normal enrollment process"
+                      user_id: "{{user_id}}"
+
+  # Advanced search demonstrating sql_append for ORDER BY, LIMIT, OFFSET
+  - route: users/search
+    sql: SELECT u.*, e.status as enrollment_status FROM [[users]] u LEFT JOIN [[enrollments]] e ON u.id = e.user_id
+    query_params:
+      # WHERE clause params
+      - name:
+          sql: u.name ILIKE '%{{name}}%'
+      - age_min:
+          sql: u.age >= {{age_min}}
+      - age_max:
+          sql: u.age <= {{age_max}}
+      - department:
+          sql: u.department = '{{department}}'
+      # Post-WHERE params using sql_append
+      - sort:
+          sql_append: ORDER BY {{sort}} {{sort_direction}}
+          default: created_date
+      - sort_direction:
+          default: DESC       # value-only param — feeds into sort's template
+      - limit:
+          sql_append: LIMIT {{limit}}
+          default: 50
+      - offset:
+          sql_append: OFFSET {{offset}}
+      # Direct response param
+      - sleeping:
+          response: "Wake up! Search is disabled during sleep mode."
+
+  # Reporting with required parameters and conditional logic
+  - route: reports/user-stats
+    sql: SELECT COUNT(*) as total_users FROM [[users]]  # Default stats
+    query_params:
+      - report_type:
+          conditional:
+              enrollment:
+                  sql: |
+                    SELECT enrolled, COUNT(*) as count, AVG(age) as avg_age
+                    FROM [[users]]
+                    GROUP BY enrolled
+              demographics:
+                  sql: |
+                    SELECT department, enrolled, COUNT(*) as count
+                    FROM [[users]]
+                    GROUP BY department, enrolled
+              activity:
+                  sql: |
+                    SELECT DATE(last_login) as date, COUNT(*) as active_count
+                    FROM [[users]]
+                    WHERE last_login >= '{{date_from}}' AND last_login <= '{{date_to}}'
+                    GROUP BY DATE(last_login)
+          required: true
+          missing_response:
+              error: "report_type parameter is required"
+              valid_types: ["enrollment", "demographics", "activity"]
+              example: "Try: ?report_type=enrollment"
+              http_status: 400
+      - date_from:
+          sql: last_login >= '{{date_from}}'
+      - date_to:
+          sql: last_login <= '{{date_to}}'
+      - department:
+          sql: department = '{{department}}'

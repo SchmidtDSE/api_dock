@@ -320,6 +320,10 @@ class RouteMapper:
                 f"Route '{actual_path}' not found in database '{database_name}'"
             )
 
+        # Merge top-level query_params into route config
+        from api_dock.database_config import merge_query_params
+        route_config = merge_query_params(route_config, database_config)
+
         # Extract path parameters
         route_pattern = route_config.get("route", "")
         path_params = extract_path_parameters(actual_path, route_pattern)
