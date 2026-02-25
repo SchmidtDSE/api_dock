@@ -390,6 +390,67 @@ def find_route_mapping(full_route: str, method: str, remote_config: Dict[str, An
     return None
 
 
+def filter_remote_query_params(
+    query_params: Dict[str, str],
+    route: str,
+    method: str,
+    remote_config: Dict[str, Any]
+) -> Dict[str, str]:
+    """Filter query parameters based on remote config settings.
+
+    Checks for a route-level query_params setting first, then falls back
+    to the top-level remote config query_params. If neither exists, all
+    params are passed through unchanged (backward compatible).
+
+    Args:
+        query_params: Original query parameters from the request.
+        route: The actual route path (e.g., "users/123").
+        method: HTTP method (e.g., "GET", "POST").
+        remote_config: Remote configuration dictionary.
+
+    Returns:
+        Filtered query parameters dictionary.
+    """
+    routes = remote_config.get("routes", [])
+
+    # Find matching route and its query_params setting
+    route_query_params_setting = None
+    for route_entry in routes:
+        if isinstance(route_entry, str):
+            if _route_matches_pattern(route, route_entry):
+                # String routes have no query_params setting
+                break
+        elif isinstance(route_entry, dict):
+            if _route_matches_pattern(route, route_entry, method):
+                route_query_params_setting = route_entry.get("query_params")
+                break
+
+    # Fall back to top-level setting if route has no query_params key
+    if route_query_params_setting is None:
+        setting = remote_config.get("query_params")
+    else:
+        setting = route_query_params_setting
+
+    # No setting anywhere → pass all params through (backward compatible)
+    if setting is None:
+        return query_params
+
+    # True → all params
+    if setting is True:
+        return query_params
+
+    # False → no params
+    if setting is False:
+        return {}
+
+    # List → whitelist filter
+    if isinstance(setting, list):
+        return {k: v for k, v in query_params.items() if k in setting}
+
+    # Unknown type → pass all through
+    return query_params
+
+
 #
 # INTERNAL
 #

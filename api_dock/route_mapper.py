@@ -14,7 +14,7 @@ License: BSD 3-Clause
 import httpx
 from typing import Any, Dict, List, Optional, Tuple
 
-from api_dock.config import find_remote_config, find_route_mapping, get_database_names, get_remote_names, get_remote_versions, get_settings, is_route_allowed, is_versioned_remote, load_main_config, resolve_latest_version
+from api_dock.config import filter_remote_query_params, find_remote_config, find_route_mapping, get_database_names, get_remote_names, get_remote_versions, get_settings, is_route_allowed, is_versioned_remote, load_main_config, resolve_latest_version
 from api_dock.database_config import find_database_route, get_database_versions, is_versioned_database, load_database_config, resolve_latest_database_version
 from api_dock.sql_builder import build_sql_query, extract_path_parameters
 from api_dock.storage_auth import detect_required_backends, extract_table_metadata_by_backend, extract_table_uris, setup_storage_authentication
@@ -171,6 +171,11 @@ class RouteMapper:
                 f"No URL configured for remote '{remote_name}'"
             )
 
+        # Filter query parameters based on remote config
+        query_params = filter_remote_query_params(
+            query_params or {}, actual_path, method, remote_config
+        )
+
         # Check for custom route mapping
         # Build the full pattern including remote name for matching
         full_pattern = f"{remote_name}/{actual_path}"
@@ -205,7 +210,7 @@ class RouteMapper:
                     url=full_url,
                     headers=headers or {},
                     content=body,
-                    params=query_params or {}
+                    params=query_params
                 )
 
                 # Parse response content
