@@ -67,6 +67,8 @@ def build_sql_query(
 
     # Build WHERE clause fragments from query parameters
     where_fragments = build_where_clause_from_params(route_config, query_params, path_params)
+    # Expand [[table_name]] references in WHERE fragments (same syntax as main sql)
+    where_fragments = [_substitute_table_references(f, database_config) for f in where_fragments]
 
     # Combine base SQL with WHERE fragments
     if where_fragments:
@@ -81,6 +83,8 @@ def build_sql_query(
 
     # Build post-WHERE append fragments (ORDER BY, LIMIT, etc.)
     append_fragments = build_append_clause_from_params(route_config, query_params, path_params)
+    # Expand [[table_name]] references in APPEND fragments (same syntax as main sql)
+    append_fragments = [_substitute_table_references(f, database_config) for f in append_fragments]
     if append_fragments:
         sql_with_tables += ' ' + ' '.join(append_fragments)
 
