@@ -94,6 +94,16 @@ def _add_remote_routes(app: Flask, route_mapper: RouteMapper) -> None:
         Returns:
             Response from the remote API/database or error response.
         """
+        # Extract cookies from request
+        cookies = dict(request.cookies) if request.cookies else {}
+
+        # DEBUG: Print Flask cookie extraction
+        if cookies:
+            print(f"🍪 DEBUG FLASK: Extracted cookies from request: {list(cookies.keys())}")
+            print(f"🔑 DEBUG FLASK: Cookie values: {cookies}")
+        else:
+            print(f"🍪 DEBUG FLASK: No cookies found in request")
+
         # Check if remote_name is a database first
         if remote_name in route_mapper.database_names:
             # Handle as database route (using async with asyncio.run)
@@ -102,7 +112,8 @@ def _add_remote_routes(app: Flask, route_mapper: RouteMapper) -> None:
                 route_mapper.map_database_route(
                     database_name=remote_name,
                     path="",
-                    query_params=dict(request.args)
+                    query_params=dict(request.args),
+                    cookies=cookies
                 )
             )
         else:
@@ -119,11 +130,16 @@ def _add_remote_routes(app: Flask, route_mapper: RouteMapper) -> None:
                 method=request.method,
                 headers=dict(request.headers),
                 body=body,
-                query_params=dict(request.args)
+                query_params=dict(request.args),
+                cookies=cookies
             )
 
         if not success:
-            return jsonify({"error": error_message}), status_code
+            # Use custom response body if available (e.g., from authentication), otherwise use error message
+            if response_data:
+                return jsonify(response_data), status_code
+            else:
+                return jsonify({"error": error_message}), status_code
 
         return jsonify(response_data), status_code
 
@@ -139,6 +155,16 @@ def _add_remote_routes(app: Flask, route_mapper: RouteMapper) -> None:
         Returns:
             Response from the remote API/database or error response.
         """
+        # Extract cookies from request
+        cookies = dict(request.cookies) if request.cookies else {}
+
+        # DEBUG: Print Flask cookie extraction
+        if cookies:
+            print(f"🍪 DEBUG FLASK: Extracted cookies from request: {list(cookies.keys())}")
+            print(f"🔑 DEBUG FLASK: Cookie values: {cookies}")
+        else:
+            print(f"🍪 DEBUG FLASK: No cookies found in request")
+
         # Check if remote_name is a database first
         if remote_name in route_mapper.database_names:
             # Handle as database route (using async with asyncio.run)
@@ -147,7 +173,8 @@ def _add_remote_routes(app: Flask, route_mapper: RouteMapper) -> None:
                 route_mapper.map_database_route(
                     database_name=remote_name,
                     path=path,
-                    query_params=dict(request.args)
+                    query_params=dict(request.args),
+                    cookies=cookies
                 )
             )
         else:
@@ -164,11 +191,16 @@ def _add_remote_routes(app: Flask, route_mapper: RouteMapper) -> None:
                 method=request.method,
                 headers=dict(request.headers),
                 body=body,
-                query_params=dict(request.args)
+                query_params=dict(request.args),
+                cookies=cookies
             )
 
         if not success:
-            return jsonify({"error": error_message}), status_code
+            # Use custom response body if available (e.g., from authentication), otherwise use error message
+            if response_data:
+                return jsonify(response_data), status_code
+            else:
+                return jsonify({"error": error_message}), status_code
 
         return jsonify(response_data), status_code
 
