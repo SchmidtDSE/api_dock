@@ -10,7 +10,7 @@ License: BSD 3-Clause
 
 from api_dock.fast_api import app as fastapi_app, create_app as create_fastapi_app
 from api_dock.flask_api import app as flask_app, create_app as create_flask_app
-from api_dock.config import load_main_config, find_remote_config, get_remote_names
+from api_dock.config import load_main_config, find_remote_config, get_remote_names, get_cookies_config, get_authentication_config, merge_inherited_config, validate_authentication_config, validate_cookies_config, filter_cookies_by_config
 from api_dock.route_mapper import RouteMapper
 
 # For backward compatibility, default to FastAPI
