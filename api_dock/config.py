@@ -32,6 +32,11 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "follow_protocol_downgrades": False
 }
 
+# Default authentication and cookie settings
+DEFAULT_AUTH_SETTINGS: Dict[str, Any] = {
+    "encrypted": True  # Authentication values are encrypted by default
+}
+
 
 #
 # PUBLIC
@@ -96,6 +101,31 @@ def find_remote_config(remote_name: str, main_config: Dict[str, Any], config_dir
         raise FileNotFoundError(f"Inline remote configs not yet supported for '{remote_name}'")
 
     return _load_yaml_file(config_path)
+
+
+def find_remote_config_with_inheritance(remote_name: str, main_config: Dict[str, Any], config_dir: Optional[str] = None, version: Optional[str] = None) -> Dict[str, Any]:
+    """Find and load remote configuration with cookie/authentication inheritance.
+
+    Args:
+        remote_name: Name of the remote (from the name field in YAML).
+        main_config: Main configuration dictionary for inheritance.
+        config_dir: Base config directory. If None, uses default.
+        version: Version string for versioned remotes.
+
+    Returns:
+        Dictionary containing remote configuration data with inheritance applied.
+
+    Raises:
+        FileNotFoundError: If remote config file doesn't exist.
+        yaml.YAMLError: If config file is invalid YAML.
+    """
+    # Load the remote config
+    remote_config = find_remote_config(remote_name, main_config, config_dir, version)
+
+    # Apply inheritance from main config
+    merged_config = merge_inherited_config(remote_config, main_config)
+
+    return merged_config
 
 
 def find_remote_config_by_filename(remote_filename: str, config_dir: Optional[str] = None) -> Dict[str, Any]:
@@ -209,6 +239,217 @@ def get_settings(config: Dict[str, Any]) -> Dict[str, Any]:
         settings.update(config_settings)
 
     return settings
+
+
+def get_cookies_config(config: Dict[str, Any]) -> List[str]:
+    """Extract cookie configuration from config.
+
+    Args:
+        config: Configuration dictionary (main, remote, or database).
+
+    Returns:
+        List of cookie names to extract from requests.
+    """
+    cookies = config.get("cookies", [])
+    if not isinstance(cookies, list):
+        return []
+
+    # Ensure all cookie names are strings
+    cookie_list = [str(cookie) for cookie in cookies if cookie]
+
+    # DEBUG: Print expected cookies
+    if cookie_list:
+        print(f"🎯 DEBUG CONFIG: Expected cookies from config: {cookie_list}")
+    else:
+        print(f"🎯 DEBUG CONFIG: No cookies configured")
+
+    return cookie_list
+
+
+def filter_cookies_by_config(cookies: Dict[str, str], config: Dict[str, Any]) -> Dict[str, str]:
+    """Filter incoming cookies based on configuration.
+
+    Args:
+        cookies: Dictionary of all incoming cookies.
+        config: Configuration dictionary (main, remote, or database).
+
+    Returns:
+        Filtered dictionary of cookies.
+    """
+    cookies_setting = config.get("cookies")
+
+    # Get authentication key if it exists
+    auth_config = get_authentication_config(config)
+    auth_key = auth_config.get("key") if auth_config else None
+
+    # Handle boolean settings
+    if isinstance(cookies_setting, bool):
+        if cookies_setting:
+            # cookies: true - pass all cookies
+            print(f"🍪 DEBUG FILTER: Allowing all cookies (cookies: true)")
+            return cookies
+        else:
+            # cookies: false - pass no cookies except authentication key
+            if auth_key and auth_key in cookies:
+                auth_only = {auth_key: cookies[auth_key]}
+                print(f"🍪 DEBUG FILTER: Blocking all cookies except auth key '{auth_key}' (cookies: false)")
+                return auth_only
+            else:
+                print(f"🍪 DEBUG FILTER: Blocking all cookies (cookies: false)")
+                return {}
+
+    # Handle list of cookie names (existing behavior)
+    elif isinstance(cookies_setting, list):
+        allowed_cookies = get_cookies_config(config)
+        if not allowed_cookies:
+            # Empty list means no cookies allowed except authentication key
+            if auth_key and auth_key in cookies:
+                auth_only = {auth_key: cookies[auth_key]}
+                print(f"🍪 DEBUG FILTER: No cookies allowed except auth key '{auth_key}' (empty list)")
+                return auth_only
+            else:
+                print(f"🍪 DEBUG FILTER: No cookies allowed (empty list)")
+                return {}
+
+        # Always include authentication key in allowed cookies
+        if auth_key and auth_key not in allowed_cookies:
+            allowed_cookies = allowed_cookies + [auth_key]
+            print(f"🍪 DEBUG FILTER: Added auth key '{auth_key}' to allowed cookies")
+
+        # Filter cookies to only include allowed ones
+        filtered = {k: v for k, v in cookies.items() if k in allowed_cookies}
+        print(f"🍪 DEBUG FILTER: Filtered cookies from {list(cookies.keys())} to {list(filtered.keys())}")
+        return filtered
+
+    # Default: no cookie configuration means only authentication key passed
+    else:
+        if auth_key and auth_key in cookies:
+            auth_only = {auth_key: cookies[auth_key]}
+            print(f"🍪 DEBUG FILTER: No cookie configuration, only passing auth key '{auth_key}'")
+            return auth_only
+        else:
+            print(f"🍪 DEBUG FILTER: No cookie configuration, blocking all cookies")
+            return {}
+
+
+def get_authentication_config(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Extract authentication configuration from config.
+
+    Args:
+        config: Configuration dictionary (main, remote, or database).
+
+    Returns:
+        Authentication configuration dictionary, or None if not configured.
+    """
+    auth_config = config.get("authentication")
+    if not auth_config:
+        print(f"🎯 DEBUG CONFIG: No authentication configured")
+        return None
+
+    if not isinstance(auth_config, dict):
+        print(f"🎯 DEBUG CONFIG: Invalid authentication config format")
+        return None
+
+    # Apply default encryption setting if not specified
+    auth_config = auth_config.copy()
+    if "encrypted" not in auth_config:
+        auth_config["encrypted"] = DEFAULT_AUTH_SETTINGS["encrypted"]
+
+    # DEBUG: Print authentication config info
+    auth_key = auth_config.get("key", "UNKNOWN")
+    auth_method = auth_config.get("method", "UNKNOWN")
+    print(f"🎯 DEBUG CONFIG: Authentication configured - key: '{auth_key}', method: '{auth_method}'")
+
+    return auth_config
+
+
+def merge_inherited_config(child_config: Dict[str, Any], parent_config: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge child configuration with parent configuration for inheritance.
+
+    Cookies and authentication from parent are inherited by child unless explicitly overridden.
+
+    Args:
+        child_config: Child configuration (remote or database specific).
+        parent_config: Parent configuration (main config).
+
+    Returns:
+        Merged configuration with inheritance applied.
+    """
+    merged = child_config.copy()
+
+    # Inherit cookies if not specified in child
+    if "cookies" not in merged and "cookies" in parent_config:
+        merged["cookies"] = parent_config["cookies"]
+
+    # Inherit authentication if not specified in child
+    if "authentication" not in merged and "authentication" in parent_config:
+        merged["authentication"] = parent_config["authentication"]
+
+    return merged
+
+
+def validate_authentication_config(auth_config: Dict[str, Any]) -> bool:
+    """Validate authentication configuration.
+
+    Args:
+        auth_config: Authentication configuration dictionary.
+
+    Returns:
+        True if valid, False otherwise.
+    """
+    if not isinstance(auth_config, dict):
+        return False
+
+    # Must have a key field
+    if "key" not in auth_config or not auth_config["key"]:
+        return False
+
+    # Must have a valid method
+    valid_methods = ["fixed", "list", "aws_secrets", "gcp_secrets"]
+    method = auth_config.get("method")
+    if method not in valid_methods:
+        return False
+
+    # Validate method-specific fields
+    if method == "fixed":
+        if "value" not in auth_config:
+            return False
+    elif method == "list":
+        values = auth_config.get("values")
+        if not isinstance(values, list) or not values:
+            return False
+    elif method == "aws_secrets":
+        if "secret_name" not in auth_config:
+            return False
+        # Region is optional (can use default from environment)
+    elif method == "gcp_secrets":
+        if "secret_name" not in auth_config or "project_id" not in auth_config:
+            return False
+
+    return True
+
+
+def validate_cookies_config(cookies_config: List[str]) -> bool:
+    """Validate cookies configuration.
+
+    Args:
+        cookies_config: List of cookie names.
+
+    Returns:
+        True if valid, False otherwise.
+    """
+    if not isinstance(cookies_config, list):
+        return False
+
+    # All cookie names must be valid identifiers
+    for cookie_name in cookies_config:
+        if not isinstance(cookie_name, str) or not cookie_name:
+            return False
+        # Cookie names should be valid identifiers (alphanumeric + underscore)
+        if not cookie_name.replace("_", "").replace("-", "").isalnum():
+            return False
+
+    return True
 
 
 def is_versioned_remote(remote_name: str, main_config: Dict[str, Any], config_dir: Optional[str] = None) -> bool:
@@ -352,7 +593,7 @@ def is_route_allowed(route: str, config: Dict[str, Any], remote_name: Optional[s
     return True
 
 
-def find_route_mapping(full_route: str, method: str, remote_config: Dict[str, Any], remote_name: str) -> Optional[str]:
+def find_route_mapping(full_route: str, method: str, remote_config: Dict[str, Any], remote_name: str, cookies: Optional[Dict[str, str]] = None) -> Optional[str]:
     """Find custom route mapping for a specific route and method.
 
     Args:
@@ -360,6 +601,7 @@ def find_route_mapping(full_route: str, method: str, remote_config: Dict[str, An
         method: HTTP method (e.g., "GET", "POST").
         remote_config: Remote configuration dictionary.
         remote_name: Name of the remote for route_name substitution.
+        cookies: Cookie values from request for substitution.
 
     Returns:
         Mapped remote route if found, None otherwise.
@@ -384,6 +626,12 @@ def find_route_mapping(full_route: str, method: str, remote_config: Dict[str, An
             if params is not None:
                 # Add route_name to parameters for substitution
                 params["route_name"] = remote_name
+
+                # Add cookies with "cookies." prefix for substitution
+                if cookies:
+                    for cookie_key, cookie_value in cookies.items():
+                        params[f"cookies.{cookie_key}"] = cookie_value
+
                 # Substitute parameters in remote_route
                 return _substitute_route_params(remote_route, params)
 
