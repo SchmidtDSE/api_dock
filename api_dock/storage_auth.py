@@ -321,6 +321,8 @@ def _setup_gcs_auth(conn: Any, metadata: Optional[Dict[str, Any]] = None) -> boo
                 secret_parts.append(f"ENDPOINT '{endpoint}'")
 
             secret_sql = f"CREATE OR REPLACE SECRET ({', '.join(secret_parts)});"
+            # DEBUG: Print secret setup SQL
+            print(f"🔐 DEBUG SQL AUTH: Setting up secret: {secret_sql}")
             conn.execute(secret_sql)
         else:
             # Use credential chain (environment variables, service account, etc.)
