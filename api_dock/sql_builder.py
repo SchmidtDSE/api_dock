@@ -24,7 +24,8 @@ def build_sql_query(
         route_config: Dict[str, Any],
         database_config: Dict[str, Any],
         path_params: Optional[Dict[str, str]] = None,
-        query_params: Optional[Dict[str, str]] = None) -> str:
+        query_params: Optional[Dict[str, str]] = None,
+        cookies: Optional[Dict[str, str]] = None) -> str:
     """Build SQL query with fragment-based WHERE clause support.
 
     Args:
@@ -32,6 +33,7 @@ def build_sql_query(
         database_config: Database configuration dictionary with tables definitions.
         path_params: Dictionary of path parameters extracted from the route.
         query_params: Dictionary of query parameters from URL.
+        cookies: Dictionary of cookie values from request.
 
     Returns:
         Complete SQL query with all substitutions applied.
@@ -43,6 +45,8 @@ def build_sql_query(
         path_params = {}
     if query_params is None:
         query_params = {}
+    if cookies is None:
+        cookies = {}
 
     # Get the base SQL template from route config
     sql_template = route_config.get('sql', '')
@@ -64,6 +68,16 @@ def build_sql_query(
     # Resolve default values for value-only params so they're available for substitution
     all_params = {**path_params, **query_params}
     all_params = _apply_default_values(route_config, all_params)
+
+    # DEBUG: Print cookie debug info for SQL building
+    print(f"🍪 DEBUG SQL: Received cookies: {list(cookies.keys())}")
+    print(f"🔑 DEBUG SQL: Cookie values: {cookies}")
+
+    # Add cookies with "cookies." prefix for substitution
+    cookies_params = {f"cookies.{key}": value for key, value in cookies.items()}
+    all_params.update(cookies_params)
+
+    print(f"🔄 DEBUG SQL: Cookie parameters created: {list(cookies_params.keys())}")
 
     # Build WHERE clause fragments from query parameters
     where_fragments = build_where_clause_from_params(route_config, query_params, path_params)
@@ -89,6 +103,7 @@ def build_sql_query(
         sql_with_tables += ' ' + ' '.join(append_fragments)
 
     # Substitute remaining path parameters {{param_name}} with values
+    # This now includes cookies as {{cookies.cookie_name}}
     sql_with_params = _substitute_variables_in_string(sql_with_tables, all_params)
 
     return sql_with_params
@@ -137,7 +152,8 @@ def build_sql_query_legacy(
 def process_query_parameters(
         route_config: Dict[str, Any],
         query_params: Dict[str, str],
-        path_params: Dict[str, str]
+        path_params: Dict[str, str],
+        cookies: Optional[Dict[str, str]] = None
 ) -> Tuple[bool, Any, int, Optional[str]]:
     """Process query parameters according to declarative configuration.
 
@@ -145,18 +161,32 @@ def process_query_parameters(
         route_config: Route configuration dictionary with query_params section.
         query_params: Dictionary of query parameters from URL.
         path_params: Dictionary of path parameters for variable substitution.
+        cookies: Dictionary of cookie values from request.
 
     Returns:
         Tuple of (should_return_early, response_data, status_code, error_message)
         If should_return_early=True, return response_data immediately
         If False, continue with SQL building
     """
+    if cookies is None:
+        cookies = {}
+
     query_param_configs = route_config.get('query_params', [])
     if not query_param_configs:
         return (False, None, 200, None)
 
     # Combine path and query parameters for variable substitution
     all_params = {**path_params, **query_params}
+
+    # DEBUG: Print cookie debug info for query parameter processing
+    print(f"🍪 DEBUG QUERY PARAMS: Received cookies: {list(cookies.keys())}")
+    print(f"🔑 DEBUG QUERY PARAMS: Cookie values: {cookies}")
+
+    # Add cookies with "cookies." prefix for substitution
+    cookies_params = {f"cookies.{key}": value for key, value in cookies.items()}
+    all_params.update(cookies_params)
+
+    print(f"🔄 DEBUG QUERY PARAMS: Cookie parameters created: {list(cookies_params.keys())}")
 
     # Process each parameter configuration
     for param_item in query_param_configs:
