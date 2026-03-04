@@ -81,7 +81,8 @@ class RouteMapper:
             method: str,
             headers: Optional[Dict[str, str]] = None,
             body: Optional[bytes] = None,
-            query_params: Optional[Dict[str, str]] = None) -> Tuple[bool, Any, int, Optional[str]]:
+            query_params: Optional[Dict[str, str]] = None,
+            cookies: Optional[Dict[str, str]] = None) -> Tuple[bool, Any, int, Optional[str]]:
         """Map a request to a remote API.
 
         Args:
@@ -91,6 +92,7 @@ class RouteMapper:
             headers: Request headers dictionary.
             body: Request body bytes.
             query_params: Query parameters dictionary.
+            cookies: Cookie values from request.
 
         Returns:
             Tuple of (success, response_data, status_code, error_message).
@@ -176,13 +178,28 @@ class RouteMapper:
             query_params or {}, actual_path, method, remote_config
         )
 
+        # Filter cookies based on remote configuration
+        from api_dock.config import filter_cookies_by_config
+        filtered_cookies = filter_cookies_by_config(cookies or {}, remote_config)
+
+        # DEBUG: Print cookie debug info for remote route mapping
+        if cookies:
+            print(f"🍪 DEBUG ROUTE: Original cookies for remote '{remote_name}': {list(cookies.keys())}")
+        if filtered_cookies:
+            print(f"🍪 DEBUG ROUTE: Filtered cookies for remote '{remote_name}': {list(filtered_cookies.keys())}")
+            print(f"🔑 DEBUG ROUTE: Filtered cookie values: {filtered_cookies}")
+        else:
+            print(f"🍪 DEBUG ROUTE: No cookies passed to remote '{remote_name}'")
+
         # Check for custom route mapping
         # Build the full pattern including remote name for matching
         full_pattern = f"{remote_name}/{actual_path}"
-        mapped_route = find_route_mapping(full_pattern, method, remote_config, remote_name)
+        mapped_route = find_route_mapping(full_pattern, method, remote_config, remote_name, cookies)
         if mapped_route is not None:
+            print(f"🔄 DEBUG ROUTE: Route mapped from '{actual_path}' to '{mapped_route}'")
             final_path = mapped_route
         else:
+            print(f"🔄 DEBUG ROUTE: No route mapping applied, using original path: '{actual_path}'")
             final_path = actual_path
 
         # Construct full URL
@@ -210,7 +227,8 @@ class RouteMapper:
                     url=full_url,
                     headers=headers or {},
                     content=body,
-                    params=query_params
+                    params=query_params,
+                    cookies=filtered_cookies
                 )
 
                 # Parse response content
@@ -242,13 +260,15 @@ class RouteMapper:
             self,
             database_name: str,
             path: str,
-            query_params: Optional[Dict[str, str]] = None) -> Tuple[bool, Any, int, Optional[str]]:
+            query_params: Optional[Dict[str, str]] = None,
+            cookies: Optional[Dict[str, str]] = None) -> Tuple[bool, Any, int, Optional[str]]:
         """Execute a SQL query for a database route with query parameter support.
 
         Args:
             database_name: Name of the database.
             path: The path to match against database routes.
             query_params: Optional dictionary of query parameters from URL.
+            cookies: Optional dictionary of cookie values from request.
 
         Returns:
             Tuple of (success, response_data, status_code, error_message).
@@ -256,6 +276,16 @@ class RouteMapper:
         """
         if query_params is None:
             query_params = {}
+        if cookies is None:
+            cookies = {}
+
+        # DEBUG: Print cookie debug info for database route mapping
+        if cookies:
+            print(f"🍪 DEBUG DB: Received cookies for database '{database_name}': {list(cookies.keys())}")
+            print(f"🔑 DEBUG DB: Cookie values: {cookies}")
+        else:
+            print(f"🍪 DEBUG DB: No cookies received for database '{database_name}'")
+
         # Validate database exists
         if database_name not in self.database_names:
             return (False, None, 404, f"Database '{database_name}' not found")
@@ -309,6 +339,33 @@ class RouteMapper:
                 f"Configuration for database '{database_name}' not found"
             )
 
+        # Apply configuration inheritance from main config
+        from api_dock.config import merge_inherited_config
+        database_config = merge_inherited_config(database_config, self.config)
+
+        # Filter cookies based on database configuration
+        from api_dock.config import filter_cookies_by_config
+        filtered_cookies = filter_cookies_by_config(cookies, database_config)
+
+        # Check for authentication configuration and validate if present
+        from api_dock.config import get_authentication_config
+        auth_config = get_authentication_config(database_config)
+        if auth_config:
+            print(f"🔐 DEBUG DB: Authentication required for database '{database_name}'")
+            try:
+                from api_dock.auth import validate_authentication
+                is_valid, status_code, response_body = validate_authentication(filtered_cookies, auth_config)
+                if not is_valid:
+                    print(f"❌ DEBUG DB: Authentication failed for database '{database_name}'")
+                    return (False, response_body, status_code, None)
+                else:
+                    print(f"✅ DEBUG DB: Authentication successful for database '{database_name}'")
+            except Exception as e:
+                print(f"💥 DEBUG DB: Authentication error: {str(e)}")
+                return (False, None, 500, f"Authentication error: {str(e)}")
+        else:
+            print(f"🔓 DEBUG DB: No authentication required for database '{database_name}'")
+
         # Handle empty path - return list of available routes
         if not actual_path or actual_path == "":
             routes = database_config.get("routes", [])
@@ -337,7 +394,7 @@ class RouteMapper:
         try:
             from api_dock.sql_builder import process_query_parameters
             should_return_early, response_data, status_code, error_message = process_query_parameters(
-                route_config, query_params, path_params
+                route_config, query_params, path_params, cookies
             )
             if should_return_early:
                 return (True, response_data, status_code, error_message)
@@ -347,7 +404,7 @@ class RouteMapper:
         # Build SQL query with new fragment-based approach
         try:
             from api_dock.sql_builder import build_sql_query
-            sql_query = build_sql_query(route_config, database_config, path_params, query_params)
+            sql_query = build_sql_query(route_config, database_config, path_params, query_params, filtered_cookies)
         except ValueError as e:
             return (False, None, 500, f"SQL query error: {str(e)}")
 
@@ -377,6 +434,9 @@ class RouteMapper:
             # Metadata from config takes precedence over environment variables
             # Note: Authentication setup failures are graceful - public files will still work
             auth_results = setup_storage_authentication(conn, required_backends, backend_metadata)
+
+            # DEBUG: Print SQL query before execution
+            print(f"🔍 DEBUG SQL: Executing query: {sql_query}")
 
             result = conn.execute(sql_query).fetchall()
             columns = [desc[0] for desc in conn.description] if conn.description else []
@@ -442,7 +502,8 @@ class RouteMapper:
     def map_route_sync(self, remote_name: str, path: str, method: str,
                       headers: Optional[Dict[str, str]] = None,
                       body: Optional[bytes] = None,
-                      query_params: Optional[Dict[str, str]] = None) -> Tuple[bool, Any, int, Optional[str]]:
+                      query_params: Optional[Dict[str, str]] = None,
+                      cookies: Optional[Dict[str, str]] = None) -> Tuple[bool, Any, int, Optional[str]]:
         """Synchronous version of map_route for frameworks that don't support async.
 
         Args:
@@ -452,6 +513,7 @@ class RouteMapper:
             headers: Request headers dictionary.
             body: Request body bytes.
             query_params: Query parameters dictionary.
+            cookies: Cookie values from request.
 
         Returns:
             Tuple of (success, response_data, status_code, error_message).
@@ -464,7 +526,7 @@ class RouteMapper:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             result = loop.run_until_complete(
-                self.map_route(remote_name, path, method, headers, body, query_params)
+                self.map_route(remote_name, path, method, headers, body, query_params, cookies)
             )
             loop.close()
             return result
