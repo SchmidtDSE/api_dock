@@ -269,6 +269,154 @@ def describe(config_name: Optional[str]) -> None:
         sys.exit(1)
 
 
+@cli.command()
+@click.argument("plaintext")
+@click.option("--method", "-m",
+              type=click.Choice(["local_key", "env_key", "aws_kms"]),
+              default="local_key",
+              help="Encryption method to use")
+@click.option("--key-id", help="AWS KMS key ID (for aws_kms method)")
+@click.option("--region", default="us-east-1", help="AWS region (for aws_kms method)")
+@click.option("--key-file", default=".api_dock_key", help="Key file path (for local_key method)")
+@click.option("--key-env", default="API_DOCK_ENCRYPTION_KEY", help="Environment variable name (for env_key method)")
+def encrypt(plaintext: str, method: str, key_id: Optional[str], region: str, key_file: str, key_env: str) -> None:
+    """Encrypt a plaintext value for use in configuration files.
+
+    PLAINTEXT: The value to encrypt
+
+    Examples:
+      api-dock encrypt "my-secret-token"
+      api-dock encrypt --method aws_kms --key-id arn:aws:kms:... "secret"
+      api-dock encrypt --method env_key --key-env MY_KEY "secret"
+    """
+    try:
+        from api_dock.encryption import create_encryption_provider, EncryptionError
+
+        # Build encryption config
+        encryption_config = {"method": method}
+
+        if method == "local_key":
+            encryption_config["key_file"] = key_file
+        elif method == "env_key":
+            encryption_config["key_env"] = key_env
+        elif method == "aws_kms":
+            if not key_id:
+                click.echo("Error: --key-id is required for aws_kms method", err=True)
+                sys.exit(1)
+            encryption_config["key_id"] = key_id
+            encryption_config["region"] = region
+
+        # Create provider and encrypt
+        provider = create_encryption_provider(encryption_config)
+        encrypted_value = provider.encrypt(plaintext)
+
+        click.echo(f"Encrypted value: {encrypted_value}")
+
+    except EncryptionError as e:
+        click.echo(f"Encryption error: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
+@cli.command()
+@click.option("--output", "-o", default=".api_dock_key", help="Output file for the key")
+@click.option("--force", "-f", is_flag=True, help="Overwrite existing key file")
+def generate_key(output: str, force: bool) -> None:
+    """Generate a new encryption key for local encryption.
+
+    Examples:
+      api-dock generate-key
+      api-dock generate-key --output my_key_file
+      api-dock generate-key --force  # Overwrite existing key
+    """
+    try:
+        from api_dock.encryption import LocalKeyEncryption, EncryptionError
+
+        output_path = Path(output)
+
+        # Check if file exists
+        if output_path.exists() and not force:
+            click.echo(f"Error: Key file '{output}' already exists. Use --force to overwrite.", err=True)
+            sys.exit(1)
+
+        # Generate key
+        key = LocalKeyEncryption.generate_key()
+
+        # Write key to file
+        with open(output_path, 'wb') as f:
+            f.write(key)
+
+        # Set restrictive permissions (owner read/write only)
+        output_path.chmod(0o600)
+
+        click.echo(f"✓ Generated encryption key: {output}")
+        click.echo(f"✓ Set file permissions to 600 (owner read/write only)")
+
+        # Show environment variable option
+        click.echo(f"\nTo use this key:")
+        click.echo(f"  1. Reference in config: encryption: {{method: local_key, key_file: {output}}}")
+        click.echo(f"  2. Or set environment: export API_DOCK_ENCRYPTION_KEY=$(cat {output})")
+
+    except EncryptionError as e:
+        click.echo(f"Key generation error: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
+@cli.command()
+@click.argument("ciphertext")
+@click.option("--method", "-m",
+              type=click.Choice(["local_key", "env_key", "aws_kms"]),
+              default="local_key",
+              help="Decryption method to use")
+@click.option("--key-id", help="AWS KMS key ID (for aws_kms method)")
+@click.option("--region", default="us-east-1", help="AWS region (for aws_kms method)")
+@click.option("--key-file", default=".api_dock_key", help="Key file path (for local_key method)")
+@click.option("--key-env", default="API_DOCK_ENCRYPTION_KEY", help="Environment variable name (for env_key method)")
+def decrypt(ciphertext: str, method: str, key_id: Optional[str], region: str, key_file: str, key_env: str) -> None:
+    """Decrypt an encrypted value (for testing/debugging).
+
+    CIPHERTEXT: The encrypted value to decrypt
+
+    Examples:
+      api-dock decrypt "gAAAAABh..."
+      api-dock decrypt --method aws_kms --key-id arn:aws:kms:... "AQICAHh7..."
+    """
+    try:
+        from api_dock.encryption import create_encryption_provider, EncryptionError
+
+        # Build encryption config
+        encryption_config = {"method": method}
+
+        if method == "local_key":
+            encryption_config["key_file"] = key_file
+        elif method == "env_key":
+            encryption_config["key_env"] = key_env
+        elif method == "aws_kms":
+            if not key_id:
+                click.echo("Error: --key-id is required for aws_kms method", err=True)
+                sys.exit(1)
+            encryption_config["key_id"] = key_id
+            encryption_config["region"] = region
+
+        # Create provider and decrypt
+        provider = create_encryption_provider(encryption_config)
+        decrypted_value = provider.decrypt(ciphertext)
+
+        click.echo(f"Decrypted value: {decrypted_value}")
+
+    except EncryptionError as e:
+        click.echo(f"Decryption error: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
 def main() -> None:
     """Main CLI entry point."""
     cli()
@@ -349,6 +497,9 @@ def _list_configs() -> None:
     click.echo("  api-dock init                    # Initialize config directory")
     click.echo("  api-dock start [config]          # Start API Dock server")
     click.echo("  api-dock describe [config]       # Describe configuration")
+    click.echo("  api-dock generate-key            # Generate encryption key")
+    click.echo("  api-dock encrypt [value]         # Encrypt authentication tokens")
+    click.echo("  api-dock decrypt [value]         # Decrypt authentication tokens")
     click.echo()
     click.echo("Run 'api-dock --help' for more information")
 
