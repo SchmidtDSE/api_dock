@@ -101,13 +101,24 @@ def _add_remote_routes(app: FastAPI, route_mapper: RouteMapper) -> None:
         Raises:
             HTTPException: If remote/database not found or route not allowed.
         """
+        # Extract cookies from request
+        cookies = dict(request.cookies) if request.cookies else {}
+
+        # DEBUG: Print FastAPI cookie extraction
+        if cookies:
+            print(f"🍪 DEBUG FASTAPI: Extracted cookies from request: {list(cookies.keys())}")
+            print(f"🔑 DEBUG FASTAPI: Cookie values: {cookies}")
+        else:
+            print(f"🍪 DEBUG FASTAPI: No cookies found in request")
+
         # Check if remote_name is a database first
         if remote_name in route_mapper.database_names:
             # Handle as database route
             success, response_data, status_code, error_message = await route_mapper.map_database_route(
                 database_name=remote_name,
                 path=path,
-                query_params=dict(request.query_params)
+                query_params=dict(request.query_params),
+                cookies=cookies
             )
         else:
             # Handle as remote API route
@@ -123,12 +134,16 @@ def _add_remote_routes(app: FastAPI, route_mapper: RouteMapper) -> None:
                 method=request.method,
                 headers=dict(request.headers),
                 body=body,
-                query_params=dict(request.query_params)
+                query_params=dict(request.query_params),
+                cookies=cookies
             )
 
         if not success:
-            # Return clean JSON error response
-            return JSONResponse(content={"error": error_message}, status_code=status_code)
+            # Use custom response body if available (e.g., from authentication), otherwise use error message
+            if response_data:
+                return JSONResponse(content=response_data, status_code=status_code)
+            else:
+                return JSONResponse(content={"error": error_message}, status_code=status_code)
 
         return JSONResponse(content=response_data, status_code=status_code)
 
