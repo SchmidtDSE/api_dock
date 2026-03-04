@@ -349,6 +349,32 @@ def validate_route_config(route_config: Dict[str, Any]) -> bool:
     return True
 
 
+def load_database_config_with_inheritance(database_filename: str, main_config: Dict[str, Any], config_dir: Optional[str] = None, version: Optional[str] = None) -> Dict[str, Any]:
+    """Load a database configuration file with cookie/authentication inheritance.
+
+    Args:
+        database_filename: Name of the database config file (without .yaml extension).
+        main_config: Main configuration dictionary for inheritance.
+        config_dir: Base config directory. If None, uses default.
+        version: Version string for versioned databases.
+
+    Returns:
+        Dictionary containing database configuration data with inheritance applied.
+
+    Raises:
+        FileNotFoundError: If database config file doesn't exist.
+        yaml.YAMLError: If config file is invalid YAML.
+    """
+    # Load the database config
+    database_config = load_database_config(database_filename, config_dir, version)
+
+    # Apply inheritance from main config
+    from api_dock.config import merge_inherited_config
+    merged_config = merge_inherited_config(database_config, main_config)
+
+    return merged_config
+
+
 #
 # INTERNAL
 #
