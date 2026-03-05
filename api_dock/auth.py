@@ -147,6 +147,59 @@ class ListValueAuth(AuthenticationProvider):
             return (status_code, {"error": "Authentication failed"})
 
 
+class FileAuth(AuthenticationProvider):
+    """Authentication using values from a text file (one value per line)."""
+
+    def __init__(self, filepath: str, encrypted: bool = True, encryption_config: Optional[Dict[str, Any]] = None, failed_response: Optional[Dict[str, Any]] = None):
+        """Initialize file-based authentication.
+
+        Args:
+            filepath: Path to file containing authentication values (one per line).
+            encrypted: Whether values in file are encrypted.
+            encryption_config: Encryption configuration for decryption.
+            failed_response: Custom response for failed authentication.
+
+        Raises:
+            AuthenticationError: If file cannot be read or values cannot be processed.
+        """
+        self.filepath = filepath
+        self.encryption_config = encryption_config
+        self.failed_response_config = failed_response or {}
+        self.expected_values = set()
+
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                for line_num, line in enumerate(f, 1):
+                    line = line.strip()
+                    if not line or line.startswith('#'):  # Skip empty lines and comments
+                        continue
+
+                    try:
+                        decrypted = decrypt_value_if_needed(line, encrypted, encryption_config)
+                        self.expected_values.add(decrypted)
+                    except EncryptionError as e:
+                        raise AuthenticationError(f"Failed to decrypt value on line {line_num} in '{filepath}': {str(e)}")
+        except FileNotFoundError:
+            raise AuthenticationError(f"Authentication file not found: {filepath}")
+        except IOError as e:
+            raise AuthenticationError(f"Failed to read authentication file '{filepath}': {str(e)}")
+
+    def validate(self, token: str) -> bool:
+        """Validate token against values from file."""
+        return token in self.expected_values
+
+    def get_failed_response(self) -> Tuple[int, Any]:
+        """Get failed authentication response."""
+        status_code = self.failed_response_config.get("status", DEFAULT_STATUS_CODE)
+
+        # Return configured response body, or default message
+        if self.failed_response_config:
+            # Return the full response object including status in body
+            return (status_code, self.failed_response_config)
+        else:
+            return (status_code, {"error": "Authentication failed"})
+
+
 class AWSSecretsAuth(AuthenticationProvider):
     """Authentication using AWS Secrets Manager."""
 
@@ -371,53 +424,65 @@ def create_authentication_provider(config: Dict[str, Any]) -> AuthenticationProv
     Raises:
         AuthenticationError: If configuration is invalid or provider cannot be created.
     """
-    method = config.get("method")
-    if not method:
-        raise AuthenticationError("Authentication method not specified")
-
     # Get common settings
     failed_response = config.get("failed_response")
     encryption_config = config.get("encryption")
     encrypted = config.get("encrypted", True)
 
-    if method == "fixed":
-        value = config.get("value")
-        if not value:
-            raise AuthenticationError("Fixed authentication method requires 'value'")
+    # Identify authentication method keys
+    method_keys = []
+    if "value" in config:
+        method_keys.append("value")
+    if "values" in config:
+        method_keys.append("values")
+    if "filepath" in config:
+        method_keys.append("filepath")
+    if "aws_secret_name" in config:
+        method_keys.append("aws_secret_name")
+    if "gcp_project_id" in config:
+        method_keys.append("gcp_project_id")
 
+    # Validate exactly one method key is present
+    if len(method_keys) == 0:
+        raise AuthenticationError("Authentication configuration must specify exactly one of: value, values, filepath, aws_secret_name, or gcp_project_id")
+    elif len(method_keys) > 1:
+        raise AuthenticationError(f"Authentication configuration has conflicting method keys: {', '.join(method_keys)}. Only one is allowed.")
+
+    method_key = method_keys[0]
+
+    # Create provider based on the method key
+    if method_key == "value":
+        value = config.get("value")
         return FixedValueAuth(value, encrypted, encryption_config, failed_response)
 
-    elif method == "list":
+    elif method_key == "values":
         values = config.get("values")
-        if not values or not isinstance(values, list):
-            raise AuthenticationError("List authentication method requires 'values' list")
-
+        if not isinstance(values, list):
+            raise AuthenticationError("'values' must be a list")
         return ListValueAuth(values, encrypted, encryption_config, failed_response)
 
-    elif method == "aws_secrets":
-        secret_name = config.get("secret_name")
-        if not secret_name:
-            raise AuthenticationError("AWS Secrets method requires 'secret_name'")
+    elif method_key == "filepath":
+        filepath = config.get("filepath")
+        return FileAuth(filepath, encrypted, encryption_config, failed_response)
 
-        region = config.get("region", "us-east-1")
+    elif method_key == "aws_secret_name":
+        secret_name = config.get("aws_secret_name")
+        region = config.get("aws_region", "us-east-1")
         cache_ttl = config.get("refresh_interval", DEFAULT_CACHE_TTL)
-
         return AWSSecretsAuth(secret_name, region, cache_ttl, failed_response)
 
-    elif method == "gcp_secrets":
-        project_id = config.get("project_id")
-        secret_name = config.get("secret_name")
+    elif method_key == "gcp_project_id":
+        project_id = config.get("gcp_project_id")
+        secret_name = config.get("gcp_secret_name")
+        if not secret_name:
+            raise AuthenticationError("GCP Secrets authentication requires both 'gcp_project_id' and 'gcp_secret_name'")
 
-        if not project_id or not secret_name:
-            raise AuthenticationError("GCP Secrets method requires 'project_id' and 'secret_name'")
-
-        version = config.get("version", "latest")
+        version = config.get("gcp_version", "latest")
         cache_ttl = config.get("refresh_interval", DEFAULT_CACHE_TTL)
-
         return GCPSecretsAuth(project_id, secret_name, version, cache_ttl, failed_response)
 
     else:
-        raise AuthenticationError(f"Unknown authentication method: {method}")
+        raise AuthenticationError(f"Unknown authentication method key: {method_key}")
 
 
 def validate_authentication(cookies: Dict[str, str], auth_config: Dict[str, Any]) -> Tuple[bool, Optional[int], Optional[Any]]:
