@@ -17,12 +17,20 @@ This guide explains how to set up encryption for authentication values in API Do
 
 ## Overview
 
-API Dock supports encrypting sensitive authentication tokens using multiple encryption methods:
+API Dock supports multiple authentication methods and encryption options for securing sensitive tokens:
 
-1. **Local Key Encryption** - Uses a local key file (default)
-2. **Environment Variable Encryption** - Uses a key from environment variables
-3. **AWS KMS Encryption** - Uses AWS Key Management Service
-4. **GCP Secrets** - For retrieval only (not encryption)
+### Authentication Methods
+1. **[Fixed Value](#1-fixed-value-value)** - Single authentication token
+2. **[List of Values](#2-list-of-values-values)** - Multiple allowed tokens
+3. **[File-based](#3-file-based-filepath)** - Tokens from a text file (one per line)
+4. **[AWS Secrets Manager](#4a-aws-secrets-manager-aws_secret_name)** - Tokens stored as plaintext in AWS Secrets Manager
+5. **[AWS KMS](#4b-aws-kms-aws_key_id)** - Tokens encrypted with AWS KMS and stored in config
+6. **[GCP Secret Manager](#5-gcp-secret-manager-gcp_project_id)** - Tokens stored in Google Cloud Secret Manager
+
+### Encryption Methods (for encrypting individual values)
+1. **[Local Key Encryption](#local-key-encryption-default)** - Uses a local key file (default)
+2. **[Environment Variable Encryption](#environment-variable-encryption)** - Uses a key from environment variables
+3. **[AWS KMS Encryption](#aws-kms-encryption-for-encryptingdecrypting-values)** - Uses AWS Key Management Service for individual values
 
 ## Quick Start
 
@@ -116,7 +124,9 @@ encryption:
 3. Encrypt: `api-dock encrypt --method env_key "your-token"`
 4. Use encrypted values in config
 
-### AWS KMS Encryption
+### AWS KMS Encryption (for encrypting/decrypting values)
+
+This section covers using AWS KMS to encrypt/decrypt individual values in your configuration files. This is different from using AWS services for authentication (covered later).
 
 **Configuration:**
 ```yaml
@@ -159,6 +169,8 @@ encryption:
      ]
    }
    ```
+
+> **Note:** This is for encrypting individual values. For AWS-based authentication methods, see the "AWS Authentication" section below.
 
 ## CLI Commands
 
@@ -265,8 +277,16 @@ gAAAAABh7J8K5...encrypted_token_3...
 - Empty lines are ignored
 - Whitespace at beginning/end of lines is trimmed
 
-### 4. AWS Secrets Manager (`aws_secret_name`)
-Tokens stored in AWS Secrets Manager:
+### 4. AWS Authentication
+
+There are two methods for authenticating using AWS services:
+
+- **AWS Secrets Manager**: Tokens stored as plaintext in AWS Secrets Manager (AWS handles encryption automatically)
+- **AWS KMS**: Tokens encrypted with AWS KMS and stored in your config file (you handle encryption/decryption)
+
+#### 4a. AWS Secrets Manager (`aws_secret_name`)
+Authentication tokens stored in AWS Secrets Manager:
+
 ```yaml
 authentication:
   key: "X-API-Key"
@@ -277,6 +297,79 @@ authentication:
     status: 403
     error: "Invalid API key"
 ```
+
+**Setup:**
+1. **Create secret in AWS Secrets Manager:**
+   ```bash
+   # Single token
+   aws secretsmanager create-secret --name "my-app/api-tokens" --secret-string "your-secret-token"
+
+   # Multiple tokens (JSON list)
+   aws secretsmanager create-secret --name "my-app/api-tokens" --secret-string '["token1", "token2", "token3"]'
+   ```
+
+2. **Required IAM permissions:**
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [
+       {
+         "Effect": "Allow",
+         "Action": [
+           "secretsmanager:GetSecretValue"
+         ],
+         "Resource": "arn:aws:secretsmanager:us-east-1:123456789012:secret:my-app/api-tokens-*"
+       }
+     ]
+   }
+   ```
+
+#### 4b. AWS KMS (`aws_key_id`)
+Authentication tokens encrypted with AWS KMS:
+
+```yaml
+authentication:
+  key: "X-API-Key"
+  aws_key_id: "arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789012"
+  aws_tokens:
+    - "AQICAHh7...kms_encrypted_token_1..."
+    - "AQICAHh7...kms_encrypted_token_2..."
+    - "AQICAHh7...kms_encrypted_token_3..."
+  aws_region: "us-east-1"  # Optional, defaults to us-east-1
+  failed_response:
+    status: 403
+    error: "Invalid API key"
+```
+
+**Setup:**
+1. **Create KMS key:**
+   ```bash
+   aws kms create-key --description "API Dock authentication tokens"
+   ```
+
+2. **Encrypt your tokens:**
+   ```bash
+   # Encrypt each authentication token
+   api-dock encrypt --method aws_kms --key-id "arn:aws:kms:..." "token1"
+   api-dock encrypt --method aws_kms --key-id "arn:aws:kms:..." "token2"
+   api-dock encrypt --method aws_kms --key-id "arn:aws:kms:..." "token3"
+   ```
+
+3. **Required IAM permissions:**
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [
+       {
+         "Effect": "Allow",
+         "Action": [
+           "kms:Decrypt"
+         ],
+         "Resource": "arn:aws:kms:us-east-1:123456789012:key/your-key-id"
+       }
+     ]
+   }
+   ```
 
 ### 5. GCP Secret Manager (`gcp_project_id`)
 Tokens stored in Google Cloud Secret Manager:
@@ -319,7 +412,22 @@ authentication:
     message: "Invalid authentication token"
 ```
 
-### AWS with Custom Encryption
+### AWS KMS Authentication
+```yaml
+authentication:
+  key: "X-API-Key"
+  aws_key_id: "arn:aws:kms:us-west-2:123456789012:key/12345678-1234-1234-1234-123456789012"
+  aws_tokens:
+    - "AQICAHh7J8K3LxYrVhw1e..."  # KMS-encrypted "token123"
+    - "AQICAHh7J8K4LxYrVhw2f..."  # KMS-encrypted "secret456"
+    - "AQICAHh7J8K5LxYrVhw3g..."  # KMS-encrypted "auth789"
+  aws_region: "us-west-2"
+  failed_response:
+    status: 403
+    error: "Access denied"
+```
+
+### AWS Secrets Manager with Local Encryption
 ```yaml
 authentication:
   key: "X-API-Key"

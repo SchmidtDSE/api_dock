@@ -305,6 +305,82 @@ class AWSSecretsAuth(AuthenticationProvider):
             raise AuthenticationError(f"Failed to retrieve secret: {str(e)}")
 
 
+class AWSKMSAuth(AuthenticationProvider):
+    """Authentication using AWS KMS for encrypted tokens."""
+
+    def __init__(self, tokens: List[str], aws_key_id: str, aws_region: str = "us-east-1", failed_response: Optional[Dict[str, Any]] = None):
+        """Initialize AWS KMS authentication.
+
+        Args:
+            tokens: List of encrypted tokens (encrypted with specified KMS key).
+            aws_key_id: AWS KMS key ID or ARN.
+            aws_region: AWS region.
+            failed_response: Custom response for failed authentication.
+
+        Raises:
+            AuthenticationError: If AWS setup fails.
+        """
+        try:
+            import boto3
+            from botocore.exceptions import ClientError, NoCredentialsError
+        except ImportError:
+            raise AuthenticationError("boto3 package is required for AWS KMS authentication")
+
+        self.encrypted_tokens = tokens
+        self.aws_key_id = aws_key_id
+        self.aws_region = aws_region
+        self.failed_response_config = failed_response or {}
+
+        try:
+            self.kms_client = boto3.client('kms', region_name=aws_region)
+            # Test credentials
+            self.kms_client.list_keys(Limit=1)
+        except NoCredentialsError:
+            raise AuthenticationError("AWS credentials not found")
+        except Exception as e:
+            raise AuthenticationError(f"Failed to initialize AWS KMS client: {str(e)}")
+
+        # Decrypt all tokens once during initialization
+        self.expected_values = set()
+        for encrypted_token in tokens:
+            try:
+                decrypted = self._decrypt_token(encrypted_token)
+                self.expected_values.add(decrypted)
+            except Exception as e:
+                raise AuthenticationError(f"Failed to decrypt token: {str(e)}")
+
+    def validate(self, token: str) -> bool:
+        """Validate token against decrypted KMS tokens."""
+        return token in self.expected_values
+
+    def get_failed_response(self) -> Tuple[int, Any]:
+        """Get failed authentication response."""
+        status_code = self.failed_response_config.get("status", DEFAULT_STATUS_CODE)
+
+        # Return configured response body, or default message
+        if self.failed_response_config:
+            # Return the full response object including status in body
+            return (status_code, self.failed_response_config)
+        else:
+            return (status_code, {"error": "Authentication failed"})
+
+    def _decrypt_token(self, encrypted_token: str) -> str:
+        """Decrypt a single token using AWS KMS."""
+        try:
+            import base64
+            from botocore.exceptions import ClientError
+
+            # Decode base64 to get the actual ciphertext blob
+            ciphertext_blob = base64.b64decode(encrypted_token.encode('utf-8'))
+
+            response = self.kms_client.decrypt(CiphertextBlob=ciphertext_blob)
+            return response['Plaintext'].decode('utf-8')
+        except ClientError as e:
+            raise AuthenticationError(f"AWS KMS decryption failed: {str(e)}")
+        except Exception as e:
+            raise AuthenticationError(f"Failed to decrypt with AWS KMS: {str(e)}")
+
+
 class GCPSecretsAuth(AuthenticationProvider):
     """Authentication using GCP Secret Manager."""
 
@@ -439,12 +515,14 @@ def create_authentication_provider(config: Dict[str, Any]) -> AuthenticationProv
         method_keys.append("filepath")
     if "aws_secret_name" in config:
         method_keys.append("aws_secret_name")
+    if "aws_key_id" in config:
+        method_keys.append("aws_key_id")
     if "gcp_project_id" in config:
         method_keys.append("gcp_project_id")
 
     # Validate exactly one method key is present
     if len(method_keys) == 0:
-        raise AuthenticationError("Authentication configuration must specify exactly one of: value, values, filepath, aws_secret_name, or gcp_project_id")
+        raise AuthenticationError("Authentication configuration must specify exactly one of: value, values, filepath, aws_secret_name, aws_key_id, or gcp_project_id")
     elif len(method_keys) > 1:
         raise AuthenticationError(f"Authentication configuration has conflicting method keys: {', '.join(method_keys)}. Only one is allowed.")
 
@@ -470,6 +548,15 @@ def create_authentication_provider(config: Dict[str, Any]) -> AuthenticationProv
         region = config.get("aws_region", "us-east-1")
         cache_ttl = config.get("refresh_interval", DEFAULT_CACHE_TTL)
         return AWSSecretsAuth(secret_name, region, cache_ttl, failed_response)
+
+    elif method_key == "aws_key_id":
+        aws_key_id = config.get("aws_key_id")
+        tokens = config.get("aws_tokens")
+        if not tokens or not isinstance(tokens, list):
+            raise AuthenticationError("AWS KMS authentication requires both 'aws_key_id' and 'aws_tokens' list")
+
+        region = config.get("aws_region", "us-east-1")
+        return AWSKMSAuth(tokens, aws_key_id, region, failed_response)
 
     elif method_key == "gcp_project_id":
         project_id = config.get("gcp_project_id")
