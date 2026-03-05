@@ -61,7 +61,6 @@ Replace the plaintext values in your config with the encrypted ones:
 ```yaml
 authentication:
   key: "a"
-  method: "list"
   values:
     - "gAAAAABh7J8K3...encoded_value_1..."
     - "gAAAAABh7J8K4...encoded_value_2..."
@@ -79,7 +78,6 @@ Add encryption configuration to specify how to decrypt:
 ```yaml
 authentication:
   key: "a"
-  method: "list"
   values: ["gAAAAABh..."]
   encrypted: true
   encryption:
@@ -190,22 +188,113 @@ Options:
 api-dock decrypt [encrypted_value] [options]
 ```
 
-## Configuration Examples
+## Authentication Methods
 
-### Simple Local Encryption
+The authentication method is automatically inferred from the configuration keys you provide. You must specify exactly one of the following:
+
+### 1. Fixed Value (`value`)
+Single authentication token:
 ```yaml
 authentication:
   key: "auth_token"
-  method: "fixed"
   value: "gAAAAABh7J8K3...encrypted..."
   encrypted: true
 ```
+
+### 2. List of Values (`values`)
+Multiple allowed tokens:
+```yaml
+authentication:
+  key: "auth_token"
+  values:
+    - "gAAAAABh7J8K3...encrypted_1..."
+    - "gAAAAABh7J8K4...encrypted_2..."
+    - "gAAAAABh7J8K5...encrypted_3..."
+  encrypted: true
+```
+
+### 3. File-based (`filepath`)
+Tokens from a text file (one per line):
+```yaml
+authentication:
+  key: "auth_token"
+  filepath: "/path/to/tokens.txt"
+  encrypted: true  # Whether tokens in file are encrypted
+```
+
+**Setting up file-based authentication:**
+
+1. **Create a tokens file:**
+   ```bash
+   # Create your tokens file
+   touch /path/to/tokens.txt
+   chmod 600 /path/to/tokens.txt  # Secure permissions
+   ```
+
+2. **Add tokens to file (if using encrypted tokens):**
+   ```bash
+   # Generate key first
+   api-dock generate-key
+
+   # Encrypt each token and add to file
+   api-dock encrypt "token1" >> /path/to/tokens.txt
+   api-dock encrypt "token2" >> /path/to/tokens.txt
+   api-dock encrypt "token3" >> /path/to/tokens.txt
+   ```
+
+3. **Or add plaintext tokens:**
+   ```bash
+   echo "plaintext-token-1" >> /path/to/tokens.txt
+   echo "plaintext-token-2" >> /path/to/tokens.txt
+   # Set encrypted: false in config
+   ```
+
+Example tokens.txt:
+```
+# Lines starting with # are comments
+gAAAAABh7J8K3...encrypted_token_1...
+gAAAAABh7J8K4...encrypted_token_2...
+# Empty lines are ignored
+
+gAAAAABh7J8K5...encrypted_token_3...
+```
+
+**File format rules:**
+- One token per line
+- Lines starting with `#` are treated as comments
+- Empty lines are ignored
+- Whitespace at beginning/end of lines is trimmed
+
+### 4. AWS Secrets Manager (`aws_secret_name`)
+Tokens stored in AWS Secrets Manager:
+```yaml
+authentication:
+  key: "X-API-Key"
+  aws_secret_name: "my-app/api-tokens"
+  aws_region: "us-east-1"  # Optional, defaults to us-east-1
+  refresh_interval: 300    # Cache TTL in seconds
+  failed_response:
+    status: 403
+    error: "Invalid API key"
+```
+
+### 5. GCP Secret Manager (`gcp_project_id`)
+Tokens stored in Google Cloud Secret Manager:
+```yaml
+authentication:
+  key: "Authorization"
+  gcp_project_id: "my-project-123"
+  gcp_secret_name: "api-tokens"
+  gcp_version: "latest"    # Optional, defaults to latest
+  refresh_interval: 300    # Cache TTL in seconds
+```
+
+## Configuration Examples
 
 ### List with Mixed Encryption
 ```yaml
 authentication:
   key: "auth_token"
-  method: "list"
   values:
     - value: "gAAAAABh7J8K3...encrypted..."
       encrypted: true
@@ -216,17 +305,31 @@ authentication:
     method: "local_key"
 ```
 
-### AWS KMS with Custom Response
+### File-based Authentication
+```yaml
+authentication:
+  key: "auth_token"
+  filepath: "auth_tokens.txt"
+  encrypted: true
+  encryption:
+    method: "local_key"
+    key_file: ".api_dock_key"
+  failed_response:
+    status: 401
+    message: "Invalid authentication token"
+```
+
+### AWS with Custom Encryption
 ```yaml
 authentication:
   key: "X-API-Key"
-  method: "fixed"
-  value: "AQICAHh7...kms_encrypted..."
+  aws_secret_name: "my-app/encrypted-tokens"
+  aws_region: "us-west-2"
+  # Tokens in AWS secret are encrypted with local key
   encrypted: true
   encryption:
-    method: "aws_kms"
-    key_id: "arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789012"
-    region: "us-east-1"
+    method: "local_key"
+    key_file: "/secure/path/.api_dock_key"
   failed_response:
     status: 403
     error: "Invalid API key"
