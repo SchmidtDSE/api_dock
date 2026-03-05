@@ -203,7 +203,7 @@ class FileAuth(AuthenticationProvider):
 class AWSSecretsAuth(AuthenticationProvider):
     """Authentication using AWS Secrets Manager."""
 
-    def __init__(self, secret_name: str, region: str = "us-east-1", cache_ttl: int = DEFAULT_CACHE_TTL, failed_response: Optional[Dict[str, Any]] = None):
+    def __init__(self, secret_name: str, region: str = "us-west-2", cache_ttl: int = DEFAULT_CACHE_TTL, failed_response: Optional[Dict[str, Any]] = None):
         """Initialize AWS Secrets authentication.
 
         Args:
@@ -308,17 +308,18 @@ class AWSSecretsAuth(AuthenticationProvider):
 class AWSKMSAuth(AuthenticationProvider):
     """Authentication using AWS KMS for encrypted tokens."""
 
-    def __init__(self, tokens: List[str], aws_key_id: str, aws_region: str = "us-east-1", failed_response: Optional[Dict[str, Any]] = None):
+    def __init__(self, tokens: Optional[List[str]] = None, aws_tokens_file: Optional[str] = None, aws_key_id: str = None, aws_region: str = "us-west-2", failed_response: Optional[Dict[str, Any]] = None):
         """Initialize AWS KMS authentication.
 
         Args:
-            tokens: List of encrypted tokens (encrypted with specified KMS key).
+            tokens: List of encrypted tokens (for inline configuration).
+            aws_tokens_file: Path to file containing encrypted tokens (one per line).
             aws_key_id: AWS KMS key ID or ARN.
             aws_region: AWS region.
             failed_response: Custom response for failed authentication.
 
         Raises:
-            AuthenticationError: If AWS setup fails.
+            AuthenticationError: If AWS setup fails or configuration is invalid.
         """
         try:
             import boto3
@@ -326,7 +327,12 @@ class AWSKMSAuth(AuthenticationProvider):
         except ImportError:
             raise AuthenticationError("boto3 package is required for AWS KMS authentication")
 
-        self.encrypted_tokens = tokens
+        # Validate exactly one token source
+        if tokens and aws_tokens_file:
+            raise AuthenticationError("Cannot specify both 'aws_tokens' and 'aws_tokens_file'")
+        if not tokens and not aws_tokens_file:
+            raise AuthenticationError("Must specify either 'aws_tokens' or 'aws_tokens_file'")
+
         self.aws_key_id = aws_key_id
         self.aws_region = aws_region
         self.failed_response_config = failed_response or {}
@@ -340,14 +346,40 @@ class AWSKMSAuth(AuthenticationProvider):
         except Exception as e:
             raise AuthenticationError(f"Failed to initialize AWS KMS client: {str(e)}")
 
+        # Load encrypted tokens
+        if tokens:
+            encrypted_tokens = tokens
+        else:
+            encrypted_tokens = self._load_tokens_from_file(aws_tokens_file)
+
         # Decrypt all tokens once during initialization
         self.expected_values = set()
-        for encrypted_token in tokens:
+        for encrypted_token in encrypted_tokens:
             try:
                 decrypted = self._decrypt_token(encrypted_token)
                 self.expected_values.add(decrypted)
             except Exception as e:
                 raise AuthenticationError(f"Failed to decrypt token: {str(e)}")
+
+    def _load_tokens_from_file(self, filepath: str) -> List[str]:
+        """Load encrypted tokens from a file."""
+        try:
+            tokens = []
+            with open(filepath, 'r', encoding='utf-8') as f:
+                for line_num, line in enumerate(f, 1):
+                    line = line.strip()
+                    if not line or line.startswith('#'):  # Skip empty lines and comments
+                        continue
+                    tokens.append(line)
+
+            if not tokens:
+                raise AuthenticationError(f"No valid tokens found in file '{filepath}'")
+
+            return tokens
+        except FileNotFoundError:
+            raise AuthenticationError(f"AWS KMS tokens file not found: {filepath}")
+        except IOError as e:
+            raise AuthenticationError(f"Failed to read AWS KMS tokens file '{filepath}': {str(e)}")
 
     def validate(self, token: str) -> bool:
         """Validate token against decrypted KMS tokens."""
@@ -517,12 +549,14 @@ def create_authentication_provider(config: Dict[str, Any]) -> AuthenticationProv
         method_keys.append("aws_secret_name")
     if "aws_key_id" in config:
         method_keys.append("aws_key_id")
+    if "aws_tokens_file" in config:
+        method_keys.append("aws_tokens_file")
     if "gcp_project_id" in config:
         method_keys.append("gcp_project_id")
 
     # Validate exactly one method key is present
     if len(method_keys) == 0:
-        raise AuthenticationError("Authentication configuration must specify exactly one of: value, values, filepath, aws_secret_name, aws_key_id, or gcp_project_id")
+        raise AuthenticationError("Authentication configuration must specify exactly one of: value, values, filepath, aws_secret_name, aws_key_id, aws_tokens_file, or gcp_project_id")
     elif len(method_keys) > 1:
         raise AuthenticationError(f"Authentication configuration has conflicting method keys: {', '.join(method_keys)}. Only one is allowed.")
 
@@ -545,7 +579,7 @@ def create_authentication_provider(config: Dict[str, Any]) -> AuthenticationProv
 
     elif method_key == "aws_secret_name":
         secret_name = config.get("aws_secret_name")
-        region = config.get("aws_region", "us-east-1")
+        region = config.get("aws_region", "us-west-2")
         cache_ttl = config.get("refresh_interval", DEFAULT_CACHE_TTL)
         return AWSSecretsAuth(secret_name, region, cache_ttl, failed_response)
 
@@ -555,8 +589,17 @@ def create_authentication_provider(config: Dict[str, Any]) -> AuthenticationProv
         if not tokens or not isinstance(tokens, list):
             raise AuthenticationError("AWS KMS authentication requires both 'aws_key_id' and 'aws_tokens' list")
 
-        region = config.get("aws_region", "us-east-1")
-        return AWSKMSAuth(tokens, aws_key_id, region, failed_response)
+        region = config.get("aws_region", "us-west-2")
+        return AWSKMSAuth(tokens=tokens, aws_key_id=aws_key_id, aws_region=region, failed_response=failed_response)
+
+    elif method_key == "aws_tokens_file":
+        aws_key_id = config.get("aws_key_id")
+        if not aws_key_id:
+            raise AuthenticationError("AWS KMS file authentication requires both 'aws_tokens_file' and 'aws_key_id'")
+
+        aws_tokens_file = config.get("aws_tokens_file")
+        region = config.get("aws_region", "us-west-2")
+        return AWSKMSAuth(aws_tokens_file=aws_tokens_file, aws_key_id=aws_key_id, aws_region=region, failed_response=failed_response)
 
     elif method_key == "gcp_project_id":
         project_id = config.get("gcp_project_id")

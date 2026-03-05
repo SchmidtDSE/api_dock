@@ -24,7 +24,7 @@ API Dock supports multiple authentication methods and encryption options for sec
 2. **[List of Values](#2-list-of-values-values)** - Multiple allowed tokens
 3. **[File-based](#3-file-based-filepath)** - Tokens from a text file (one per line)
 4. **[AWS Secrets Manager](#4a-aws-secrets-manager-aws_secret_name)** - Tokens stored as plaintext in AWS Secrets Manager
-5. **[AWS KMS](#4b-aws-kms-aws_key_id)** - Tokens encrypted with AWS KMS and stored in config
+5. **[AWS KMS](#4b-aws-kms-aws_key_id)** - Tokens encrypted with AWS KMS (inline or file-based)
 6. **[GCP Secret Manager](#5-gcp-secret-manager-gcp_project_id)** - Tokens stored in Google Cloud Secret Manager
 
 ### Encryption Methods (for encrypting individual values)
@@ -291,7 +291,7 @@ Authentication tokens stored in AWS Secrets Manager:
 authentication:
   key: "X-API-Key"
   aws_secret_name: "my-app/api-tokens"
-  aws_region: "us-east-1"  # Optional, defaults to us-east-1
+  aws_region: "us-west-2"  # Optional, defaults to us-west-2
   refresh_interval: 300    # Cache TTL in seconds
   failed_response:
     status: 403
@@ -327,6 +327,7 @@ authentication:
 #### 4b. AWS KMS (`aws_key_id`)
 Authentication tokens encrypted with AWS KMS:
 
+**Option 1: Inline tokens**
 ```yaml
 authentication:
   key: "X-API-Key"
@@ -335,6 +336,18 @@ authentication:
     - "AQICAHh7...kms_encrypted_token_1..."
     - "AQICAHh7...kms_encrypted_token_2..."
     - "AQICAHh7...kms_encrypted_token_3..."
+  aws_region: "us-east-1"  # Optional, defaults to us-east-1
+  failed_response:
+    status: 403
+    error: "Invalid API key"
+```
+
+**Option 2: File-based tokens**
+```yaml
+authentication:
+  key: "X-API-Key"
+  aws_key_id: "arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789012"
+  aws_tokens_file: "/path/to/kms_encrypted_tokens.txt"
   aws_region: "us-east-1"  # Optional, defaults to us-east-1
   failed_response:
     status: 403
@@ -355,7 +368,28 @@ authentication:
    api-dock encrypt --method aws_kms --key-id "arn:aws:kms:..." "token3"
    ```
 
-3. **Required IAM permissions:**
+3. **For file-based tokens, create tokens file:**
+   ```bash
+   # Create file with KMS-encrypted tokens (one per line)
+   touch /path/to/kms_encrypted_tokens.txt
+   chmod 600 /path/to/kms_encrypted_tokens.txt
+
+   # Add encrypted tokens to file
+   api-dock encrypt --method aws_kms --key-id "arn:aws:kms:..." "token1" >> /path/to/kms_encrypted_tokens.txt
+   api-dock encrypt --method aws_kms --key-id "arn:aws:kms:..." "token2" >> /path/to/kms_encrypted_tokens.txt
+   ```
+
+   Example kms_encrypted_tokens.txt:
+   ```
+   # Lines starting with # are comments
+   AQICAHh7...kms_encrypted_token_1...
+   AQICAHh7...kms_encrypted_token_2...
+   # Empty lines are ignored
+
+   AQICAHh7...kms_encrypted_token_3...
+   ```
+
+4. **Required IAM permissions:**
    ```json
    {
      "Version": "2012-10-17",
