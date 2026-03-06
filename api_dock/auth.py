@@ -32,6 +32,14 @@ DEFAULT_STATUS_CODE: int = 401
 class AuthenticationProvider(ABC):
     """Abstract base class for authentication providers."""
 
+    def __init__(self, failed_response: Optional[Dict[str, Any]] = None):
+        """Initialize authentication provider with common settings.
+
+        Args:
+            failed_response: Custom response for failed authentication.
+        """
+        self.failed_response_config = failed_response or {}
+
     @abstractmethod
     def validate(self, token: str) -> bool:
         """Validate an authentication token.
@@ -44,14 +52,44 @@ class AuthenticationProvider(ABC):
         """
         pass
 
-    @abstractmethod
     def get_failed_response(self) -> Tuple[int, Any]:
         """Get the response to return when authentication fails.
 
         Returns:
             Tuple of (status_code, response_body).
         """
-        pass
+        status_code = self.failed_response_config.get("status", DEFAULT_STATUS_CODE)
+
+        # Return configured response body, or default message
+        if self.failed_response_config:
+            # Return the full response object including status in body
+            return (status_code, self.failed_response_config)
+        else:
+            return (status_code, {"error": "Authentication failed"})
+
+    def _normalize_token_set(self, values: set) -> set:
+        """Convert all tokens to strings for consistent comparison.
+
+        Args:
+            values: Set of token values.
+
+        Returns:
+            Set of string tokens.
+        """
+        return {str(v) for v in values}
+
+    def _validate_against_set(self, token: str, valid_tokens: set) -> bool:
+        """Validate token against a set of valid tokens with string normalization.
+
+        Args:
+            token: Token to validate.
+            valid_tokens: Set of valid tokens.
+
+        Returns:
+            True if token is valid, False otherwise.
+        """
+        normalized_tokens = self._normalize_token_set(valid_tokens)
+        return str(token) in normalized_tokens
 
 
 class FixedValueAuth(AuthenticationProvider):
@@ -69,29 +107,16 @@ class FixedValueAuth(AuthenticationProvider):
         Raises:
             AuthenticationError: If value cannot be decrypted.
         """
-        self.encrypted = encrypted
-        self.encryption_config = encryption_config
-        self.failed_response_config = failed_response or {}
+        super().__init__(failed_response)
 
         try:
-            self.expected_value = decrypt_value_if_needed(value, encrypted, encryption_config)
+            self.expected_value = str(decrypt_value_if_needed(value, encrypted, encryption_config))
         except EncryptionError as e:
             raise AuthenticationError(f"Failed to decrypt authentication value: {str(e)}")
 
     def validate(self, token: str) -> bool:
         """Validate token against fixed value."""
-        return token == self.expected_value
-
-    def get_failed_response(self) -> Tuple[int, Any]:
-        """Get failed authentication response."""
-        status_code = self.failed_response_config.get("status", DEFAULT_STATUS_CODE)
-
-        # Return configured response body, or default message
-        if self.failed_response_config:
-            # Return the full response object including status in body
-            return (status_code, self.failed_response_config)
-        else:
-            return (status_code, {"error": "Authentication failed"})
+        return str(token) == self.expected_value
 
 
 class ListValueAuth(AuthenticationProvider):
@@ -109,8 +134,7 @@ class ListValueAuth(AuthenticationProvider):
         Raises:
             AuthenticationError: If values cannot be processed.
         """
-        self.encryption_config = encryption_config
-        self.failed_response_config = failed_response or {}
+        super().__init__(failed_response)
         self.expected_values = set()
 
         for value_item in values:
@@ -119,13 +143,13 @@ class ListValueAuth(AuthenticationProvider):
                 if isinstance(value_item, str):
                     # Simple string - use global encrypted setting
                     decrypted = decrypt_value_if_needed(value_item, encrypted, encryption_config)
-                    self.expected_values.add(decrypted)
+                    self.expected_values.add(str(decrypted))
                 elif isinstance(value_item, dict):
                     # Dict format with individual encryption setting
                     value_str = value_item.get("value", "")
                     value_encrypted = value_item.get("encrypted", encrypted)
                     decrypted = decrypt_value_if_needed(value_str, value_encrypted, encryption_config)
-                    self.expected_values.add(decrypted)
+                    self.expected_values.add(str(decrypted))
                 else:
                     raise AuthenticationError(f"Invalid value format: {type(value_item)}")
             except EncryptionError as e:
@@ -133,18 +157,7 @@ class ListValueAuth(AuthenticationProvider):
 
     def validate(self, token: str) -> bool:
         """Validate token against list of values."""
-        return token in self.expected_values
-
-    def get_failed_response(self) -> Tuple[int, Any]:
-        """Get failed authentication response."""
-        status_code = self.failed_response_config.get("status", DEFAULT_STATUS_CODE)
-
-        # Return configured response body, or default message
-        if self.failed_response_config:
-            # Return the full response object including status in body
-            return (status_code, self.failed_response_config)
-        else:
-            return (status_code, {"error": "Authentication failed"})
+        return self._validate_against_set(token, self.expected_values)
 
 
 class FileAuth(AuthenticationProvider):
@@ -162,9 +175,7 @@ class FileAuth(AuthenticationProvider):
         Raises:
             AuthenticationError: If file cannot be read or values cannot be processed.
         """
-        self.filepath = filepath
-        self.encryption_config = encryption_config
-        self.failed_response_config = failed_response or {}
+        super().__init__(failed_response)
         self.expected_values = set()
 
         try:
@@ -176,7 +187,7 @@ class FileAuth(AuthenticationProvider):
 
                     try:
                         decrypted = decrypt_value_if_needed(line, encrypted, encryption_config)
-                        self.expected_values.add(decrypted)
+                        self.expected_values.add(str(decrypted))
                     except EncryptionError as e:
                         raise AuthenticationError(f"Failed to decrypt value on line {line_num} in '{filepath}': {str(e)}")
         except FileNotFoundError:
@@ -186,18 +197,7 @@ class FileAuth(AuthenticationProvider):
 
     def validate(self, token: str) -> bool:
         """Validate token against values from file."""
-        return token in self.expected_values
-
-    def get_failed_response(self) -> Tuple[int, Any]:
-        """Get failed authentication response."""
-        status_code = self.failed_response_config.get("status", DEFAULT_STATUS_CODE)
-
-        # Return configured response body, or default message
-        if self.failed_response_config:
-            # Return the full response object including status in body
-            return (status_code, self.failed_response_config)
-        else:
-            return (status_code, {"error": "Authentication failed"})
+        return self._validate_against_set(token, self.expected_values)
 
 
 class AWSSecretsAuth(AuthenticationProvider):
@@ -215,6 +215,8 @@ class AWSSecretsAuth(AuthenticationProvider):
         Raises:
             AuthenticationError: If AWS setup fails.
         """
+        super().__init__(failed_response)
+
         try:
             import boto3
             from botocore.exceptions import ClientError, NoCredentialsError
@@ -224,8 +226,6 @@ class AWSSecretsAuth(AuthenticationProvider):
         self.secret_name = secret_name
         self.region = region
         self.cache_ttl = cache_ttl
-        self.failed_response_config = failed_response or {}
-
         try:
             self.secrets_client = boto3.client('secretsmanager', region_name=region)
             # Test credentials
@@ -243,26 +243,14 @@ class AWSSecretsAuth(AuthenticationProvider):
         """Validate token against AWS Secrets Manager."""
         try:
             valid_tokens = self._get_cached_tokens()
-            return token in valid_tokens
-        except Exception:
+            return self._validate_against_set(token, valid_tokens)
+        except Exception as e:
             # If we can't fetch secrets, deny access
             return False
-
-    def get_failed_response(self) -> Tuple[int, Any]:
-        """Get failed authentication response."""
-        status_code = self.failed_response_config.get("status", DEFAULT_STATUS_CODE)
-
-        # Return configured response body, or default message
-        if self.failed_response_config:
-            # Return the full response object including status in body
-            return (status_code, self.failed_response_config)
-        else:
-            return (status_code, {"error": "Authentication failed"})
 
     def _get_cached_tokens(self) -> set:
         """Get authentication tokens from cache or refresh from AWS."""
         current_time = time.time()
-
         # Check if cache is still valid
         if current_time - self._cache_time < self.cache_ttl and self._cached_values:
             return self._cached_values
@@ -272,26 +260,27 @@ class AWSSecretsAuth(AuthenticationProvider):
             import boto3
             from botocore.exceptions import ClientError
 
-            response = self.secrets_client.get_secret_value(SecretName=self.secret_name)
+            response = self.secrets_client.get_secret_value(SecretId=self.secret_name)
             secret_data = response['SecretString']
 
             # Parse secret data
             try:
                 # Try JSON format first (list of tokens or single value)
                 parsed_data = json.loads(secret_data)
+                if isinstance(parsed_data, (int, float)):
+                    parsed_data = str(parsed_data)
                 if isinstance(parsed_data, list):
-                    self._cached_values = set(parsed_data)
+                    self._cached_values = {str(v) for v in parsed_data}
                 elif isinstance(parsed_data, str):
-                    self._cached_values = {parsed_data}
+                    self._cached_values = {str(parsed_data)}
                 elif isinstance(parsed_data, dict):
                     # Extract values from dict (common AWS pattern)
-                    self._cached_values = set(parsed_data.values())
+                    self._cached_values = {str(v) for v in parsed_data.values()}
                 else:
                     raise AuthenticationError(f"Invalid secret format: {type(parsed_data)}")
             except json.JSONDecodeError:
                 # Treat as plain text (single value)
-                self._cached_values = {secret_data.strip()}
-
+                self._cached_values = {str(secret_data.strip())}
             self._cache_time = current_time
             return self._cached_values
 
@@ -333,9 +322,10 @@ class AWSKMSAuth(AuthenticationProvider):
         if not tokens and not aws_tokens_file:
             raise AuthenticationError("Must specify either 'aws_tokens' or 'aws_tokens_file'")
 
+        super().__init__(failed_response)
+
         self.aws_key_id = aws_key_id
         self.aws_region = aws_region
-        self.failed_response_config = failed_response or {}
 
         try:
             self.kms_client = boto3.client('kms', region_name=aws_region)
@@ -357,7 +347,7 @@ class AWSKMSAuth(AuthenticationProvider):
         for encrypted_token in encrypted_tokens:
             try:
                 decrypted = self._decrypt_token(encrypted_token)
-                self.expected_values.add(decrypted)
+                self.expected_values.add(str(decrypted))
             except Exception as e:
                 raise AuthenticationError(f"Failed to decrypt token: {str(e)}")
 
@@ -383,18 +373,7 @@ class AWSKMSAuth(AuthenticationProvider):
 
     def validate(self, token: str) -> bool:
         """Validate token against decrypted KMS tokens."""
-        return token in self.expected_values
-
-    def get_failed_response(self) -> Tuple[int, Any]:
-        """Get failed authentication response."""
-        status_code = self.failed_response_config.get("status", DEFAULT_STATUS_CODE)
-
-        # Return configured response body, or default message
-        if self.failed_response_config:
-            # Return the full response object including status in body
-            return (status_code, self.failed_response_config)
-        else:
-            return (status_code, {"error": "Authentication failed"})
+        return self._validate_against_set(token, self.expected_values)
 
     def _decrypt_token(self, encrypted_token: str) -> str:
         """Decrypt a single token using AWS KMS."""
@@ -435,11 +414,12 @@ class GCPSecretsAuth(AuthenticationProvider):
         except ImportError:
             raise AuthenticationError("google-cloud-secret-manager package is required for GCP Secrets authentication")
 
+        super().__init__(failed_response)
+
         self.project_id = project_id
         self.secret_name = secret_name
         self.version = version
         self.cache_ttl = cache_ttl
-        self.failed_response_config = failed_response or {}
 
         try:
             self.client = secretmanager.SecretManagerServiceClient()
@@ -460,21 +440,10 @@ class GCPSecretsAuth(AuthenticationProvider):
         """Validate token against GCP Secret Manager."""
         try:
             valid_tokens = self._get_cached_tokens()
-            return token in valid_tokens
+            return self._validate_against_set(token, valid_tokens)
         except Exception:
             # If we can't fetch secrets, deny access
             return False
-
-    def get_failed_response(self) -> Tuple[int, Any]:
-        """Get failed authentication response."""
-        status_code = self.failed_response_config.get("status", DEFAULT_STATUS_CODE)
-
-        # Return configured response body, or default message
-        if self.failed_response_config:
-            # Return the full response object including status in body
-            return (status_code, self.failed_response_config)
-        else:
-            return (status_code, {"error": "Authentication failed"})
 
     def _get_cached_tokens(self) -> set:
         """Get authentication tokens from cache or refresh from GCP."""
@@ -497,16 +466,16 @@ class GCPSecretsAuth(AuthenticationProvider):
                 # Try JSON format first
                 parsed_data = json.loads(secret_data)
                 if isinstance(parsed_data, list):
-                    self._cached_values = set(parsed_data)
+                    self._cached_values = {str(v) for v in parsed_data}
                 elif isinstance(parsed_data, str):
-                    self._cached_values = {parsed_data}
+                    self._cached_values = {str(parsed_data)}
                 elif isinstance(parsed_data, dict):
-                    self._cached_values = set(parsed_data.values())
+                    self._cached_values = {str(v) for v in parsed_data.values()}
                 else:
                     raise AuthenticationError(f"Invalid secret format: {type(parsed_data)}")
             except json.JSONDecodeError:
                 # Treat as plain text
-                self._cached_values = {secret_data.strip()}
+                self._cached_values = {str(secret_data.strip())}
 
             self._cache_time = current_time
             return self._cached_values
@@ -650,7 +619,7 @@ def validate_authentication(cookies: Dict[str, str], auth_config: Dict[str, Any]
             status_code, response_body = provider.get_failed_response()
             return (False, status_code, response_body)
 
-        print(f"✅ DEBUG AUTH: Found auth token: '{auth_token[:10]}...' (truncated)")
+        print(f"✅ DEBUG AUTH: Found auth token: '{auth_token[:10]}...' (truncated)", auth_token)
 
         # Create authentication provider and validate
         provider = create_authentication_provider(auth_config)
