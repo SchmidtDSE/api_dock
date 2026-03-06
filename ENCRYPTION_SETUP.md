@@ -292,7 +292,7 @@ authentication:
   key: "X-API-Key"
   aws_secret_name: "my-app/api-tokens"
   aws_region: "us-west-2"  # Optional, defaults to us-west-2
-  refresh_interval: 300    # Cache TTL in seconds
+  refresh_interval: 30    # Cache TTL in seconds
   failed_response:
     status: 403
     error: "Invalid API key"
@@ -302,13 +302,88 @@ authentication:
 1. **Create secret in AWS Secrets Manager:**
    ```bash
    # Single token
-   aws secretsmanager create-secret --name "my-app/api-tokens" --secret-string "your-secret-token"
+   aws secretsmanager create-secret --region us-west-2 --name "my-app/api-tokens" --secret-string "your-secret-token"
 
    # Multiple tokens (JSON list)
-   aws secretsmanager create-secret --name "my-app/api-tokens" --secret-string '["token1", "token2", "token3"]'
+   aws secretsmanager create-secret --region us-west-2 --name "my-app/api-tokens" --secret-string '["token1", "token2", "token3"]'
+
+   # Or use a different region if specified in your config
+   aws secretsmanager create-secret --region us-east-1 --name "my-app/api-tokens" --secret-string "your-secret-token"
    ```
 
 2. **Required IAM permissions:**
+
+   **⚠️ Note for AWS SSO Users:** If you're using AWS SSO with an admin role (like `UCB-FederatedAdmins`), you likely already have the necessary permissions and can **skip this entire step**. Test by trying to access your secret first:
+   ```bash
+   aws secretsmanager get-secret-value --region us-west-2 --secret-id "your-secret-name"
+   ```
+
+   **Add through AWS Console:**
+   Go to [IAM Policies](https://console.aws.amazon.com/iam/home#/policies) → Create Policy → JSON tab → paste the policy below (replace the ARN with your secret's ARN)
+
+   **Or add using AWS CLI:**
+
+   **Step 1: Create the policy (do this once):**
+   ```bash
+   # Create the policy (replace the ARN with your secret's ARN)
+   aws iam create-policy --policy-name "ApiDockSecretsAccess" --policy-document '{
+     "Version": "2012-10-17",
+     "Statement": [
+       {
+         "Effect": "Allow",
+         "Action": ["secretsmanager:GetSecretValue"],
+         "Resource": "arn:aws:secretsmanager:us-west-2:123456789012:secret:my-app/api-tokens-*"
+       }
+     ]
+   }'
+   ```
+
+   **Step 2: Attach to user/role (choose one option):**
+
+   **For IAM Users:**
+   ```bash
+   # Find your username first
+   aws iam get-user --query 'User.UserName' --output text
+
+   # Attach to your user (replace USER_NAME and ACCOUNT_ID)
+   aws iam attach-user-policy --user-name USER_NAME --policy-arn "arn:aws:iam::ACCOUNT_ID:policy/ApiDockSecretsAccess"
+   ```
+
+   **For AWS SSO (Federated) Users:**
+   ```bash
+   # Check your current identity (you'll see a federated role ARN)
+   aws sts get-caller-identity
+   ```
+
+   **⚠️ Important:** AWS SSO roles are protected and cannot be modified directly. You'll get an "UnmodifiableEntity" error if you try to attach policies to them.
+
+   **Solutions for SSO users:**
+   1. **Check existing permissions:** Your SSO role likely already has the necessary permissions
+   2. **Use AWS Console:** Go to [IAM Policies](https://console.aws.amazon.com/iam/home#/policies) (much easier)
+   3. **Contact your AWS admin:** Ask them to add the permissions through AWS SSO permission sets
+   4. **Create a custom IAM user:** For dedicated API Dock access (see "Different IAM User" section below)
+
+   **For Attaching to a Different IAM User:**
+   ```bash
+   # List existing IAM users to find the target user
+   aws iam list-users --query 'Users[*].UserName' --output table
+
+   # Attach to any IAM user (replace TARGET_USER_NAME and ACCOUNT_ID)
+   aws iam attach-user-policy --user-name TARGET_USER_NAME --policy-arn "arn:aws:iam::ACCOUNT_ID:policy/ApiDockSecretsAccess"
+   ```
+
+   **For Attaching to an IAM Role:**
+   ```bash
+   # List existing roles to find the target role
+   aws iam list-roles --query 'Roles[*].RoleName' --output table
+
+   # Attach to any IAM role (replace TARGET_ROLE_NAME and ACCOUNT_ID)
+   aws iam attach-role-policy --role-name TARGET_ROLE_NAME --policy-arn "arn:aws:iam::ACCOUNT_ID:policy/ApiDockSecretsAccess"
+   ```
+
+   **Note:** If `aws iam get-user` returns "Must specify userName when calling with non-User credentials", you're using AWS SSO/federated credentials and should use the role-based approach. SSO users often already have the necessary permissions through their federated role.
+
+   **Policy JSON:**
    ```json
    {
      "Version": "2012-10-17",
@@ -318,11 +393,13 @@ authentication:
          "Action": [
            "secretsmanager:GetSecretValue"
          ],
-         "Resource": "arn:aws:secretsmanager:us-east-1:123456789012:secret:my-app/api-tokens-*"
+         "Resource": "arn:aws:secretsmanager:us-west-2:123456789012:secret:my-app/api-tokens-*"
        }
      ]
    }
    ```
+
+   **Note:** Replace `us-west-2`, `123456789012`, and `my-app/api-tokens` with your actual region, AWS account ID, and secret name.
 
 #### 4b. AWS KMS (`aws_key_id`)
 Authentication tokens encrypted with AWS KMS:
@@ -336,7 +413,7 @@ authentication:
     - "AQICAHh7...kms_encrypted_token_1..."
     - "AQICAHh7...kms_encrypted_token_2..."
     - "AQICAHh7...kms_encrypted_token_3..."
-  aws_region: "us-east-1"  # Optional, defaults to us-east-1
+  aws_region: "us-west-2"  # Optional, defaults to us-west-2
   failed_response:
     status: 403
     error: "Invalid API key"
@@ -348,7 +425,7 @@ authentication:
   key: "X-API-Key"
   aws_key_id: "arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789012"
   aws_tokens_file: "/path/to/kms_encrypted_tokens.txt"
-  aws_region: "us-east-1"  # Optional, defaults to us-east-1
+  aws_region: "us-west-2"  # Optional, defaults to us-west-2
   failed_response:
     status: 403
     error: "Invalid API key"
