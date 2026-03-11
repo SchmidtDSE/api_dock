@@ -40,17 +40,15 @@ class AuthenticationProvider(ABC):
         """
         self.failed_response_config = failed_response or {}
 
-    @abstractmethod
-    def validate(self, token: str) -> bool:
-        """Validate an authentication token.
 
-        Args:
-            token: The authentication token to validate.
+    def validate(self, token: str) -> bool:
+        """Validate token against list of values.
 
         Returns:
-            True if token is valid, False otherwise.
+            bool
         """
-        pass
+        return self._validate_against_set(token, self.expected_values)
+
 
     def get_failed_response(self) -> Tuple[int, Any]:
         """Get the response to return when authentication fails.
@@ -110,13 +108,9 @@ class FixedValueAuth(AuthenticationProvider):
         super().__init__(failed_response)
 
         try:
-            self.expected_value = str(decrypt_value_if_needed(value, encrypted, encryption_config))
+            self.expected_values = [decrypt_value_if_needed(value, encrypted, encryption_config)]
         except EncryptionError as e:
             raise AuthenticationError(f"Failed to decrypt authentication value: {str(e)}")
-
-    def validate(self, token: str) -> bool:
-        """Validate token against fixed value."""
-        return str(token) == self.expected_value
 
 
 class ListValueAuth(AuthenticationProvider):
@@ -140,7 +134,7 @@ class ListValueAuth(AuthenticationProvider):
         for value_item in values:
             try:
                 # Handle both string and dict formats
-                if isinstance(value_item, str):
+                if isinstance(value_item, (str, int, float)):
                     # Simple string - use global encrypted setting
                     decrypted = decrypt_value_if_needed(value_item, encrypted, encryption_config)
                     self.expected_values.add(str(decrypted))
@@ -154,10 +148,6 @@ class ListValueAuth(AuthenticationProvider):
                     raise AuthenticationError(f"Invalid value format: {type(value_item)}")
             except EncryptionError as e:
                 raise AuthenticationError(f"Failed to decrypt authentication value: {str(e)}")
-
-    def validate(self, token: str) -> bool:
-        """Validate token against list of values."""
-        return self._validate_against_set(token, self.expected_values)
 
 
 class FileAuth(AuthenticationProvider):
@@ -194,10 +184,6 @@ class FileAuth(AuthenticationProvider):
             raise AuthenticationError(f"Authentication file not found: {filepath}")
         except IOError as e:
             raise AuthenticationError(f"Failed to read authentication file '{filepath}': {str(e)}")
-
-    def validate(self, token: str) -> bool:
-        """Validate token against values from file."""
-        return self._validate_against_set(token, self.expected_values)
 
 
 class AWSSecretsAuth(AuthenticationProvider):
@@ -238,15 +224,8 @@ class AWSSecretsAuth(AuthenticationProvider):
         # Cache for secret values
         self._cached_values = set()
         self._cache_time = 0
+        self.expected_values = self._get_cached_tokens()
 
-    def validate(self, token: str) -> bool:
-        """Validate token against AWS Secrets Manager."""
-        try:
-            valid_tokens = self._get_cached_tokens()
-            return self._validate_against_set(token, valid_tokens)
-        except Exception as e:
-            # If we can't fetch secrets, deny access
-            return False
 
     def _get_cached_tokens(self) -> set:
         """Get authentication tokens from cache or refresh from AWS."""
@@ -371,9 +350,6 @@ class AWSKMSAuth(AuthenticationProvider):
         except IOError as e:
             raise AuthenticationError(f"Failed to read AWS KMS tokens file '{filepath}': {str(e)}")
 
-    def validate(self, token: str) -> bool:
-        """Validate token against decrypted KMS tokens."""
-        return self._validate_against_set(token, self.expected_values)
 
     def _decrypt_token(self, encrypted_token: str) -> str:
         """Decrypt a single token using AWS KMS."""
@@ -435,15 +411,8 @@ class GCPSecretsAuth(AuthenticationProvider):
         # Cache for secret values
         self._cached_values = set()
         self._cache_time = 0
+        self.expected_values = self._get_cached_tokens()
 
-    def validate(self, token: str) -> bool:
-        """Validate token against GCP Secret Manager."""
-        try:
-            valid_tokens = self._get_cached_tokens()
-            return self._validate_against_set(token, valid_tokens)
-        except Exception:
-            # If we can't fetch secrets, deny access
-            return False
 
     def _get_cached_tokens(self) -> set:
         """Get authentication tokens from cache or refresh from GCP."""
