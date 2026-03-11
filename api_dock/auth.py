@@ -42,12 +42,17 @@ class AuthenticationProvider(ABC):
 
 
     def validate(self, token: str) -> bool:
-        """Validate token against list of values.
+        """Validate token against a set of valid tokens with string normalization.
+
+        Args:
+            token: Token to validate.
+            valid_tokens: Set of valid tokens.
 
         Returns:
-            bool
+            True if token is valid, False otherwise.
         """
-        return self._validate_against_set(token, self.expected_values)
+        normalized_tokens = self._normalize_token_set(self.expected_values)
+        return str(token) in normalized_tokens
 
 
     def get_failed_response(self) -> Tuple[int, Any]:
@@ -75,19 +80,6 @@ class AuthenticationProvider(ABC):
             Set of string tokens.
         """
         return {str(v) for v in values}
-
-    def _validate_against_set(self, token: str, valid_tokens: set) -> bool:
-        """Validate token against a set of valid tokens with string normalization.
-
-        Args:
-            token: Token to validate.
-            valid_tokens: Set of valid tokens.
-
-        Returns:
-            True if token is valid, False otherwise.
-        """
-        normalized_tokens = self._normalize_token_set(valid_tokens)
-        return str(token) in normalized_tokens
 
 
 class FixedValueAuth(AuthenticationProvider):
