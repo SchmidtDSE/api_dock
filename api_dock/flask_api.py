@@ -97,13 +97,6 @@ def _add_remote_routes(app: Flask, route_mapper: RouteMapper) -> None:
         # Extract cookies from request
         cookies = dict(request.cookies) if request.cookies else {}
 
-        # DEBUG: Print Flask cookie extraction
-        if cookies:
-            print(f"🍪 DEBUG FLASK: Extracted cookies from request: {list(cookies.keys())}")
-            print(f"🔑 DEBUG FLASK: Cookie values: {cookies}")
-        else:
-            print(f"🍪 DEBUG FLASK: No cookies found in request")
-
         # Check if remote_name is a database first
         if remote_name in route_mapper.database_names:
             # Handle as database route (using async with asyncio.run)
@@ -157,13 +150,6 @@ def _add_remote_routes(app: Flask, route_mapper: RouteMapper) -> None:
         """
         # Extract cookies from request
         cookies = dict(request.cookies) if request.cookies else {}
-
-        # DEBUG: Print Flask cookie extraction
-        if cookies:
-            print(f"🍪 DEBUG FLASK: Extracted cookies from request: {list(cookies.keys())}")
-            print(f"🔑 DEBUG FLASK: Cookie values: {cookies}")
-        else:
-            print(f"🍪 DEBUG FLASK: No cookies found in request")
 
         # Check if remote_name is a database first
         if remote_name in route_mapper.database_names:

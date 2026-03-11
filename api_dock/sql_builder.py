@@ -69,15 +69,9 @@ def build_sql_query(
     all_params = {**path_params, **query_params}
     all_params = _apply_default_values(route_config, all_params)
 
-    # DEBUG: Print cookie debug info for SQL building
-    print(f"🍪 DEBUG SQL: Received cookies: {list(cookies.keys())}")
-    print(f"🔑 DEBUG SQL: Cookie values: {cookies}")
-
     # Add cookies with "cookies." prefix for substitution
     cookies_params = {f"cookies.{key}": value for key, value in cookies.items()}
     all_params.update(cookies_params)
-
-    print(f"🔄 DEBUG SQL: Cookie parameters created: {list(cookies_params.keys())}")
 
     # Build WHERE clause fragments from query parameters
     where_fragments = build_where_clause_from_params(route_config, query_params, path_params)
@@ -178,15 +172,9 @@ def process_query_parameters(
     # Combine path and query parameters for variable substitution
     all_params = {**path_params, **query_params}
 
-    # DEBUG: Print cookie debug info for query parameter processing
-    print(f"🍪 DEBUG QUERY PARAMS: Received cookies: {list(cookies.keys())}")
-    print(f"🔑 DEBUG QUERY PARAMS: Cookie values: {cookies}")
-
     # Add cookies with "cookies." prefix for substitution
     cookies_params = {f"cookies.{key}": value for key, value in cookies.items()}
     all_params.update(cookies_params)
-
-    print(f"🔄 DEBUG QUERY PARAMS: Cookie parameters created: {list(cookies_params.keys())}")
 
     # Process each parameter configuration
     for param_item in query_param_configs:

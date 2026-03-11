@@ -256,13 +256,6 @@ def get_cookies_config(config: Dict[str, Any]) -> List[str]:
 
     # Ensure all cookie names are strings
     cookie_list = [str(cookie) for cookie in cookies if cookie]
-
-    # DEBUG: Print expected cookies
-    if cookie_list:
-        print(f"🎯 DEBUG CONFIG: Expected cookies from config: {cookie_list}")
-    else:
-        print(f"🎯 DEBUG CONFIG: No cookies configured")
-
     return cookie_list
 
 
@@ -286,16 +279,13 @@ def filter_cookies_by_config(cookies: Dict[str, str], config: Dict[str, Any]) ->
     if isinstance(cookies_setting, bool):
         if cookies_setting:
             # cookies: true - pass all cookies
-            print(f"🍪 DEBUG FILTER: Allowing all cookies (cookies: true)")
             return cookies
         else:
             # cookies: false - pass no cookies except authentication key
             if auth_key and auth_key in cookies:
                 auth_only = {auth_key: cookies[auth_key]}
-                print(f"🍪 DEBUG FILTER: Blocking all cookies except auth key '{auth_key}' (cookies: false)")
                 return auth_only
             else:
-                print(f"🍪 DEBUG FILTER: Blocking all cookies (cookies: false)")
                 return {}
 
     # Handle list of cookie names (existing behavior)
@@ -305,30 +295,24 @@ def filter_cookies_by_config(cookies: Dict[str, str], config: Dict[str, Any]) ->
             # Empty list means no cookies allowed except authentication key
             if auth_key and auth_key in cookies:
                 auth_only = {auth_key: cookies[auth_key]}
-                print(f"🍪 DEBUG FILTER: No cookies allowed except auth key '{auth_key}' (empty list)")
                 return auth_only
             else:
-                print(f"🍪 DEBUG FILTER: No cookies allowed (empty list)")
                 return {}
 
         # Always include authentication key in allowed cookies
         if auth_key and auth_key not in allowed_cookies:
             allowed_cookies = allowed_cookies + [auth_key]
-            print(f"🍪 DEBUG FILTER: Added auth key '{auth_key}' to allowed cookies")
 
         # Filter cookies to only include allowed ones
         filtered = {k: v for k, v in cookies.items() if k in allowed_cookies}
-        print(f"🍪 DEBUG FILTER: Filtered cookies from {list(cookies.keys())} to {list(filtered.keys())}")
         return filtered
 
     # Default: no cookie configuration means only authentication key passed
     else:
         if auth_key and auth_key in cookies:
             auth_only = {auth_key: cookies[auth_key]}
-            print(f"🍪 DEBUG FILTER: No cookie configuration, only passing auth key '{auth_key}'")
             return auth_only
         else:
-            print(f"🍪 DEBUG FILTER: No cookie configuration, blocking all cookies")
             return {}
 
 
@@ -343,11 +327,9 @@ def get_authentication_config(config: Dict[str, Any]) -> Optional[Dict[str, Any]
     """
     auth_config = config.get("authentication")
     if not auth_config:
-        print(f"🎯 DEBUG CONFIG: No authentication configured")
         return None
 
     if not isinstance(auth_config, dict):
-        print(f"🎯 DEBUG CONFIG: Invalid authentication config format")
         return None
 
     # Apply default encryption setting if not specified
@@ -355,11 +337,8 @@ def get_authentication_config(config: Dict[str, Any]) -> Optional[Dict[str, Any]
     if "encrypted" not in auth_config:
         auth_config["encrypted"] = DEFAULT_AUTH_SETTINGS["encrypted"]
 
-    # DEBUG: Print authentication config info
     auth_key = auth_config.get("key", "UNKNOWN")
     auth_method = auth_config.get("method", "UNKNOWN")
-    print(f"🎯 DEBUG CONFIG: Authentication configured - key: '{auth_key}', method: '{auth_method}'")
-
     return auth_config
 
 
