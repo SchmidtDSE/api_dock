@@ -338,9 +338,8 @@ class RouteMapper:
                 is_valid, status_code, response_body = validate_authentication(filtered_cookies, auth_config)
                 if not is_valid:
                     return (False, response_body, status_code, None)
-                else:
             except Exception as e:
-                return (False, None, 500, f"Authentication error: {str(e)}")
+                return (False, None, 500, f"Authentication error")
 
         # Handle empty path - return list of available routes
         if not actual_path or actual_path == "":
@@ -375,14 +374,14 @@ class RouteMapper:
             if should_return_early:
                 return (True, response_data, status_code, error_message)
         except Exception as e:
-            return (False, None, 500, f"Query parameter processing error: {str(e)}")
+            return (False, None, 500, f"Query parameter processing error")
 
         # Build SQL query with new fragment-based approach
         try:
             from api_dock.sql_builder import build_sql_query
             sql_query = build_sql_query(route_config, database_config, path_params, query_params, filtered_cookies)
         except ValueError as e:
-            return (False, None, 500, f"SQL query error: {str(e)}")
+            return (False, None, 500, f"SQL query error")
 
         # Execute SQL query using DuckDB
         try:
@@ -427,7 +426,7 @@ class RouteMapper:
             return (True, response_data, 200, None)
 
         except Exception as e:
-            return (False, None, 500, f"Database query error: {str(e)}")
+            return (False, None, 500, f"Database query error")
 
 
     def is_remote_name(self, name: str) -> bool:
