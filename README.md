@@ -1,6 +1,6 @@
 # API Dock
 
-API Dock (API(s) + (data)Base(s)/base-(for)-API(s)) a flexible API gateway that allows you to proxy requests to multiple remote APIs and Databases through a single endpoint. The proxy can easily be launched as a FastAPI or Flask app, or integrated into any existing python based API.
+API Dock is a flexible API gateway that allows you to proxy requests to multiple remote APIs and Databases through a single endpoint. Using API doc's CLI, the proxy can easily be launched as a FastAPI or Flask app, or integrated into any existing python based API.
 
 ## Table of Contents
 
@@ -20,19 +20,15 @@ API Dock (API(s) + (data)Base(s)/base-(for)-API(s)) a flexible API gateway that 
   - [Basic Integration](#basic-integration)
   - [Framework Examples](#framework-examples)
   - [Database Integration](#database-integration)
+- [Advanced Configuration Examples](#advanced-configuration-examples)
+  - [Route Restrictions](#route-restrictions)
+  - [Custom Route Mapping](#custom-route-mapping)
+  - [Query Parameter Filtering](#query-parameter-filtering)
+  - [Sorting and Pagination](#sorting-and-pagination)
+  - [Authentication Setup](#authentication-setup)
+  - [Cookie Access](#cookie-access)
 - [Requirements](#requirements)
 - [License](#license)
-
-## Features
-
-- **Multi-API Proxying**: Route requests to different remote APIs based on configuration
-- **SQL Database Support**: Query Parquet files and databases using DuckDB via REST endpoints
-- **Cloud Storage Support**: Native support for S3, GCS, HTTPS, and local file paths
-- **YAML Configuration**: Simple, human-readable configuration files
-- **Access Control**: Define allowed/restricted routes per remote API
-- **Version Support**: Handle API versioning in URL paths
-- **URL Query Parameters**: Declarative query parameter support for database routes with filtering, sorting, pagination, conditional logic, and direct responses
-- **Flexibility**: Quickly launch FastAPI or Flask apps, or easily integrate into any existing framework
 
 ## Install
 
@@ -50,7 +46,9 @@ pip install api_dock
 
 ## Quick Example
 
-Suppose we have these 3 config files (and similar ones for service2 and service3)
+Configuration consists of a global config (`api_dock_config/config.yaml`), as well as a config file for each remote-api or database you'd like to proxy. 
+
+Here is a simple example of a configuration serving a single remote-api and database:
 
 ```yaml 
 # api_dock_config/config.yaml
@@ -61,81 +59,51 @@ authors: ["Your Name"]
 # Remote APIs to proxy
 remotes:
   - "service1"
-  - "service2"
-  - "service3"
 
 # SQL databases to query
 databases:
   - "db_example"
 ```
 
-```yaml 
-# api_dock_config/remotes/service1.yaml
+```yaml
+# api_dock_config/remotes/service1/0.5.0.yaml
 name: service1
-description: Example showing all routing features
-url: http://api.example.com
-
-# Unified routes (mix of strings and dicts)
-routes:
-  # routes with identical signatures
-  - health                                  # GET  http://api.example.com/health
-  - route: users                            # GET  http://api.example.com/users (using explicit method)
-    method: get
-  - users/{{user_id}}                       # GET  http://api.example.com/users/{{user_id}}
-  - route: users/{{user_id}}/posts          # POST http://api.example.com/users/{{user_id}}/posts
-    method: post
-  # route with a different signature
-  - route: users/{{user_id}}/permissions    # GET  http://api.example.com/user-permissions/{{user_id}}
-    remote_route: user-permissions/{{user_id}}
-    method: get
+description: "Service1 [Version 0.5.0]"
+url: https://existing_api_url.com
 ```
 
-```yaml 
-# api_dock_config/databases/db_example.yaml
+```yaml
+# api_dock_config/databases/db_example/0.1.0.yaml
 name: db_example
-description: Example database with Parquet files
+description: "Example DB Version 0.1"
 authors:
-  - API Team
+  - "API Team"
 
-# Table definitions - supports multiple storage backends
 tables:
-  users: s3://your-bucket/users.parquet                       # S3
-  permissions: gs://your-bucket/permissions.parquet           # Google Cloud Storage
-  posts: https://storage.googleapis.com/bucket/posts.parquet  # HTTPS
-  local_data: tables/local_data.parquet                       # Local filesystem
+  users:
+    uri: s3://path/to/users-database/folder/**/*.parquet
+    region: us-west-2
 
-# Named queries (optional)
-queries:
-  get_permissions: >
-    SELECT [[users]].*, [[permissions]].permission_name
-    FROM [[users]]
-    JOIN [[permissions]] ON [[users]].ID = [[permissions]].ID
-    WHERE [[users]].user_id = {{user_id}}
-
-# REST route definitions
 routes:
-  - route: users
+  - route: /users
     sql: SELECT [[users]].* FROM [[users]]
 
-  - route: users/{{user_id}}
+  - route: /users/{{user_id}}
     sql: SELECT [[users]].* FROM [[users]] WHERE [[users]].user_id = {{user_id}}
-
-  - route: users/{{user_id}}/permissions
-    sql: "[[get_permissions]]"
 ```
 
-Then just run `pixi run api-dock start` to launch a new api with following endpoints:
+This will create an "api-dock" with the following endpoints
 
-- list remote api names and databases: `/`
-- list of available db_example queries: `/db_example/users`
-  - query example_db for users: `/db_example/users`
-  - query example_db for user: `/db_example/users/{{user_id}}`
-  - query example_db for user-permissions: `/db_example/users/{{user_id}}/permissions`
-- list service1 endpoints: `/service1` 
-  - proxy for http://api.example.com/health: `/service1/health`
-  - proxy for http://api.example.com/user-permissions/{{user_id}}: `/service1/users/{{user_id}}/permissions`
-- list service2|3 endpoints: `/service2|3` 
-  - ...
+```
+- `/service1/0.5.0/*`: maps directly onto `https://existing_api_url.com/*`
+- `/db_example/0.1.0/users`: queries all users in the "users-database"
+- `/db_example/0.1.0/users/{user_id}`: queries all users in the "users-database" with `user.user_id = user_id`
+```
+
+The filename is used for versioning: And endpoint with "latest", is also generated which will numerically order versions by name, so that 
+`/service1/0.5.0` uses the config in `/service1/0.5.0.yaml` and `/service1/latest` will give the most recent version in the `/service1` folder.
+
+These basic configurations can be expanded to include a number of use cases: [restricting routes/methods](#route-restrictions), [custom mapping of remote-api routes](#custom-route-mapping), [accepting query parameters to filter data](#query-parameter-filtering), [limiting and sorting results](#sorting-and-pagination), [authentication](#authentication-setup), and [accessing data stored in cookies](#cookie-access).
 
 ---
 
@@ -915,6 +883,156 @@ def database_proxy(database_name, path):
         return jsonify({"error": error}), status
 
     return jsonify(data), status
+```
+
+---
+
+# Advanced Configuration Examples
+
+This section provides examples for advanced API Dock features mentioned in the [Quick Example](#quick-example).
+
+## Route Restrictions
+
+Restrict access to specific routes using the `restricted` section:
+
+```yaml
+# api_dock_config/remotes/secure_api.yaml
+name: secure_api
+url: https://internal-api.company.com
+
+routes:
+  - health
+  - users/{{user_id}}
+  - admin/{{}}
+
+# Block access to admin routes
+restricted:
+  - admin/{{}}                       # Block all admin routes
+  - route: "users/{{user_id}}"       # Block DELETE on user routes
+    method: delete
+```
+
+## Custom Route Mapping
+
+Map local routes to different remote endpoints:
+
+```yaml
+# api_dock_config/remotes/legacy_api.yaml
+name: legacy_api
+url: https://old-system.company.com
+
+routes:
+  # Map modern endpoint to legacy path
+  - route: users/{{user_id}}/profile
+    remote_route: legacy/user-info/{{user_id}}
+    method: get
+
+  # Complex mapping with query parameters
+  - route: search/{{category}}/{{term}}
+    remote_route: api/v1/search?category={{category}}&query={{term}}
+    method: get
+```
+
+## Query Parameter Filtering
+
+Add dynamic filtering to database routes:
+
+```yaml
+# api_dock_config/databases/analytics.yaml
+name: analytics
+tables:
+  events: s3://analytics-bucket/events/**/*.parquet
+
+routes:
+  - route: events
+    sql: SELECT * FROM [[events]]
+    query_params:
+      - date_from:
+          sql: event_date >= '{{date_from}}'
+      - event_type:
+          sql: type = '{{event_type}}'
+      - user_id:
+          sql: user_id = {{user_id}}
+          required: true
+```
+
+## Sorting and Pagination
+
+Add sorting and pagination to database queries:
+
+```yaml
+# api_dock_config/databases/user_data.yaml
+name: user_data
+tables:
+  users: s3://data-bucket/users.parquet
+
+routes:
+  - route: users
+    sql: SELECT * FROM [[users]]
+    query_params:
+      - sort:
+          sql_append: ORDER BY {{sort}} {{sort_direction}}
+          default: created_date
+      - sort_direction:
+          default: DESC
+      - limit:
+          sql_append: LIMIT {{limit}}
+          default: 50
+      - offset:
+          sql_append: OFFSET {{offset}}
+```
+
+## Authentication Setup
+
+Protect database routes with token-based authentication:
+
+```yaml
+# api_dock_config/databases/secure_data.yaml
+name: secure_data
+
+# Authentication configuration
+authentication:
+  key: "api_token"
+  values: ["secret123", "admin456", "readonly789"]
+  encrypted: false
+  failed_response:
+    status: 403
+    message: "Valid API token required"
+
+tables:
+  sensitive_data: s3://private-bucket/data.parquet
+
+routes:
+  - route: data
+    sql: SELECT * FROM [[sensitive_data]]
+```
+
+Note: there are several (safer) options for authentication. See [Authentication Configuration](#authentication-configuration) for more details.
+
+
+## Cookie Access
+
+Extract and use cookie values in database queries:
+
+```yaml
+# api_dock_config/databases/user_session.yaml
+name: user_session
+
+# Enable specific cookie extraction
+cookies: [user_id, session_token, preferences]
+
+tables:
+  user_activity: s3://analytics/activity.parquet
+
+routes:
+  - route: my-activity
+    sql: SELECT * FROM [[user_activity]] WHERE user_id = '{{cookies.user_id}}'
+
+  - route: user-settings
+    sql: |
+      SELECT * FROM [[user_activity]]
+      WHERE user_id = '{{cookies.user_id}}'
+      AND session_token = '{{cookies.session_token}}'
 ```
 
 ---
