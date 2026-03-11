@@ -104,13 +104,6 @@ def _add_remote_routes(app: FastAPI, route_mapper: RouteMapper) -> None:
         # Extract cookies from request
         cookies = dict(request.cookies) if request.cookies else {}
 
-        # DEBUG: Print FastAPI cookie extraction
-        if cookies:
-            print(f"🍪 DEBUG FASTAPI: Extracted cookies from request: {list(cookies.keys())}")
-            print(f"🔑 DEBUG FASTAPI: Cookie values: {cookies}")
-        else:
-            print(f"🍪 DEBUG FASTAPI: No cookies found in request")
-
         # Check if remote_name is a database first
         if remote_name in route_mapper.database_names:
             # Handle as database route
