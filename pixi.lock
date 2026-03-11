@@ -985,8 +985,8 @@ packages:
   requires_python: '>=3.9'
 - pypi: ./
   name: api-dock
-  version: 0.4.6
-  sha256: 2056654dd56a83eb7e198d675ec2492225ed22e30fd61962beecebffcbdd74f2
+  version: 0.4.7
+  sha256: 606154ec740ae6cebff5d0a57298f60f0eddc125a67c0adc7ac18ec04ccb5245
   requires_dist:
   - click
   - fastapi>=0.117.1,<0.118
