@@ -10,11 +10,12 @@ API Dock (API(s) + (data)Base(s)/base-(for)-API(s)) a flexible API gateway that 
 - [CLI](#cli)
   - [Commands](#commands)
   - [Examples](#examples)
-- [CONFIGURATION AND SYNTAX](#configuration-and-syntax)
+- [Configuration and Syntax](#configuration-and-syntax)
   - [Main Configuration](#main-configuration-api_dock_configconfigyaml)
   - [Remote Configurations](#remote-configurations)
   - [SQL Database Support](#sql-database-support)
   - [URL Query Parameters](#url-query-parameters)
+- [Cookies and Authentication](#cookies-and-authentication)
 - [Using RouteMapper in Your Own Projects](#using-routemapper-in-your-own-projects)
   - [Basic Integration](#basic-integration)
   - [Framework Examples](#framework-examples)
@@ -38,13 +39,13 @@ API Dock (API(s) + (data)Base(s)/base-(for)-API(s)) a flexible API gateway that 
 **FROM PYPI**
 
 ```bash
-pip install api_doc
+pip install api_dock
 ```
 
 **FROM CONDA**
 
 ```bash
- conda install -c conda-forge api_doc
+ conda install -c conda-forge api_dock
 ```
 
 ## Quick Example
@@ -144,10 +145,12 @@ Then just run `pixi run api-dock start` to launch a new api with following endpo
 
 API Dock provides a modern Click-based CLI:
 
-- **api-dock** (default): List all available configurations
-- **api-dock init [--force]**: Initialize `api_dock_config/` directory with default configs
-- **api-dock start [config_name]**: Start API Dock server with optional config name
-- **api-dock describe [config_name]**: Display formatted configuration with expanded SQL queries
+- **pixi run api-dock** (default): List all available configurations
+- **pixi run api-dock init [--force]**: Initialize `api_dock_config/` directory with default configs
+- **pixi run api-dock start [config_name]**: Start API Dock server with optional config name
+- **pixi run api-dock describe [config_name]**: Display formatted configuration with expanded SQL queries
+
+**Note**: All commands shown use `pixi run` for the pixi environment. If not using pixi, drop the `pixi run` prefix (e.g., `api-dock start` instead of `pixi run api-dock start`).
 
 
 ## Examples
@@ -657,6 +660,105 @@ Parameters are processed in this order (first match wins for early returns):
 5. `sql_append` parameters — append post-WHERE clauses (ORDER BY, LIMIT, etc.)
 6. Execute final SQL query
 
+# Cookies and Authentication
+
+API Dock supports cookie extraction and authentication for both remote APIs and database routes. Cookies can be passed through to remote APIs or used for authentication validation.
+
+## Cookie Configuration
+
+Configure cookies to extract from incoming requests and make them available as template variables:
+
+```yaml
+# Enable all cookies (default: false)
+cookies: true
+
+# Or specify specific cookies to extract
+cookies: [session_id, auth_token, user_preferences]
+
+# Disable all cookies (default behavior)
+cookies: false
+```
+
+When `cookies: true`, all cookies are accepted and available. When `cookies: false` (default), no cookies are processed except authentication cookies when authentication is configured. When providing a list, only specified cookies are extracted.
+
+Cookies can then be accessed in SQL queries using `{{cookies.cookie_name}}`:
+
+```yaml
+# Database route using cookies
+routes:
+  - route: user/profile
+    sql: SELECT * FROM [[users]] WHERE session_id = '{{cookies.session_id}}'
+```
+
+## Authentication Configuration
+
+Configure authentication to validate requests before processing. Multiple authentication methods are supported:
+
+### Fixed Value Authentication
+```yaml
+authentication:
+  key: "auth_token"
+  value: "secret123"
+  encrypted: false
+  failed_response:
+    status: 401
+    message: "Access denied"
+```
+
+### List of Valid Values
+```yaml
+authentication:
+  key: "auth_token"
+  values:
+    - "Z0FBQUFBQnBx...c9PQ=="
+    - "Z0FzxDeBFBnB...9OuT=="
+    - "Z54dUeiIFZnk...cXnn=="
+  encrypted: true
+```
+
+### File-Based Authentication
+```yaml
+authentication:
+  key: "auth_token"
+  filepath: "/path/to/tokens.txt"
+  encrypted: true
+```
+
+### AWS Secrets Manager
+```yaml
+authentication:
+  key: "auth_token"
+  aws_secret_name: "api-dock/tokens"
+  aws_region: "us-west-2"
+  encrypted: false
+```
+
+### AWS KMS Encryption
+```yaml
+authentication:
+  key: "auth_token"
+  aws_key_id: "arn:aws:kms:us-west-2:123456789:key/12345678-1234-1234-1234-123456789012"
+  aws_region: "us-west-2"
+  encrypted: true
+```
+
+### GCP Secret Manager
+```yaml
+authentication:
+  key: "auth_token"
+  gcp_secret_name: "api-dock-tokens"
+  gcp_project_id: "my-project"
+  encrypted: false
+```
+
+## Authentication Options
+
+- `encrypted: true/false` - Whether stored values are encrypted and need decryption
+
+Note: Authentication currently only supports token extraction from cookies, not Authorization headers.
+
+For detailed setup instructions and examples, see the complete authentication documentation.
+
 ---
 
 # Using RouteMapper in Your Own Projects
@@ -667,6 +769,7 @@ The core functionality is available as a standalone `RouteMapper` class that can
 
 ```python
 from api_dock.route_mapper import RouteMapper
+import asyncio
 
 # Initialize with optional config path
 route_mapper = RouteMapper(config_path="path/to/config.yaml")
