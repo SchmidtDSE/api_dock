@@ -565,39 +565,24 @@ def validate_authentication(cookies: Dict[str, str], auth_config: Dict[str, Any]
         auth_key = auth_config.get("key")
         if not auth_key:
             raise AuthenticationError("Authentication configuration missing 'key' field")
-
-        # DEBUG: Print authentication debug info
-        print(f"🔐 DEBUG AUTH: Expected auth key: '{auth_key}'")
-        print(f"🍪 DEBUG AUTH: Received cookies: {list(cookies.keys())}")
-        print(f"🔑 DEBUG AUTH: Cookie values: {cookies}")
-
         # Get the token from cookies
         auth_token = cookies.get(auth_key)
         if not auth_token:
-            print(f"❌ DEBUG AUTH: Auth token not found in cookies (looking for key: '{auth_key}')")
             # Token not provided - create provider to get proper error response
             provider = create_authentication_provider(auth_config)
             status_code, response_body = provider.get_failed_response()
             return (False, status_code, response_body)
 
-        print(f"✅ DEBUG AUTH: Found auth token: '{auth_token[:10]}...' (truncated)", auth_token)
-
         # Create authentication provider and validate
         provider = create_authentication_provider(auth_config)
         is_valid = provider.validate(auth_token)
-
-        print(f"🔍 DEBUG AUTH: Token validation result: {is_valid}")
 
         if is_valid:
             return (True, None, None)
         else:
             status_code, response_body = provider.get_failed_response()
-            print(f"💥 DEBUG AUTH: Failed response - status: {status_code}, body: {response_body}")
             return (False, status_code, response_body)
-
     except AuthenticationError:
-        # Re-raise authentication errors
         raise
     except Exception as e:
-        # Wrap other exceptions
         raise AuthenticationError(f"Authentication validation failed: {str(e)}")
