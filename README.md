@@ -100,8 +100,8 @@ This will create an "api-dock" with the following endpoints
 - `/db_example/0.1.0/users/{user_id}`: queries all users in the "users-database" with `user.user_id = user_id`
 ```
 
-The filename is used for versioning: And endpoint with "latest", is also generated which will numerically order versions by name, so that 
-`/service1/0.5.0` uses the config in `/service1/0.5.0.yaml` and `/service1/latest` will give the most recent version in the `/service1` folder.
+Note: the filename is being used for versioning. An endpoint with "latest" is also generated that will numerically order versions by name and serve the most recent version. For example,
+`/service1/0.5.0` uses the config in `/service1/0.5.0.yaml` and `/service1/latest` will use the most recent version in the `/service1` folder.
 
 These basic configurations can be expanded to include a number of use cases: [restricting routes/methods](#route-restrictions), [custom mapping of remote-api routes](#custom-route-mapping), [accepting query parameters to filter data](#query-parameter-filtering), [limiting and sorting results](#sorting-and-pagination), [authentication](#authentication-setup), and [accessing data stored in cookies](#cookie-access).
 
