@@ -1,20 +1,20 @@
 # API Dock
 
-API Dock is a flexible API gateway that allows you to proxy requests to multiple remote APIs and Databases through a single endpoint. Using API doc's CLI, the proxy can easily be launched as a FastAPI or Flask app, or integrated into any existing python based API.
+API Dock is a flexible API gateway that allows you to proxy requests to multiple remote APIs and Databases through a single endpoint. Using API Dock's CLI, the proxy can easily be launched as a FastAPI or Flask app, or integrated into any existing python based API.
 
 ## Table of Contents
 
-- [Features](#features)
 - [Install](#install)
-- [Quick Example](#quick-example)
-- [CLI](#cli)
-  - [Commands](#commands)
-  - [Examples](#examples)
-- [Configuration and Syntax](#configuration-and-syntax)
-  - [Main Configuration](#main-configuration-api_dock_configconfigyaml)
+- [File Structure](#file-structure)
+- [Simple Example](#simple-example)
+- [Configuration Syntax](#configuration-syntax)
+  - [Main Configuration](#main-configuration)
   - [Remote Configurations](#remote-configurations)
   - [SQL Database Support](#sql-database-support)
   - [URL Query Parameters](#url-query-parameters)
+- [CLI](#cli)
+  - [Commands](#commands)
+  - [Examples](#examples)
 - [Cookies and Authentication](#cookies-and-authentication)
 - [Using RouteMapper in Your Own Projects](#using-routemapper-in-your-own-projects)
   - [Basic Integration](#basic-integration)
@@ -111,7 +111,7 @@ authors:
 
 tables:
   users:
-    uri: s3://path/to/users-database/folder/**/*.parquet
+    uri: s3://path/to/users-database/partitioned-db_example/**/*.parquet
     region: us-west-2
 
 routes:
@@ -122,16 +122,18 @@ routes:
     sql: SELECT [[users]].* FROM [[users]] WHERE [[users]].user_id = {{user_id}}
 ```
 
-This will create an "api-dock" with the following endpoints
+Note: the use of wildcards `**/*` for the partioned parquet file. If there was no partitioning you would give the direct uri `s3://path/to/users-database/db_example.parquet`. 
+
+This will create an "api-dock" with the following endpoints. 
 
 ```
-- `/service1/0.5.0/*`: maps directly onto `https://remote.api.com/*`
-- `/db_example/0.1.0/users`: queries all users in the "users-database"
-- `/db_example/0.1.0/users/{user_id}`: queries all users in the "users-database" with `user.user_id = user_id`
+- `/service1/*`: maps directly onto `https://remote.api.com/*`
+- `/db_example/0.1/users`: queries all users in the "users-database"
+- `/db_example/0.1/users/{user_id}`: queries all users in the "users-database" with `user.user_id = user_id`
 ```
 
 Note: the filename is being used for versioning. An endpoint with "latest" is also generated that will numerically order versions by name and serve the most recent version. For example,
-`/service1/0.5.0` uses the config in `/service1/0.5.0.yaml` and `/service1/latest` will use the most recent version in the `/service1` folder.
+`/service1/0.1` uses the config in `/service1/0.1.yaml` and `/service1/latest` will use the most recent version in the `/service1` folder.
 
 These basic configurations can be expanded to include a number of use cases: [restricting routes/methods](#route-restrictions), [custom mapping of remote-api routes](#custom-route-mapping), [accepting query parameters to filter data](#query-parameter-filtering), [limiting and sorting results](#sorting-and-pagination), [authentication](#authentication-setup), and [accessing data stored in cookies](#cookie-access).
 
@@ -141,7 +143,7 @@ These basic configurations can be expanded to include a number of use cases: [re
 
 ## Main Configuration
 
-The main configuration file tells api-dock which remote-api and database configuration files to connect to.  Additionaly there are adds meta-data (returned by the base-api-route) and optional-settings:
+The main configuration file tells api-dock which remote-api and database configuration files to connect to.  Additionally there are adds meta-data (returned by the base-api-route) and optional-settings:
 
 ```yaml
 # api_dock_config/config.yaml
@@ -180,7 +182,7 @@ The optional `settings` section controls HTTP behavior:
 
 ## Remote Configurations
 
-Remote Configurations allow you to proxy existing apis.  In the simple example above 
+Remote Configurations allow you to proxy existing apis.  In the simple example above, 
 
 ```yaml
 # api_dock_config/remotes/service1.yaml
@@ -189,7 +191,7 @@ description: "API Service1"
 url: https://remote.api.com
 ```
 
-`name` defines the slug and `url` points to the exsiting api. So any route on `https://remote.api.com/*` may also be reached by at `service1/*`. However, the configuration file offers much more control over what endpoints may or may not be served through the api-proxy.  In particular, specific endpoints may be added or blocked, methods such as `DELETE` may be blocked, and routes with different signatures may be parsed. The structure is as follows:
+`name` defines the slug and `url` points to the existing api. So any route on `https://remote.api.com/*` may also be reached by at `service1/*`. However, the configuration file offers much more control over what endpoints may or may not be served through the api-proxy.  In particular, specific endpoints may be added or blocked, methods such as `DELETE` may be blocked, and routes with different signatures may be parsed. The structure is as follows:
 
 ```yaml 
 # api_dock_config/remotes/service1.yaml
@@ -337,7 +339,7 @@ queries:
 
 routes:
   - route: users/{{user_id}}/permissions
-    sql: "[[get_permissions]]"
+    sql: "[[get_user_permissions]]"
 ```
 
 
@@ -378,7 +380,7 @@ routes:
     sql: "[[get_permissions]]"
 ```
 
-**For more details**, see the [SQL Database Support Wiki](https://github.com/yourusername/api_dock/wiki/SQL-Database-Support).
+**For more details**, see the [SQL Database Support Wiki](https://github.com/SchmidtDSE/api_dock/wiki/SQL-Database-Support).
 
 ---
 
@@ -595,10 +597,13 @@ Parameters are processed in this order (first match wins for early returns):
 
 API Dock provides a modern Click-based CLI:
 
-- **pixi run api-dock** (default): List all available configurations
+- **pixi run api-dock** (default): List all available configurations and commands
 - **pixi run api-dock init [--force]**: Initialize `api_dock_config/` directory with default configs
 - **pixi run api-dock start [config_name]**: Start API Dock server with optional config name
 - **pixi run api-dock describe [config_name]**: Display formatted configuration with expanded SQL queries
+- **pixi run api-dock encrypt <plaintext>**: Encrypt values using local/AWS KMS encryption
+- **pixi run api-dock decrypt <ciphertext>**: Decrypt encrypted values (for testing/debugging)
+- **pixi run api-dock generate-key**: Generate new Fernet encryption key for local encryption
 
 **Note**: All commands shown use `pixi run` for the pixi environment. If not using pixi, drop the `pixi run` prefix (e.g., `api-dock start` instead of `pixi run api-dock start`).
 
@@ -620,13 +625,18 @@ pixi run api-dock start --backbone flask
 # - specify with host and/or port
 pixi run api-dock start --host 0.0.0.0 --port 9000
 
-
-# these commands also work for alternative configurations (example: api_dock_config/config_v2.yaml)
+# Alternative configurations (example: api_dock_config/config_v2.yaml)
 pixi run api-dock start config_v2
 pixi run api-dock describe config_v2
+
+# Encryption commands
+pixi run api-dock generate-key                                    # Generate new encryption key
+pixi run api-dock encrypt "my-secret-token"                      # Encrypt using local key
+pixi run api-dock encrypt --method aws_kms --key-id arn:aws:... "secret"  # Encrypt using AWS KMS
+pixi run api-dock decrypt "gAAAAABh..."                          # Decrypt encrypted value
 ```
 
-**For more details**, see the [Configuration Wiki](https://github.com/yourusername/api_dock/wiki/Configuration).
+**For more details**, see the [Configuration Wiki](https://github.com/SchmidtDSE/api_dock/wiki/Configuration).
 
 ---
 
@@ -731,7 +741,7 @@ authentication:
 
 - `encrypted: true/false` - Whether stored values are encrypted and need decryption
 
-Note: Authentication currently only supports token extraction from cookies, not Authorization headers.
+Note: Authentication extracts tokens from cookies and supports multiple backend sources including AWS Secrets Manager, AWS KMS encryption, GCP Secret Manager, and file-based authentication.
 
 For detailed setup instructions and examples, see the complete authentication documentation.
 
@@ -744,7 +754,7 @@ The core functionality is available as a standalone `RouteMapper` class that can
 ## Basic Integration
 
 ```python
-from api_dock.route_mapper import RouteMapper
+from api_dock import RouteMapper
 import asyncio
 
 # Initialize with optional config path
@@ -832,7 +842,9 @@ route_mapper = RouteMapper(config_path="path/to/config.yaml")
 async def query_database():
     success, data, status, error = await route_mapper.map_database_route(
         database_name="db_example",
-        path="users/123"
+        path="users/123",
+        query_params={},
+        cookies={}
     )
 
     if success:
@@ -897,7 +909,7 @@ def database_proxy(database_name, path):
 
 # Advanced Configuration Examples
 
-This section provides examples for advanced API Dock features mentioned in the [Quick Example](#quick-example).
+This section provides examples for advanced API Dock features mentioned in the [Simple Example](#simple-example).
 
 ## Route Restrictions
 
