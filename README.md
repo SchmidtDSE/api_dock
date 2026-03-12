@@ -44,7 +44,37 @@ pip install api_dock
  conda install -c conda-forge api_dock
 ```
 
-## Quick Example
+---
+
+## File Structure
+
+The main configuration files are stored in the top level of the CWD's `api_dock_config/` directory. Multiple configurations, with both versioned and unversioned remote-apis and databases are possible.
+
+Here is an example:
+
+```bash
+api_dock_config
+├── config.yaml               # The default main-config file
+├── databases
+│    ├── unversioned_db.yaml  # Database config without versioning
+│    └── versioned_db         # Folder containing database configs for different versions
+│        ├── 0.1.yaml
+│        ├── 0.5.yaml
+│        └── 1.1.yaml
+└── remotes
+    ├── service1.yaml         # Remote-Api config without versioning
+    ├── service2.yaml         # Remote-Api config without versioning
+    └── versioned_service     # Folder containing remote-api configs for different versions
+        ├── 0.1.yaml
+        ├── 0.2.yaml
+        └── 0.3.yaml
+```
+
+ By default api-dock expects there to be one called `config.yaml`, however configs with different names (such as `config_v2`) can be added and launched as shown in the CLI Examples section.
+
+---
+
+## Simple Example
 
 Configuration consists of a global config (`api_dock_config/config.yaml`), as well as a config file for each remote-api or database you'd like to proxy. 
 
@@ -66,14 +96,14 @@ databases:
 ```
 
 ```yaml
-# api_dock_config/remotes/service1/0.5.0.yaml
+# api_dock_config/remotes/service1.yaml
 name: service1
-description: "Service1 [Version 0.5.0]"
-url: https://existing_api_url.com
+description: "API Service1"
+url: https://remote.api.com
 ```
 
 ```yaml
-# api_dock_config/databases/db_example/0.1.0.yaml
+# api_dock_config/databases/db_example/0.1.yaml
 name: db_example
 description: "Example DB Version 0.1"
 authors:
@@ -95,7 +125,7 @@ routes:
 This will create an "api-dock" with the following endpoints
 
 ```
-- `/service1/0.5.0/*`: maps directly onto `https://existing_api_url.com/*`
+- `/service1/0.5.0/*`: maps directly onto `https://remote.api.com/*`
 - `/db_example/0.1.0/users`: queries all users in the "users-database"
 - `/db_example/0.1.0/users/{user_id}`: queries all users in the "users-database" with `user.user_id = user_id`
 ```
@@ -107,92 +137,30 @@ These basic configurations can be expanded to include a number of use cases: [re
 
 ---
 
-# CLI
+# Configuration Syntax
 
-## Commands
+## Main Configuration
 
-API Dock provides a modern Click-based CLI:
-
-- **pixi run api-dock** (default): List all available configurations
-- **pixi run api-dock init [--force]**: Initialize `api_dock_config/` directory with default configs
-- **pixi run api-dock start [config_name]**: Start API Dock server with optional config name
-- **pixi run api-dock describe [config_name]**: Display formatted configuration with expanded SQL queries
-
-**Note**: All commands shown use `pixi run` for the pixi environment. If not using pixi, drop the `pixi run` prefix (e.g., `api-dock start` instead of `pixi run api-dock start`).
-
-
-## Examples
-
-```bash
-# Initialize local configuration directory
-pixi run api-dock init
-
-# List available configurations, and available commands
-pixi run api-dock
-
-# Start API server
-# - default configuration (api_dock_config/config.yaml) with FastAPI
-pixi run api-dock start
-# - default configuration with Flask (backbone options: fastapi (default) or flask)
-pixi run api-dock start --backbone flask
-# - specify with host and/or port
-pixi run api-dock start --host 0.0.0.0 --port 9000
-
-
-# these commands also work for alternative configurations (example: api_dock_config/config_v2.yaml)
-pixi run api-dock start config_v2
-pixi run api-dock describe config_v2
-```
-
-**For more details**, see the [Configuration Wiki](https://github.com/yourusername/api_dock/wiki/Configuration).
-
----
-
-# CONFIGURATION AND SYNTAX
-
-Assume our file structure is:
-
-```bash
-api_dock_config
-├── config.yaml
-├── config_v2.yaml
-├── databases
-│    ├── analytics_db.yaml
-│    └── versioned_db
-│        ├── 0.1.yaml
-│        ├── 0.5.yaml
-│        └── 1.1.yaml
-└── remotes
-    ├── service1.yaml
-    ├── service2.yaml
-    └── versioned_service
-        ├── 0.1.yaml
-        ├── 0.2.yaml
-        └── 0.3.yaml
-```
-
----
-
-## Main Configuration (`api_dock_config/config.yaml`)
-
-The main configuration files are stored in the top level of the CWD's `api_dock_config/` directory. By default api-dock expects there to be one called `config.yaml`, however configs with different names (such as `config_v2`) can be added and launched as shown in the CLI Examples section.
+The main configuration file tells api-dock which remote-api and database configuration files to connect to.  Additionaly there are adds meta-data (returned by the base-api-route) and optional-settings:
 
 ```yaml
 # api_dock_config/config.yaml
-name: "My API Dock"
-description: "API proxy for multiple services"
-authors: ["Your Name"]
 
-# Remote APIs to proxy
+# meta-data: this is returned as the base api-route by default
+name: # API Name
+description: # Description of API
+authors: # list of Authors
+
+# sql-databases to query
+databases:
+  - "unversioned_db"     # adds database configuration in  "api_dock_config/databases/unversioned_db.yaml"
+  - "versioned_db"       # adds database configurations in  "api_dock_config/databases/versioned_db/"
+
+# remote APIs to proxy
 remotes:
   - "service1"           # add configuration in "api_dock_config/remotes/service1.yaml"
   - "service2"           # add configuration in "api_dock_config/remotes/service2.yaml"
   - "versioned_service"  # add configurations in versions in "api_dock_config/remotes/versioned_service/"
-
-# SQL databases to query
-databases:
-  - "analytics_db"       # adds database configuration in  "api_dock_config/databases/analytics_db.yaml"
-  - "versioned_db"       # adds database configurations in  "api_dock_config/databases/versioned_db/"
 
 # Optional HTTP behavior settings
 settings:
@@ -200,7 +168,7 @@ settings:
   follow_protocol_downgrades: false     # Allow HTTPS->HTTP redirects (default: false)
 ```
 
-### Settings
+### HTTP behavior Settings
 
 The optional `settings` section controls HTTP behavior:
 
@@ -208,38 +176,30 @@ The optional `settings` section controls HTTP behavior:
 
 - **`follow_protocol_downgrades`** (default: `false`): Control how HTTP redirects are handled. When `false` (recommended), HTTPS→HTTP redirects are blocked for security. When `true`, allows following redirects that downgrade from HTTPS to HTTP (not recommended for production).
 
-**Example:**
-```yaml
-settings:
-  add_trailing_slash: true              # Avoids redirects by adding trailing slash
-  follow_protocol_downgrades: false     # Blocks insecure HTTPS->HTTP redirects
-```
-
 ---
 
 ## Remote Configurations
 
-The example below is a remote configuration. 
+Remote Configurations allow you to proxy existing apis.  In the simple example above 
+
+```yaml
+# api_dock_config/remotes/service1.yaml
+name: service1
+description: "API Service1"
+url: https://remote.api.com
+```
+
+`name` defines the slug and `url` points to the exsiting api. So any route on `https://remote.api.com/*` may also be reached by at `service1/*`. However, the configuration file offers much more control over what endpoints may or may not be served through the api-proxy.  In particular, specific endpoints may be added or blocked, methods such as `DELETE` may be blocked, and routes with different signatures may be parsed. The structure is as follows:
 
 ```yaml 
 # api_dock_config/remotes/service1.yaml
-name: service1                 # this is the slug that goes in the url (ie: /service1/users)
-url: http://api.example.com    # the base-url of the api being proxied
-description: This is an api    # included in response for /service1 route
+name:        # <str> this is the slug that goes in the url
+url:         # <str> the base-url of the api being proxied
+description: # (optional) <str> included in response for /service1 base route
 
-# Here is where we define the routing
-routes:
-  # routes with identical signatures
-  - health                                  # GET  http://api.example.com/health
-  - route: users                            # GET  http://api.example.com/users (using explicit method)
-    method: get
-  - users/{{user_id}}                       # GET  http://api.example.com/users/{{user_id}}
-  - route: users/{{user_id}}/posts          # POST http://api.example.com/users/{{user_id}}/posts
-    method: post
-  # route with a different signature
-  - route: users/{{user_id}}/permissions    # GET  http://api.example.com/user-permissions/{{user_id}}
-    remote_route: user-permissions/{{user_id}}
-    method: get
+routes:      # (optional) <list[str, dict]> constrain available-routes or map between route-signatures
+
+restricted:  # (optional) <list[str, dict]> block specific endpoints or methods
 ```
 
 ### Variable Placeholders
@@ -251,7 +211,9 @@ Routes use double curly braces `{{}}` for variable placeholders:
 - `users/{{user_id}}/profile` - Matches "users/123/profile"
 - `{{}}` - Anonymous variable (matches any single path segment)
 
-### String Routes (Simple GET Routes)
+### Routes
+
+#### String Routes (Simple GET Routes)
 
 ```yaml
 routes:
@@ -261,7 +223,7 @@ routes:
   - posts/{{post_id}}              # GET /posts/456
 ```
 
-### Dictionary Routes (Custom Methods and Mappings)
+#### Dictionary Routes (Custom Methods and Mappings)
 
 ```yaml
 routes:
@@ -288,20 +250,18 @@ routes:
 
 You can restrict access to specific routes using the `restricted` section. Restrictions support wildcards and method-specific filtering:
 
+#### String Routes Restrictions
+
 ```yaml
-name: restricted_config
-
-...
-
-routes:
-  ...
-
 # Simple route restrictions (string format)
 restricted:
   - admin/{{}}                       # Block all admin routes (single segment wildcard)
   - users/{{user_id}}/private        # Block private user data
   - system/*                         # Block all routes starting with system/ (prefix wildcard)
+```
 
+#### Dictionary Routes Restrictions
+```yaml
 # Method-aware restrictions (dict format)
 restricted:
   - route: "*"
@@ -312,25 +272,27 @@ restricted:
     method: patch                    # Block PATCH requests to user routes
 ```
 
-**Wildcard Patterns:**
-- `{{}}` or `*` - Matches any single path segment (e.g., `users/{{}}` matches `users/123`)
-- `prefix/*` - Matches all routes starting with prefix/ (e.g., `admin/*` matches `admin/dashboard`, `admin/users/123`, etc.)
-- `*` - When used alone (string format), matches any single-segment route
-- `{route: "*", method: "X"}` - When used with a method (dict format), matches ALL routes regardless of path length
-
-**Method-Specific Restrictions:**
-- Use dict format with `route` and `method` fields to restrict specific HTTP methods
-- When `{route: "*", method: "X"}` is used, it blocks the specified method on ALL routes
-- Omit `method` field to restrict all methods for a route
-- Methods are case-insensitive (DELETE, delete, Delete all work)
-
-**For more details**, see the [Routing and Restrictions Wiki](https://github.com/yourusername/api_dock/wiki/Routing-and-Restrictions).
 
 ---
 
 ## SQL Database Support
 
-API Dock can also be used to query Databases. For now only parquet support is working but we will be adding other Databases in the future.
+Adding databases is similar to adding remote-apis, however now the `routes` section is required and maps directly to specifc `SQL` queries. Database routes support declarative URL query parameters via the `query_params` section. This lets you add filtering, sorting, pagination, conditional logic, and direct responses — all driven by the URL query string. Here's the structure
+
+
+```yaml 
+# api_dock_config/databases/versioned_db/0.1.yaml
+name:        # <str> this is the slug that goes in the url
+description: # (optional) <str> included in response for /versioned_db/0.1 base route
+authors:     # (optional) <str,list> included in response for /versioned_db/0.1 base route
+
+tables:      # <list[dict(name: uri)]> table definitions
+queries:     # (optional) named-queries used for complex sql queries for readability 
+
+routes:      # <list[dict]> maps routes to sql queries
+```
+
+For now only parquet support is working but we will be adding other Databases in the future.
 
 
 ### Database Configuration
@@ -422,9 +384,6 @@ routes:
 
 ## URL Query Parameters
 
-Database routes support declarative URL query parameters via the `query_params` section. This lets you add filtering, sorting, pagination, conditional logic, and direct responses — all driven by the URL query string.
-
-Routes without a `query_params` section work exactly as before (full backward compatibility).
 
 ### Basic Filtering with `sql`
 
@@ -627,6 +586,55 @@ Parameters are processed in this order (first match wins for early returns):
 4. `sql` parameters — build WHERE clause fragments
 5. `sql_append` parameters — append post-WHERE clauses (ORDER BY, LIMIT, etc.)
 6. Execute final SQL query
+
+---
+
+# CLI
+
+## Commands
+
+API Dock provides a modern Click-based CLI:
+
+- **pixi run api-dock** (default): List all available configurations
+- **pixi run api-dock init [--force]**: Initialize `api_dock_config/` directory with default configs
+- **pixi run api-dock start [config_name]**: Start API Dock server with optional config name
+- **pixi run api-dock describe [config_name]**: Display formatted configuration with expanded SQL queries
+
+**Note**: All commands shown use `pixi run` for the pixi environment. If not using pixi, drop the `pixi run` prefix (e.g., `api-dock start` instead of `pixi run api-dock start`).
+
+
+## Examples
+
+```bash
+# Initialize local configuration directory
+pixi run api-dock init
+
+# List available configurations, and available commands
+pixi run api-dock
+
+# Start API server
+# - default configuration (api_dock_config/config.yaml) with FastAPI
+pixi run api-dock start
+# - default configuration with Flask (backbone options: fastapi (default) or flask)
+pixi run api-dock start --backbone flask
+# - specify with host and/or port
+pixi run api-dock start --host 0.0.0.0 --port 9000
+
+
+# these commands also work for alternative configurations (example: api_dock_config/config_v2.yaml)
+pixi run api-dock start config_v2
+pixi run api-dock describe config_v2
+```
+
+**For more details**, see the [Configuration Wiki](https://github.com/yourusername/api_dock/wiki/Configuration).
+
+---
+
+
+
+
+
+---
 
 # Cookies and Authentication
 
