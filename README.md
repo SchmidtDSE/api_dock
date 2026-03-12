@@ -1,6 +1,6 @@
 # API Dock
 
-API Dock is a flexible API gateway that allows you to proxy requests to multiple remote APIs and Databases through a single endpoint. Using API Dock's CLI, the proxy can easily be launched as a FastAPI or Flask app, or integrated into any existing python based API.
+API Dock allows users to quickly build API-s that proxy requests to multiple remote APIs and Databases through a single endpoint. Configuration is handled with simple YAML files. Using API Dock's CLI, an API can easily be launched as a FastAPI or Flask app, or integrated into any existing python based API.
 
 ## Table of Contents
 
@@ -80,6 +80,17 @@ Configuration consists of a global config (`api_dock_config/config.yaml`), as we
 
 Here is a simple example of a configuration serving a single remote-api and database:
 
+```bash
+api_dock_config
+├── config.yaml
+├── databases
+│    └── db_example
+│        ├── 0.1.yaml
+│        └── 0.5.yaml
+└── remotes
+    └── service1.yaml
+```
+
 ```yaml 
 # api_dock_config/config.yaml
 name: "My API Dock"
@@ -103,9 +114,9 @@ url: https://remote.api.com
 ```
 
 ```yaml
-# api_dock_config/databases/db_example/0.1.yaml
+# api_dock_config/databases/db_example/0.5.yaml
 name: db_example
-description: "Example DB Version 0.1"
+description: "Example DB Version 0.5"
 authors:
   - "API Team"
 
@@ -128,12 +139,12 @@ This will create an "api-dock" with the following endpoints.
 
 ```
 - `/service1/*`: maps directly onto `https://remote.api.com/*`
-- `/db_example/0.1/users`: queries all users in the "users-database"
-- `/db_example/0.1/users/{user_id}`: queries all users in the "users-database" with `user.user_id = user_id`
+- `/db_example/0.5/users`: queries all users in the "users-database"
+- `/db_example/0.5/users/{user_id}`: queries all users in the "users-database" with `user.user_id = user_id`
 ```
 
-Note: the filename is being used for versioning. An endpoint with "latest" is also generated that will numerically order versions by name and serve the most recent version. For example,
-`/service1/0.1` uses the config in `/service1/0.1.yaml` and `/service1/latest` will use the most recent version in the `/service1` folder.
+Note: the filename is being used for versioning. An endpoint with "latest" is also generated that will numerically order versions by name and serve the most recent version. In this example, the route
+`/db_example/0.1` uses the config in `/db_example/0.1.yaml`,  while both `/db_example/0.5` and `/db_example/latest` will use `/db_example/0.5.yaml`, the most recent version in the `/db_example` folder.
 
 These basic configurations can be expanded to include a number of use cases: [restricting routes/methods](#route-restrictions), [custom mapping of remote-api routes](#custom-route-mapping), [accepting query parameters to filter data](#query-parameter-filtering), [limiting and sorting results](#sorting-and-pagination), [authentication](#authentication-setup), and [accessing data stored in cookies](#cookie-access).
 
