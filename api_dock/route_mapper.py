@@ -206,7 +206,7 @@ class RouteMapper:
         # Configure redirect behavior based on settings
         # Note: httpx automatically follows redirects but blocks HTTPS->HTTP downgrades for security
         # The follow_protocol_downgrades setting is documented but may require manual redirect handling
-        follow_redirects = True if self.settings.get("add_trailing_slash", True) else False
+        follow_redirects = self.settings.get("follow_redirects", True)
 
         async with httpx.AsyncClient(follow_redirects=follow_redirects) as client:
             try:
