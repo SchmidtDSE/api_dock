@@ -211,7 +211,7 @@ def _setup_s3_auth(conn: Any, metadata: Optional[Dict[str, Any]] = None) -> bool
 
     Args:
         conn: DuckDB connection object.
-        metadata: Optional metadata dict that may contain 'region' key.
+        metadata: Optional metadata dict that may contain 'region' key and 'public' flag.
 
     Returns:
         True if setup succeeded, False if it failed (but query may still work with public files).
@@ -225,6 +225,9 @@ def _setup_s3_auth(conn: Any, metadata: Optional[Dict[str, Any]] = None) -> bool
         conn.execute("INSTALL aws;")
         conn.execute("LOAD aws;")
 
+        # Check if this is explicitly marked as public access
+        is_public = metadata.get('public', False)
+
         # Determine AWS region with priority:
         # 1. Config file metadata (most specific)
         # 2. Environment variables
@@ -234,6 +237,30 @@ def _setup_s3_auth(conn: Any, metadata: Optional[Dict[str, Any]] = None) -> bool
             os.environ.get('AWS_DEFAULT_REGION') or
             os.environ.get('AWS_REGION')
         )
+
+        # For public buckets, try anonymous access first
+        if is_public:
+            try:
+                if aws_region:
+                    conn.execute(f"""
+                        CREATE OR REPLACE SECRET (
+                            TYPE s3,
+                            KEY_ID '',
+                            SECRET '',
+                            REGION '{aws_region}'
+                        );
+                    """)
+                else:
+                    conn.execute("""
+                        CREATE OR REPLACE SECRET (
+                            TYPE s3,
+                            KEY_ID '',
+                            SECRET ''
+                        );
+                    """)
+                return True
+            except Exception:
+                pass  # Fall through to credential chain
 
         # Configure S3 authentication using AWS credential chain
         # This automatically discovers credentials from:
@@ -307,6 +334,17 @@ def _setup_gcs_auth(conn: Any, metadata: Optional[Dict[str, Any]] = None) -> boo
         if service_account:
             # Set environment variable for this session
             os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = service_account
+
+        # Check if this is explicitly marked as public access
+        is_public = metadata.get('public', False)
+
+        # For public buckets, try anonymous access first
+        if is_public:
+            try:
+                # GCS public access doesn't require credentials
+                return True
+            except Exception:
+                pass  # Fall through to credential chain
 
         # Configure GCS authentication
         if key_id and secret:

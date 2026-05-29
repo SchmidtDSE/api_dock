@@ -5,6 +5,8 @@ environments:
     - url: https://conda.anaconda.org/conda-forge/
     indexes:
     - https://pypi.org/simple
+    options:
+      pypi-prerelease-mode: if-necessary-or-explicit
     packages:
       linux-64:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda
@@ -230,6 +232,8 @@ environments:
     - url: https://conda.anaconda.org/conda-forge/
     indexes:
     - https://pypi.org/simple
+    options:
+      pypi-prerelease-mode: if-necessary-or-explicit
     packages:
       linux-64:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda
@@ -985,8 +989,8 @@ packages:
   requires_python: '>=3.9'
 - pypi: ./
   name: api-dock
-  version: 0.4.8
-  sha256: 6ba430839fbe13e5db2abac34f09bf0dde0fe7d05df8ff2d8a714f6955db67d9
+  version: 0.4.9
+  sha256: 7aea2e2aaa966c93fd324135c61dbb6dd24a6363641f831f5477a33910b845b8
   requires_dist:
   - click
   - fastapi>=0.117.1,<0.118
@@ -1004,7 +1008,6 @@ packages:
   - pandas>=2.3.2,<3 ; extra == 'dev'
   - pytest>=9.0.2,<10 ; extra == 'dev'
   requires_python: '>=3.11'
-  editable: true
 - pypi: https://files.pythonhosted.org/packages/81/29/5ecc3a15d5a33e31b26c11426c45c501e439cb865d0bff96315d86443b78/appnope-0.1.4-py2.py3-none-any.whl
   name: appnope
   version: 0.1.4
