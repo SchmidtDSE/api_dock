@@ -11,8 +11,8 @@ License: BSD 3-Clause
 #
 # IMPORTS
 #
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, Response
 from typing import Any, Dict, Optional
 
 from api_dock.route_mapper import RouteMapper
@@ -35,10 +35,8 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     Returns:
         Configured FastAPI application.
     """
-    # Initialize route mapper
     route_mapper = RouteMapper(config_path)
 
-    # Get metadata for FastAPI
     metadata = route_mapper.get_config_metadata()
 
     app = FastAPI(
@@ -47,14 +45,10 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         version="0.1.0"
     )
 
-    # Store route mapper in app state
     app.state.route_mapper = route_mapper
 
-    # Add routes
     _add_main_routes(app, route_mapper)
     _add_remote_routes(app, route_mapper)
-
-    # Add error handlers for JSON responses
     _add_error_handlers(app)
 
     return app
@@ -77,7 +71,6 @@ def _add_main_routes(app: FastAPI, route_mapper: RouteMapper) -> None:
         return route_mapper.get_config_metadata()
 
 
-
 def _add_remote_routes(app: FastAPI, route_mapper: RouteMapper) -> None:
     """Add remote API proxy routes to the FastAPI app.
 
@@ -87,8 +80,13 @@ def _add_remote_routes(app: FastAPI, route_mapper: RouteMapper) -> None:
     """
 
     @app.api_route("/{remote_name}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
-    async def proxy_to_remote(remote_name: str, path: str, request: Request) -> JSONResponse:
+    async def proxy_to_remote(remote_name: str, path: str, request: Request) -> Response:
         """Proxy requests to remote APIs or databases.
+
+        Upstream responses — including binary content, 3xx redirects, and
+        4xx/5xx errors — are returned verbatim with their original status
+        code, content type, and headers. Cache-Control, ETag, Location, and
+        other upstream headers are forwarded to the client.
 
         Args:
             remote_name: Name of the remote API or database.
@@ -96,49 +94,38 @@ def _add_remote_routes(app: FastAPI, route_mapper: RouteMapper) -> None:
             request: The incoming request.
 
         Returns:
-            Response from the remote API or database query results.
-
-        Raises:
-            HTTPException: If remote/database not found or route not allowed.
+            Response from the upstream with original status, headers, and body.
         """
-        # Extract cookies from request
         cookies = dict(request.cookies) if request.cookies else {}
 
-        # Check if remote_name is a database first
         if remote_name in route_mapper.database_names:
-            # Handle as database route
-            success, response_data, status_code, error_message = await route_mapper.map_database_route(
+            proxy_resp = await route_mapper.map_database_route(
                 database_name=remote_name,
                 path=path,
                 query_params=dict(request.query_params),
-                cookies=cookies
+                cookies=cookies,
             )
         else:
-            # Handle as remote API route
-            # Get request body if present
             body = None
             if request.method in ["POST", "PUT", "PATCH"]:
                 body = await request.body()
 
-            # Use RouteMapper to handle the request
-            success, response_data, status_code, error_message = await route_mapper.map_route(
+            proxy_resp = await route_mapper.map_route(
                 remote_name=remote_name,
                 path=path,
                 method=request.method,
                 headers=dict(request.headers),
                 body=body,
                 query_params=dict(request.query_params),
-                cookies=cookies
+                cookies=cookies,
             )
 
-        if not success:
-            # Use custom response body if available (e.g., from authentication), otherwise use error message
-            if response_data:
-                return JSONResponse(content=response_data, status_code=status_code)
-            else:
-                return JSONResponse(content={"error": error_message}, status_code=status_code)
-
-        return JSONResponse(content=response_data, status_code=status_code)
+        return Response(
+            content=proxy_resp.content,
+            status_code=proxy_resp.status_code,
+            headers=proxy_resp.headers,
+            media_type=proxy_resp.content_type,
+        )
 
 
 def _add_error_handlers(app: FastAPI) -> None:
@@ -147,8 +134,6 @@ def _add_error_handlers(app: FastAPI) -> None:
     Args:
         app: FastAPI application instance.
     """
-    from fastapi import Request
-    from fastapi.responses import JSONResponse
 
     @app.exception_handler(404)
     async def not_found_handler(request: Request, exc):
