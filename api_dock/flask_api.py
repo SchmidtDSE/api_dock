@@ -11,7 +11,8 @@ License: BSD 3-Clause
 #
 # IMPORTS
 #
-from flask import Flask, jsonify, request
+import asyncio
+from flask import Flask, jsonify, request, Response as FlaskResponse
 from typing import Any, Dict, Optional
 
 from api_dock.route_mapper import RouteMapper
@@ -34,25 +35,16 @@ def create_app(config_path: Optional[str] = None) -> Flask:
     Returns:
         Configured Flask application.
     """
-    # Initialize route mapper
     route_mapper = RouteMapper(config_path)
-
-    # Get metadata for Flask
-    metadata = route_mapper.get_config_metadata()
 
     app = Flask(__name__)
 
-    # Disable automatic redirects for trailing slashes to avoid HTML responses
     app.url_map.strict_slashes = False
 
-    # Store route mapper in app config
     app.config['route_mapper'] = route_mapper
 
-    # Add routes (remote routes first to avoid conflicts)
     _add_remote_routes(app, route_mapper)
     _add_main_routes(app, route_mapper)
-
-    # Add error handlers for JSON responses
     _add_error_handlers(app)
 
     return app
@@ -75,7 +67,6 @@ def _add_main_routes(app: Flask, route_mapper: RouteMapper) -> None:
         return jsonify(route_mapper.get_config_metadata())
 
 
-
 def _add_remote_routes(app: Flask, route_mapper: RouteMapper) -> None:
     """Add remote API proxy routes to the Flask app.
 
@@ -92,49 +83,9 @@ def _add_remote_routes(app: Flask, route_mapper: RouteMapper) -> None:
             remote_name: Name of the remote API or database.
 
         Returns:
-            Response from the remote API/database or error response.
+            Response from the upstream with original status, headers, and body.
         """
-        # Extract cookies from request
-        cookies = dict(request.cookies) if request.cookies else {}
-
-        # Check if remote_name is a database first
-        if remote_name in route_mapper.database_names:
-            # Handle as database route (using async with asyncio.run)
-            import asyncio
-            success, response_data, status_code, error_message = asyncio.run(
-                route_mapper.map_database_route(
-                    database_name=remote_name,
-                    path="",
-                    query_params=dict(request.args),
-                    cookies=cookies
-                )
-            )
-        else:
-            # Handle as remote API route
-            # Get request body if present
-            body = None
-            if request.method in ["POST", "PUT", "PATCH"]:
-                body = request.get_data()
-
-            # Use RouteMapper to handle the request (synchronous version)
-            success, response_data, status_code, error_message = route_mapper.map_route_sync(
-                remote_name=remote_name,
-                path="",
-                method=request.method,
-                headers=dict(request.headers),
-                body=body,
-                query_params=dict(request.args),
-                cookies=cookies
-            )
-
-        if not success:
-            # Use custom response body if available (e.g., from authentication), otherwise use error message
-            if response_data:
-                return jsonify(response_data), status_code
-            else:
-                return jsonify({"error": error_message}), status_code
-
-        return jsonify(response_data), status_code
+        return _handle_proxy(route_mapper, remote_name, "")
 
 
     @app.route("/<remote_name>/<path:path>", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
@@ -146,49 +97,61 @@ def _add_remote_routes(app: Flask, route_mapper: RouteMapper) -> None:
             path: The path to proxy to the remote API or query from database.
 
         Returns:
-            Response from the remote API/database or error response.
+            Response from the upstream with original status, headers, and body.
         """
-        # Extract cookies from request
-        cookies = dict(request.cookies) if request.cookies else {}
+        return _handle_proxy(route_mapper, remote_name, path)
 
-        # Check if remote_name is a database first
-        if remote_name in route_mapper.database_names:
-            # Handle as database route (using async with asyncio.run)
-            import asyncio
-            success, response_data, status_code, error_message = asyncio.run(
-                route_mapper.map_database_route(
-                    database_name=remote_name,
-                    path=path,
-                    query_params=dict(request.args),
-                    cookies=cookies
-                )
-            )
-        else:
-            # Handle as remote API route
-            # Get request body if present
-            body = None
-            if request.method in ["POST", "PUT", "PATCH"]:
-                body = request.get_data()
 
-            # Use RouteMapper to handle the request (synchronous version)
-            success, response_data, status_code, error_message = route_mapper.map_route_sync(
-                remote_name=remote_name,
+def _handle_proxy(route_mapper: RouteMapper, remote_name: str, path: str) -> FlaskResponse:
+    """Shared proxy logic for both Flask route handlers.
+
+    Upstream responses — including binary content, 3xx redirects, and
+    4xx/5xx errors — are returned verbatim with their original status
+    code, content type, and headers.
+
+    Args:
+        route_mapper: RouteMapper instance.
+        remote_name: Name of the remote API or database.
+        path: The path to proxy.
+
+    Returns:
+        Flask Response with upstream status, headers, and body.
+    """
+    cookies = dict(request.cookies) if request.cookies else {}
+
+    if remote_name in route_mapper.database_names:
+        proxy_resp = asyncio.run(
+            route_mapper.map_database_route(
+                database_name=remote_name,
                 path=path,
-                method=request.method,
-                headers=dict(request.headers),
-                body=body,
                 query_params=dict(request.args),
-                cookies=cookies
+                cookies=cookies,
             )
+        )
+    else:
+        body = None
+        if request.method in ["POST", "PUT", "PATCH"]:
+            body = request.get_data()
 
-        if not success:
-            # Use custom response body if available (e.g., from authentication), otherwise use error message
-            if response_data:
-                return jsonify(response_data), status_code
-            else:
-                return jsonify({"error": error_message}), status_code
+        proxy_resp = route_mapper.map_route_sync(
+            remote_name=remote_name,
+            path=path,
+            method=request.method,
+            headers=dict(request.headers),
+            body=body,
+            query_params=dict(request.args),
+            cookies=cookies,
+        )
 
-        return jsonify(response_data), status_code
+    response = FlaskResponse(
+        response=proxy_resp.content,
+        status=proxy_resp.status_code,
+        content_type=proxy_resp.content_type,
+    )
+    for key, value in proxy_resp.headers.items():
+        response.headers[key] = value
+
+    return response
 
 
 def _add_error_handlers(app: Flask) -> None:
