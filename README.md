@@ -663,29 +663,78 @@ API Dock supports cookie extraction and authentication for both remote APIs and 
 
 ## Cookie Configuration
 
-Configure cookies to extract from incoming requests and make them available as template variables:
+### Forwarding client cookies
+
+Configure which cookies to extract from incoming requests and forward to the upstream API (or make available as template variables in SQL routes):
 
 ```yaml
-# Enable all cookies (default: false)
+# Forward all cookies from the client request
 cookies: true
 
-# Or specify specific cookies to extract
+# Forward only specific cookies
 cookies: [session_id, auth_token, user_preferences]
 
-# Disable all cookies (default behavior)
+# Forward no cookies (default behavior)
 cookies: false
 ```
 
-When `cookies: true`, all cookies are accepted and available. When `cookies: false` (default), no cookies are processed except authentication cookies when authentication is configured. When providing a list, only specified cookies are extracted.
+When `cookies: true`, all cookies are accepted and available. When `cookies: false` (default), no cookies are processed except authentication cookies when authentication is configured. When providing a list, only the named cookies are forwarded.
 
-Cookies can then be accessed in SQL queries using `{{cookies.cookie_name}}`:
+Forwarded cookies are accessible in SQL queries using `{{cookies.cookie_name}}`:
 
 ```yaml
-# Database route using cookies
 routes:
   - route: user/profile
     sql: SELECT * FROM [[users]] WHERE session_id = '{{cookies.session_id}}'
 ```
+
+### Injecting cookies from the server environment
+
+The `cookies` list also accepts dict entries to inject cookies into every outgoing upstream request, regardless of what the client sent. This is useful when the upstream API requires a server-side credential (e.g. a session token stored in an environment variable) rather than a cookie from the end user.
+
+Dict entries and string entries can be mixed freely in the same list.
+
+```yaml
+cookies:
+  - session_id                            # forward this cookie from the client request
+  - key: __Secure-authjs.session-token    # inject from environment variable
+    value: "env:SOUNDHUB_SESSION_TOKEN"
+```
+
+#### Dict entry forms
+
+| Form | Behaviour |
+|---|---|
+| `{key: NAME, value: "literal"}` | Inject cookie `NAME` with the literal string `"literal"` |
+| `{key: NAME, value: "env:MY_VAR"}` | Inject cookie `NAME` with the value of env var `MY_VAR`; empty string if unset |
+| `{key: MY_VAR}` | Shorthand — equivalent to `{key: MY_VAR, value: "env:MY_VAR"}` |
+
+The shorthand form uses the key as both the cookie name **and** the env var name. Use the explicit `value: "env:..."` form when the cookie name and the env var name differ (which is common — cookie names often contain characters that aren't valid env var names).
+
+#### Example: proxying an API that requires a session cookie
+
+```yaml
+# api_dock_config/remotes/my_service/1.0.yaml
+name: my_service
+url: https://api.example.com
+
+cookies:
+  - key: __Secure-authjs.session-token
+    value: "env:MY_SERVICE_SESSION_TOKEN"
+```
+
+Set the env var before starting api-dock:
+
+```bash
+export MY_SERVICE_SESSION_TOKEN="your-session-token-here"
+pixi run api-dock start
+```
+
+Every request proxied to `my_service` will include the `__Secure-authjs.session-token` cookie, even if the client did not send one.
+
+#### Injection precedence
+
+If an injected cookie has the same name as a forwarded client cookie, the injected value takes precedence. This ensures the server-side credential is always used, regardless of what the client sends.
 
 ## Authentication Configuration
 
