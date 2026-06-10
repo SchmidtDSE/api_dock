@@ -242,7 +242,10 @@ def get_settings(config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def get_cookies_config(config: Dict[str, Any]) -> List[str]:
-    """Extract cookie configuration from config.
+    """Extract cookie names to forward from incoming requests.
+
+    Only string entries in the ``cookies`` list are returned here. Dict entries
+    (cookie injection) are handled separately by ``resolve_inject_cookies``.
 
     Args:
         config: Configuration dictionary (main, remote, or database).
@@ -254,9 +257,7 @@ def get_cookies_config(config: Dict[str, Any]) -> List[str]:
     if not isinstance(cookies, list):
         return []
 
-    # Ensure all cookie names are strings
-    cookie_list = [str(cookie) for cookie in cookies if cookie]
-    return cookie_list
+    return [str(c) for c in cookies if c and isinstance(c, str)]
 
 
 def filter_cookies_by_config(cookies: Dict[str, str], config: Dict[str, Any]) -> Dict[str, str]:
@@ -288,23 +289,26 @@ def filter_cookies_by_config(cookies: Dict[str, str], config: Dict[str, Any]) ->
             else:
                 return {}
 
-    # Handle list of cookie names (existing behavior)
+    # Handle list — may contain string names (forward from client) and/or
+    # dict entries (inject from config/env var).
     elif isinstance(cookies_setting, list):
+        injected = resolve_inject_cookies(config)
         allowed_cookies = get_cookies_config(config)
-        if not allowed_cookies:
-            # Empty list means no cookies allowed except authentication key
-            if auth_key and auth_key in cookies:
-                auth_only = {auth_key: cookies[auth_key]}
-                return auth_only
-            else:
-                return {}
 
-        # Always include authentication key in allowed cookies
+        if not allowed_cookies:
+            # No string entries — only auth key forwarded from client, plus injected.
+            result: Dict[str, str] = {}
+            if auth_key and auth_key in cookies:
+                result[auth_key] = cookies[auth_key]
+            result.update(injected)
+            return result
+
+        # Always include authentication key in forwarded set.
         if auth_key and auth_key not in allowed_cookies:
             allowed_cookies = allowed_cookies + [auth_key]
 
-        # Filter cookies to only include allowed ones
         filtered = {k: v for k, v in cookies.items() if k in allowed_cookies}
+        filtered.update(injected)
         return filtered
 
     # Default: no cookie configuration means only authentication key passed
@@ -314,6 +318,56 @@ def filter_cookies_by_config(cookies: Dict[str, str], config: Dict[str, Any]) ->
             return auth_only
         else:
             return {}
+
+
+def resolve_inject_cookies(config: Dict[str, Any]) -> Dict[str, str]:
+    """Resolve dict entries in the ``cookies`` list into ready-to-send cookie values.
+
+    The ``cookies`` list accepts a mix of strings (names of client cookies to forward)
+    and dicts (cookies to inject into the outgoing request regardless of what the
+    client sent). This function handles the dict entries only.
+
+    Dict entry forms:
+
+    - ``{key: COOKIE_NAME, value: "literal-value"}`` — inject with a literal string.
+    - ``{key: COOKIE_NAME, value: "env:MY_ENV_VAR"}`` — inject with the value of
+      environment variable ``MY_ENV_VAR``; resolves to empty string if unset.
+    - ``{key: MY_ENV_VAR}`` — shorthand: no ``value`` means look up an env var whose
+      name equals the key (equivalent to ``{key: MY_ENV_VAR, value: "env:MY_ENV_VAR"}``).
+
+    Example YAML::
+
+        cookies:
+          - session_id                           # forward from client request
+          - key: __Secure-authjs.session-token
+            value: "env:SOUNDHUB_SESSION_TOKEN"  # inject from env var
+
+    Args:
+        config: Configuration dictionary (main, remote, or database).
+
+    Returns:
+        Dictionary mapping cookie names to their resolved string values.
+    """
+    cookies_setting = config.get("cookies", [])
+    if not isinstance(cookies_setting, list):
+        return {}
+
+    result: Dict[str, str] = {}
+    for entry in cookies_setting:
+        if not isinstance(entry, dict):
+            continue
+        key = entry.get("key")
+        if not key or not isinstance(key, str):
+            continue
+        raw_value = entry.get("value")
+        if raw_value is None:
+            value = os.environ.get(key, "")
+        elif isinstance(raw_value, str) and raw_value.startswith("env:"):
+            value = os.environ.get(raw_value[4:], "")
+        else:
+            value = str(raw_value)
+        result[key] = value
+    return result
 
 
 def get_authentication_config(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
