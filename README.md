@@ -1168,9 +1168,11 @@ gh release create v0.6.0 dist/api_dock-0.6.0-py3-none-any.whl \
     - Upstream response headers (Cache-Control, ETag, Last-Modified, etc.) now forwarded to client
     - Upstream 4xx/5xx error bodies passed through verbatim (previously wrapped/swallowed)
     - JSON responses no longer re-serialized — raw bytes returned as-is, preserving exact upstream payload
+    - `api-dock init` now works correctly when installed from PyPI (example configs moved inside the `api_dock` package so `importlib.resources` resolves them)
 * cleanup / other improvements
     - Added `ProxyResponse` typed dataclass as the return contract for `map_route()` and `map_database_route()`
     - Added test suite (38 tests covering proxy pipeline and cookie injection)
+    - Replaced stale `config/` templates with clean `example_api_dock_config/` (removed unimplemented features; real advanced features kept as commented examples)
     - Removed broken root `__init__.py` that caused pytest import conflicts
     - Bumped cryptography dependency to >=48.0.0,<49.0.0
 EOF
