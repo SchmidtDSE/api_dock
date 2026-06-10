@@ -459,15 +459,12 @@ def _list_configs() -> None:
 
     # Check for local configs
     local_dir = Path("api_dock_config")
-    config_dir = Path("config")
-
     local_configs = list(local_dir.glob("*.yaml")) if local_dir.exists() else []
-    config_configs = list(config_dir.glob("*.yaml")) if config_dir.exists() else []
 
-    # Check for package configs
+    # Check for bundled example configs
     try:
         import importlib.resources as pkg_resources
-        package_dir = Path(pkg_resources.files("api_dock") / "config")
+        package_dir = Path(pkg_resources.files("api_dock") / "example_api_dock_config")
         package_configs = list(package_dir.glob("*.yaml")) if package_dir.exists() else []
     except Exception:
         package_configs = []
@@ -478,17 +475,11 @@ def _list_configs() -> None:
             click.echo(f"  {config_file.stem}")
         click.echo()
     else:
-        click.echo("📁 Local configurations (api_dock_config/): None")
-        click.echo()
-
-    if config_configs:
-        click.echo("📁 Project configurations (config/):")
-        for config_file in sorted(config_configs):
-            click.echo(f"  {config_file.stem}")
+        click.echo("📁 Local configurations (api_dock_config/): None — run 'api-dock init' to create")
         click.echo()
 
     if package_configs:
-        click.echo("📦 Package configurations:")
+        click.echo("📦 Example configurations (run 'api-dock init' to copy to api_dock_config/):")
         for config_file in sorted(package_configs):
             click.echo(f"  {config_file.stem}")
         click.echo()
