@@ -1131,6 +1131,58 @@ pixi run python scripts/hello_world.py
 
 ---
 
+---
+
+# Development
+
+## Publishing a Release
+
+```bash
+# 0. Make sure you are on `main` and merged with any changes
+
+# 1. Bump version in pyproject.toml
+
+# 2. Commit everything
+git add -A
+git commit -m "v0.6.0: proxy passthrough fixes, cookie injection"
+
+# 3. Tag and push
+git tag v0.6.0
+git push origin main v0.6.0
+
+# 4. Build the wheel (requires the `dev` pixi environment)
+rm -rf dist/
+find . -name "__pycache__" -type d -exec rm -rf {} +
+find . -name "*.pyc" -delete
+pixi run -e dev python -m build --wheel
+ls dist/*.whl
+
+# 5. Create GitHub release with the wheel attached
+gh release create v0.6.0 dist/api_dock-0.6.0-py3-none-any.whl \
+    --title "v0.6.0" --notes "$(cat <<'EOF'
+* new features
+    - Cookie injection: dict entries in the `cookies` list inject server-side cookies into upstream requests, with `env:MY_VAR` env var support and literal value support
+* bug fixes
+    - Binary responses (image, audio) no longer corrupted — raw bytes passed through with correct content-type
+    - 3xx redirects returned to client when `follow_redirects: false` (previously followed internally, doubling egress)
+    - Upstream response headers (Cache-Control, ETag, Last-Modified, etc.) now forwarded to client
+    - Upstream 4xx/5xx error bodies passed through verbatim (previously wrapped/swallowed)
+    - JSON responses no longer re-serialized — raw bytes returned as-is, preserving exact upstream payload
+* cleanup / other improvements
+    - Added `ProxyResponse` typed dataclass as the return contract for `map_route()` and `map_database_route()`
+    - Added test suite (38 tests covering proxy pipeline and cookie injection)
+    - Removed broken root `__init__.py` that caused pytest import conflicts
+    - Bumped cryptography dependency to >=48.0.0,<49.0.0
+EOF
+)"
+
+# 6. Publish to PyPI
+pixi run -e dev python -m twine upload dist/*.whl
+```
+
+
+---
+
 # License
 
 BSD 3-Clause
