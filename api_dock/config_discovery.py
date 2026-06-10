@@ -31,9 +31,8 @@ def find_config(config_name: Optional[str] = None) -> Optional[str]:
     """Find configuration file by name.
 
     Search order:
-    1. api_dock_config/<config_name>.yaml
-    2. config/<config_name>.yaml
-    3. api_dock/config/<config_name>.yaml (package default)
+    1. api_dock_config/<config_name>.yaml  (local user config)
+    2. api_dock/example_api_dock_config/<config_name>.yaml  (bundled package default)
 
     Args:
         config_name: Config name without .yaml extension (default: "config").
@@ -48,20 +47,15 @@ def find_config(config_name: Optional[str] = None) -> Optional[str]:
     if config_name.endswith(".yaml"):
         config_name = config_name[:-5]
 
-    # Check local config directory
+    # Check local config directory first
     local_path = Path(f"{LOCAL_CONFIG_DIR}/{config_name}.yaml")
     if local_path.exists():
         return str(local_path)
 
-    # Check config/ directory
-    config_path = Path(f"config/{config_name}.yaml")
-    if config_path.exists():
-        return str(config_path)
-
-    # Check package config directory
+    # Fall back to bundled package examples
     try:
         import importlib.resources as pkg_resources
-        package_config = Path(pkg_resources.files("api_dock") / "config" / f"{config_name}.yaml")
+        package_config = Path(pkg_resources.files("api_dock") / "example_api_dock_config" / f"{config_name}.yaml")
         if package_config.exists():
             return str(package_config)
     except Exception:
@@ -91,7 +85,7 @@ def init_config() -> bool:
         (local_dir / "remotes").mkdir(exist_ok=True)
         (local_dir / "databases").mkdir(exist_ok=True)
 
-        # Step 3: Copy default configs from package
+        # Step 3: Copy example configs from package
         package_dir = _get_package_config_dir()
         if not package_dir:
             return False
@@ -130,14 +124,14 @@ def init_config() -> bool:
 # INTERNAL
 #
 def _get_package_config_dir() -> Optional[Path]:
-    """Get the path to the package's config directory.
+    """Get the path to the bundled example config directory inside the package.
 
     Returns:
-        Path to package config directory, or None if not found.
+        Path to example_api_dock_config directory, or None if not found.
     """
     try:
         import importlib.resources as pkg_resources
-        config_dir = Path(pkg_resources.files("api_dock") / "config")
+        config_dir = Path(pkg_resources.files("api_dock") / "example_api_dock_config")
         return config_dir if config_dir.exists() else None
     except Exception:
         return None
