@@ -9,8 +9,6 @@ License: BSD 3-Clause
 #
 # IMPORTS
 #
-import pytest
-
 from api_dock.types import ProxyResponse
 
 

@@ -391,8 +391,6 @@ def get_authentication_config(config: Dict[str, Any]) -> Optional[Dict[str, Any]
     if "encrypted" not in auth_config:
         auth_config["encrypted"] = DEFAULT_AUTH_SETTINGS["encrypted"]
 
-    auth_key = auth_config.get("key", "UNKNOWN")
-    auth_method = auth_config.get("method", "UNKNOWN")
     return auth_config
 
 

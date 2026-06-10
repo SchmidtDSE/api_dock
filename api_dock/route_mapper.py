@@ -73,7 +73,6 @@ class RouteMapper:
         self.database_names = get_database_names(self.config)
         self.settings = get_settings(self.config)
 
-
     def get_config_metadata(self) -> Dict[str, Any]:
         """Get API metadata from configuration.
 
@@ -91,7 +90,6 @@ class RouteMapper:
             "remotes": all_remotes
         }
         return metadata
-
 
     async def map_route(self,
             remote_name: str,
@@ -220,7 +218,6 @@ class RouteMapper:
                 return _error_response(502, f"Error connecting to remote API: {str(e)}")
             except Exception as e:
                 return _error_response(500, f"Internal server error: {str(e)}")
-
 
     async def map_database_route(
             self,
@@ -357,7 +354,6 @@ class RouteMapper:
         except Exception:
             return _error_response(500, "Database query error")
 
-
     def is_remote_name(self, name: str) -> bool:
         """Check if a given name is a configured remote name.
 
@@ -368,7 +364,6 @@ class RouteMapper:
             True if name is a remote name, False otherwise.
         """
         return name in self.remote_names
-
 
     def is_database_name(self, name: str) -> bool:
         """Check if a given name is a configured database name.
@@ -381,7 +376,6 @@ class RouteMapper:
         """
         return name in self.database_names
 
-
     def get_remote_names(self) -> List[str]:
         """Get list of configured remote names.
 
@@ -390,7 +384,6 @@ class RouteMapper:
         """
         return self.remote_names.copy()
 
-
     def get_database_names(self) -> List[str]:
         """Get list of configured database names.
 
@@ -398,7 +391,6 @@ class RouteMapper:
             List of database names.
         """
         return self.database_names.copy()
-
 
     def map_route_sync(self, remote_name: str, path: str, method: str,
                       headers: Optional[Dict[str, str]] = None,
@@ -432,7 +424,6 @@ class RouteMapper:
         except Exception as e:
             return _error_response(500, f"Sync wrapper error: {str(e)}")
 
-
     def _is_remote_filename(self, filename: str) -> bool:
         """Check if a filename corresponds to a remote config file.
 
@@ -447,7 +438,6 @@ class RouteMapper:
             if isinstance(remote, str) and remote == filename:
                 return True
         return False
-
 
     def _get_remote_name_by_filename(self, filename: str) -> Optional[str]:
         """Get the actual remote name for a given filename.

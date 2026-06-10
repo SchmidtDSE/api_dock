@@ -310,7 +310,7 @@ For now only parquet support is working but we will be adding other Databases in
 
 ### Database Configuration
 
-Database configurations are stored in `config/databases/` directory. Each database defines:
+Database configurations are stored in `api_dock_config/databases/` directory. Each database defines:
 - **tables**: Mapping of table names to file paths (supports S3, GCS, HTTPS, local paths)
 - **queries**: Named SQL queries for reuse
 - **routes**: REST endpoints mapped to SQL queries
