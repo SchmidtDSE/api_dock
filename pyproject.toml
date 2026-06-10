@@ -7,7 +7,7 @@ name = "api_dock"
 version = "0.6.0"
 description = "A flexible API gateway that allows you to proxy requests to multiple remote APIs and Databases"
 readme = "README.md"
-license = {text = "BSd 3-clause"}
+license = "BSD-3-Clause"
 authors = [
   {name = "Brookie Guzder-Williams", email = "bguzder-williams@berkeley.edu"}
 ]
@@ -52,12 +52,12 @@ dev = [
 api-dock = "api_dock.cli:main"
 
 [tool.setuptools]
-packages = ["api_dock", "config"]
+packages = ["api_dock"]
 
 [tool.setuptools.package-data]
-config = ["*.yaml", "**/*.yaml"]
+api_dock = ["example_api_dock_config/*.yaml", "example_api_dock_config/**/*.yaml"]
 
-[tool.pixi.project]
+[tool.pixi.workspace]
 channels = ["conda-forge"]
 platforms = ["osx-arm64", "linux-64", "osx-64", "linux-aarch64"]
 
