@@ -1,0 +1,75 @@
+name: example_db
+description: Example database
+authors:
+  - API Team
+
+# Table definitions — supports S3, GCS, HTTPS, and local paths.
+# Use **/* for partitioned Parquet (e.g. Hive-partitioned directories).
+tables:
+  items: s3://your-bucket/items.parquet
+  # items: gs://your-bucket/items.parquet        # Google Cloud Storage
+  # items: https://host/path/items.parquet        # HTTPS
+  # items: data/items.parquet                     # local file
+
+routes:
+  # List all items with optional filtering, sorting, and pagination.
+  - route: items
+    sql: SELECT [[items]].* FROM [[items]]
+    query_params:
+      # WHERE clause filter — only applied when the param is present in the URL.
+      - category:
+          sql: "[[items]].category = '{{category}}'"
+
+      # Sorting — sql_append clauses are appended after the WHERE clause in YAML order.
+      - sort:
+          sql_append: ORDER BY {{sort}} {{direction}}
+          default: id        # used when ?sort= is not provided
+      - direction:
+          default: ASC       # value-only param — feeds into sort's template
+
+      # Pagination
+      - limit:
+          sql_append: LIMIT {{limit}}
+          default: 50
+      - offset:
+          sql_append: OFFSET {{offset}}
+
+  # Fetch a single item by ID.
+  - route: items/{{id}}
+    sql: SELECT [[items]].* FROM [[items]] WHERE [[items]].id = {{id}}
+
+
+# ── Advanced features (uncomment to use) ─────────────────────────────────────
+
+# Named queries — define reusable SQL fragments and reference them with [[name]].
+# queries:
+#   items_with_meta: |
+#     SELECT [[items]].*, [[meta]].label
+#     FROM [[items]]
+#     JOIN [[meta]] ON [[items]].id = [[meta]].item_id
+
+# Required parameter with a custom error response (returns 400 if missing).
+# - route: items/search
+#   sql: SELECT [[items]].* FROM [[items]]
+#   query_params:
+#     - q:
+#         sql: "[[items]].name ILIKE '%{{q}}%'"
+#         required: true
+#         missing_response:
+#           error: "q is required"
+#           http_status: 400
+
+# Conditional parameter — branch on the parameter's value.
+# - status:
+#     conditional:
+#       active:
+#         sql: "[[items]].active = true"
+#       inactive:
+#         sql: "[[items]].active = false"
+#       default:
+#         response: "Unknown status — use active or inactive"
+
+# Direct response — return a fixed JSON response without executing SQL.
+# - debug:
+#     response:
+#       message: "Debug mode — no query executed"

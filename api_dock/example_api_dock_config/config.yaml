@@ -1,0 +1,22 @@
+name: my-api
+description: My API Dock instance
+authors:
+  - Your Name
+
+# Remote APIs to proxy (add a file per remote in remotes/)
+remotes:
+  - example_remote
+
+# SQL databases to query (add a file per database in databases/)
+databases:
+  - example_db
+
+settings:
+  add_trailing_slash: false   # Set true to auto-append trailing slash to proxied paths
+  follow_redirects: true      # Set false to pass 3xx redirects through to the client
+
+# Global route restrictions — applied to all remotes unless overridden per-remote.
+# Uncomment to block DELETE on every remote:
+# restricted:
+#   - route: "*"
+#     method: delete

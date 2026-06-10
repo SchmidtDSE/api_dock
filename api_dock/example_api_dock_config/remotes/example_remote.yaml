@@ -1,0 +1,30 @@
+name: example_remote
+description: Example remote API
+url: https://api.example.com
+
+# Routes — omit this section to allow all routes. Include it to whitelist specific paths.
+# routes:
+#   - users                       # GET /users
+#   - users/{{user_id}}           # GET /users/123
+#   - users/{{user_id}}/profile   # GET /users/123/profile
+
+# Restrict specific routes or methods.
+# restricted:
+#   - route: "*"
+#     method: delete              # Block DELETE on all routes
+#   - admin/*                     # Block all routes under admin/
+
+# Forward specific cookies from the incoming client request to the upstream API.
+# cookies: [session_id, auth_token]
+
+# Inject a server-side cookie into every upstream request.
+# The value is read from an environment variable at request time.
+# cookies:
+#   - key: __Secure-authjs.session-token
+#     value: "env:MY_SESSION_TOKEN"   # reads $MY_SESSION_TOKEN from the environment
+
+# Remap incoming routes to different upstream paths.
+# routes:
+#   - route: users/{{user_id}}/profile
+#     remote_route: profiles/{{user_id}}
+#     method: get
