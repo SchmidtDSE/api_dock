@@ -28,6 +28,10 @@ from api_dock.types import PreparedRequest, ProxyResponse
 #
 DEFAULT_VERSION: str = "latest"
 
+# Default upstream request timeout in seconds. Override with the `timeout`
+# setting; set it to null/false to disable the timeout entirely.
+DEFAULT_TIMEOUT: float = 10.0
+
 # Headers excluded from upstream→client forwarding.
 # Hop-by-hop headers (RFC 7230 §6.1) must not be forwarded by proxies.
 # content-type is stored separately in ProxyResponse.content_type.
@@ -191,6 +195,7 @@ class RouteMapper:
         # and fetches the resource itself — avoiding unnecessary data transfer.
         # When True (default), httpx follows the redirect transparently.
         follow_redirects = self.settings.get("follow_redirects", True)
+        timeout = _resolve_timeout(self.settings.get("timeout", DEFAULT_TIMEOUT))
 
         return PreparedRequest(
             url=full_url,
@@ -200,6 +205,7 @@ class RouteMapper:
             cookies=filtered_cookies,
             body=body,
             follow_redirects=follow_redirects,
+            timeout=timeout,
         )
 
     async def map_route(self,
@@ -253,7 +259,9 @@ class RouteMapper:
         if isinstance(prepared, ProxyResponse):
             return prepared
 
-        async with httpx.AsyncClient(follow_redirects=prepared.follow_redirects) as client:
+        async with httpx.AsyncClient(
+            follow_redirects=prepared.follow_redirects, timeout=prepared.timeout
+        ) as client:
             try:
                 response = await client.request(
                     method=prepared.method,
@@ -520,6 +528,23 @@ class RouteMapper:
 #
 # INTERNAL
 #
+def _resolve_timeout(value: Any) -> Optional[float]:
+    """Resolve the configured timeout to seconds, or None to disable it.
+
+    A null/false value (YAML `null`/`false`) means no timeout. Any other value
+    is coerced to a float number of seconds.
+
+    Args:
+        value: Raw `timeout` setting value (defaults to DEFAULT_TIMEOUT upstream).
+
+    Returns:
+        Float seconds, or None for no timeout.
+    """
+    if value is None or value is False:
+        return None
+    return float(value)
+
+
 def _error_response(status_code: int, message: str) -> ProxyResponse:
     """Build a JSON ProxyResponse for an api_dock-level error.
 
