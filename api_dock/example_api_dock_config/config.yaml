@@ -14,6 +14,7 @@ databases:
 settings:
   add_trailing_slash: false   # Set true to auto-append trailing slash to proxied paths
   follow_redirects: true      # Set false to pass 3xx redirects through to the client
+  timeout: 10                 # Upstream request timeout (seconds); null/false to disable
 
 # Global route restrictions — applied to all remotes unless overridden per-remote.
 # Uncomment to block DELETE on every remote:
