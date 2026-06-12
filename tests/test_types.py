@@ -1,6 +1,6 @@
 """
 
-Tests for the ProxyResponse type.
+Tests for the ProxyResponse and PreparedRequest types.
 
 License: BSD 3-Clause
 
@@ -9,7 +9,7 @@ License: BSD 3-Clause
 #
 # IMPORTS
 #
-from api_dock.types import ProxyResponse
+from api_dock.types import PreparedRequest, ProxyResponse
 
 
 #
@@ -73,3 +73,38 @@ class TestProxyResponse:
         )
         assert resp.status_code == 302
         assert "location" in resp.headers
+
+
+class TestPreparedRequest:
+    """Tests for PreparedRequest dataclass."""
+
+    def test_construction(self):
+        req = PreparedRequest(
+            url="https://api.example.com/data/",
+            method="GET",
+            headers={"accept": "application/json"},
+            params={"count": "true"},
+            cookies={"session": "abc"},
+            body=None,
+            follow_redirects=True,
+        )
+        assert req.url == "https://api.example.com/data/"
+        assert req.method == "GET"
+        assert req.headers == {"accept": "application/json"}
+        assert req.params == {"count": "true"}
+        assert req.cookies == {"session": "abc"}
+        assert req.body is None
+        assert req.follow_redirects is True
+
+    def test_with_body(self):
+        req = PreparedRequest(
+            url="https://api.example.com/submit/",
+            method="POST",
+            headers={},
+            params={},
+            cookies={},
+            body=b'{"key": "value"}',
+            follow_redirects=False,
+        )
+        assert req.body == b'{"key": "value"}'
+        assert req.follow_redirects is False
