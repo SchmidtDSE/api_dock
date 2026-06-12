@@ -95,6 +95,7 @@ class TestPreparedRequest:
         assert req.cookies == {"session": "abc"}
         assert req.body is None
         assert req.follow_redirects is True
+        assert req.timeout is None
 
     def test_with_body(self):
         req = PreparedRequest(
@@ -108,3 +109,16 @@ class TestPreparedRequest:
         )
         assert req.body == b'{"key": "value"}'
         assert req.follow_redirects is False
+
+    def test_with_timeout(self):
+        req = PreparedRequest(
+            url="https://api.example.com/data/",
+            method="GET",
+            headers={},
+            params={},
+            cookies={},
+            body=None,
+            follow_redirects=True,
+            timeout=30.0,
+        )
+        assert req.timeout == 30.0
