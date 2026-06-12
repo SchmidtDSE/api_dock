@@ -179,6 +179,7 @@ remotes:
 settings:
   add_trailing_slash: true              # Auto-add trailing slash to paths (default: true)
   follow_protocol_downgrades: false     # Allow HTTPS->HTTP redirects (default: false)
+  timeout: 10                           # Upstream request timeout in seconds (default: 10)
 ```
 
 ### HTTP behavior Settings
@@ -188,6 +189,8 @@ The optional `settings` section controls HTTP behavior:
 - **`add_trailing_slash`** (default: `true`): Automatically append a trailing slash to all proxied paths. This prevents 307/301 redirects from remote APIs that require trailing slashes (e.g., `/projects` → `/projects/`). Set to `false` to disable this behavior.
 
 - **`follow_protocol_downgrades`** (default: `false`): Control how HTTP redirects are handled. When `false` (recommended), HTTPS→HTTP redirects are blocked for security. When `true`, allows following redirects that downgrade from HTTPS to HTTP (not recommended for production).
+
+- **`timeout`** (default: `10`): Upstream request timeout in seconds, applied to both the streaming and buffered proxy paths. Raise it for slow upstreams (e.g. large aggregation queries) that would otherwise return a 502 on timeout. Set to `null` or `false` to disable the timeout entirely (not recommended — a stalled upstream can hold the connection open indefinitely).
 
 ---
 
@@ -1131,8 +1134,6 @@ pixi run python scripts/hello_world.py
 
 ---
 
----
-
 # Development
 
 ## Publishing a Release
@@ -1144,11 +1145,11 @@ pixi run python scripts/hello_world.py
 
 # 2. Commit everything
 git add -A
-git commit -m "v0.6.0: proxy passthrough fixes, cookie injection"
+git commit -m "v0.6.1: stream proxy responses (fix large-response 502 + content-encoding)"
 
 # 3. Tag and push
-git tag v0.6.0
-git push origin main v0.6.0
+git tag v0.6.1
+git push origin main v0.6.1
 
 # 4. Build the wheel (requires the `dev` pixi environment)
 rm -rf dist/
@@ -1158,23 +1159,19 @@ pixi run -e dev python -m build --wheel
 ls dist/*.whl
 
 # 5. Create GitHub release with the wheel attached
-gh release create v0.6.0 dist/api_dock-0.6.0-py3-none-any.whl \
-    --title "v0.6.0" --notes "$(cat <<'EOF'
+gh release create v0.6.1 dist/api_dock-0.6.1-py3-none-any.whl \
+    --title "v0.6.1" --notes "$(cat <<'EOF'
 * new features
-    - Cookie injection: dict entries in the `cookies` list inject server-side cookies into upstream requests, with `env:MY_VAR` env var support and literal value support
+    - Remote proxy responses are now streamed (FastAPI) — upstream bytes are piped to the client as they arrive instead of being buffered fully in memory
+    - New `timeout` setting (default 10s) for the upstream request; set to `null`/`false` to disable
 * bug fixes
-    - Binary responses (image, audio) no longer corrupted — raw bytes passed through with correct content-type
-    - 3xx redirects returned to client when `follow_redirects: false` (previously followed internally, doubling egress)
-    - Upstream response headers (Cache-Control, ETag, Last-Modified, etc.) now forwarded to client
-    - Upstream 4xx/5xx error bodies passed through verbatim (previously wrapped/swallowed)
-    - JSON responses no longer re-serialized — raw bytes returned as-is, preserving exact upstream payload
-    - `api-dock init` now works correctly when installed from PyPI (example configs moved inside the `api_dock` package so `importlib.resources` resolves them)
+    - Large upstream responses no longer return 502 — streamed via `StreamingResponse` instead of reading the whole body into memory
+    - `Content-Encoding` (gzip/br/deflate) is now preserved on compressed responses — raw bytes are streamed via `aiter_raw()` so the header stays valid and the client can decompress
+    - Slow upstreams (e.g. large aggregation queries) no longer 502 at httpx's hardcoded 5s default — the timeout is now configurable via the `timeout` setting
 * cleanup / other improvements
-    - Added `ProxyResponse` typed dataclass as the return contract for `map_route()` and `map_database_route()`
-    - Added test suite (38 tests covering proxy pipeline and cookie injection)
-    - Replaced stale `config/` templates with clean `example_api_dock_config/` (removed unimplemented features; real advanced features kept as commented examples)
-    - Removed broken root `__init__.py` that caused pytest import conflicts
-    - Bumped cryptography dependency to >=48.0.0,<49.0.0
+    - Added `PreparedRequest` dataclass and split route validation/resolution into `RouteMapper.prepare_remote_request()`; the FastAPI adapter issues the streaming HTTP call
+    - `map_route()` (buffered) retained for the Flask/sync path
+    - Added streaming test coverage (`TestStreamUpstream`, plus `prepare_remote_request` and streaming-header tests) — 53 tests total
 EOF
 )"
 
