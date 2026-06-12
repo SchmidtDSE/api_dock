@@ -20,9 +20,11 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+from fastapi.responses import StreamingResponse
 
+from api_dock.fast_api import _filter_streaming_response_headers, _stream_upstream
 from api_dock.route_mapper import _filter_response_headers, HOP_BY_HOP_HEADERS, RouteMapper
-from api_dock.types import ProxyResponse
+from api_dock.types import PreparedRequest, ProxyResponse
 
 
 #
@@ -398,3 +400,239 @@ class TestApiDockLevelErrors:
 
         assert result.status_code == 502
         assert result.error_message is not None
+
+
+class TestStreamingResponseHeaders:
+    """Tests for _filter_streaming_response_headers — the streaming-path header filter."""
+
+    def test_keeps_content_encoding(self):
+        """Content-Encoding must survive so the client can decompress raw bytes."""
+        raw = {
+            "content-encoding": "gzip",
+            "cache-control": "max-age=300",
+            "content-type": "application/json",
+            "content-length": "1234",
+        }
+        filtered = _filter_streaming_response_headers(raw)
+        assert "content-encoding" in filtered
+        assert filtered["content-encoding"] == "gzip"
+
+    def test_strips_content_length(self):
+        """Content-Length must be stripped — streaming lets Starlette compute it."""
+        raw = {"content-length": "5000", "content-encoding": "gzip"}
+        filtered = _filter_streaming_response_headers(raw)
+        assert "content-length" not in filtered
+
+    def test_strips_connection_and_transfer_encoding(self):
+        raw = {
+            "connection": "keep-alive",
+            "transfer-encoding": "chunked",
+            "cache-control": "no-cache",
+        }
+        filtered = _filter_streaming_response_headers(raw)
+        assert "connection" not in filtered
+        assert "transfer-encoding" not in filtered
+        assert filtered.get("cache-control") == "no-cache"
+
+    def test_strips_content_type(self):
+        """Content-Type is passed separately as media_type to StreamingResponse."""
+        raw = {"content-type": "application/octet-stream", "x-custom": "value"}
+        filtered = _filter_streaming_response_headers(raw)
+        assert "content-type" not in filtered
+        assert filtered.get("x-custom") == "value"
+
+    def test_empty_headers(self):
+        assert _filter_streaming_response_headers({}) == {}
+
+
+class TestPrepareRemoteRequest:
+    """Tests for RouteMapper.prepare_remote_request()."""
+
+    def _make_route_mapper(self, settings=None):
+        rm = RouteMapper.__new__(RouteMapper)
+        rm.remote_names = ["core"]
+        rm.database_names = []
+        rm.config = {
+            "remotes": ["core"],
+            "settings": settings or {},
+        }
+        rm.settings = settings or {}
+        return rm
+
+    def _patch_config(self):
+        remote_cfg = {"url": "https://api.example.com", "name": "core"}
+        return [
+            patch("api_dock.route_mapper.is_versioned_remote", return_value=False),
+            patch("api_dock.route_mapper.is_route_allowed", return_value=True),
+            patch("api_dock.route_mapper.find_remote_config", return_value=remote_cfg),
+            patch(
+                "api_dock.route_mapper.filter_remote_query_params",
+                side_effect=lambda qp, *a, **kw: qp,
+            ),
+            patch("api_dock.route_mapper.find_route_mapping", return_value=None),
+            patch("api_dock.route_mapper.filter_cookies_by_config", return_value={}),
+        ]
+
+    @pytest.mark.anyio
+    async def test_returns_prepared_request_on_success(self):
+        """Successful validation returns a PreparedRequest, not a ProxyResponse."""
+        rm = self._make_route_mapper()
+        patches = self._patch_config()
+        for p in patches:
+            p.start()
+        try:
+            result = await rm.prepare_remote_request("core", "detections/", "GET",
+                                                     query_params={"confidence": ".5"})
+        finally:
+            for p in patches:
+                p.stop()
+
+        assert isinstance(result, PreparedRequest)
+        assert result.url == "https://api.example.com/detections/"
+        assert result.method == "GET"
+        assert result.follow_redirects is True
+
+    @pytest.mark.anyio
+    async def test_returns_error_for_unknown_remote(self):
+        rm = self._make_route_mapper()
+        result = await rm.prepare_remote_request("nonexistent", "data/", "GET")
+        assert isinstance(result, ProxyResponse)
+        assert result.status_code == 404
+        assert result.error_message is not None
+
+    @pytest.mark.anyio
+    async def test_follow_redirects_false_propagated(self):
+        rm = self._make_route_mapper(settings={"follow_redirects": False})
+        patches = self._patch_config()
+        for p in patches:
+            p.start()
+        try:
+            result = await rm.prepare_remote_request("core", "files/clip.wav", "GET")
+        finally:
+            for p in patches:
+                p.stop()
+
+        assert isinstance(result, PreparedRequest)
+        assert result.follow_redirects is False
+
+
+class TestStreamUpstream:
+    """Integration tests for _stream_upstream — the streaming proxy path.
+
+    These exercise the actual fix for the two reported issues: large responses
+    are streamed (not buffered) and compressed responses keep their
+    Content-Encoding header because aiter_raw() forwards raw bytes.
+    """
+
+    def _make_prepared(self, follow_redirects=True):
+        return PreparedRequest(
+            url="https://api.example.com/detections/",
+            method="GET",
+            headers={},
+            params={},
+            cookies={},
+            body=None,
+            follow_redirects=follow_redirects,
+        )
+
+    def _make_streaming_client(self, status_code, chunks, headers):
+        """Build a mock httpx.AsyncClient whose send(stream=True) streams chunks."""
+        upstream = MagicMock()
+        upstream.status_code = status_code
+        upstream.headers = httpx.Headers(headers)
+
+        async def _aiter_raw():
+            for chunk in chunks:
+                yield chunk
+
+        upstream.aiter_raw = _aiter_raw
+        upstream.aclose = AsyncMock()
+
+        client = MagicMock()
+        client.build_request = MagicMock(return_value=MagicMock())
+        client.send = AsyncMock(return_value=upstream)
+        client.aclose = AsyncMock()
+        return client
+
+    @pytest.mark.anyio
+    async def test_content_encoding_preserved_and_body_streamed(self):
+        """Issue 1: raw gzip bytes stream through and Content-Encoding survives."""
+        gzip_chunks = [b"\x1f\x8b\x08\x00", b"raw-compressed-payload"]
+        client = self._make_streaming_client(
+            200,
+            gzip_chunks,
+            {
+                "content-type": "application/json",
+                "content-encoding": "gzip",
+                "cache-control": "max-age=60",
+            },
+        )
+        with patch("api_dock.fast_api.httpx.AsyncClient", return_value=client):
+            response = await _stream_upstream(self._make_prepared())
+
+        assert isinstance(response, StreamingResponse)
+        assert response.status_code == 200
+        assert response.headers.get("content-encoding") == "gzip"
+        assert response.headers.get("cache-control") == "max-age=60"
+        assert response.media_type == "application/json"
+
+        body = b"".join([chunk async for chunk in response.body_iterator])
+        assert body == b"".join(gzip_chunks)
+        client.aclose.assert_awaited()
+
+    @pytest.mark.anyio
+    async def test_large_body_streamed_in_chunks(self):
+        """Issue 2: a large body is yielded chunk-by-chunk, never buffered whole."""
+        chunks = [b"x" * 65536 for _ in range(16)]  # 1 MiB across 16 chunks
+        client = self._make_streaming_client(
+            200, chunks, {"content-type": "application/octet-stream"}
+        )
+        with patch("api_dock.fast_api.httpx.AsyncClient", return_value=client):
+            response = await _stream_upstream(self._make_prepared())
+
+        received = [chunk async for chunk in response.body_iterator]
+        assert len(received) == 16
+        assert b"".join(received) == b"".join(chunks)
+
+    @pytest.mark.anyio
+    async def test_status_and_location_passed_through(self):
+        """A 302 redirect (follow_redirects=False) forwards status + Location."""
+        location = "https://s3.amazonaws.com/bucket/key?X-Amz-Signature=abc"
+        client = self._make_streaming_client(
+            302, [b""], {"content-type": "text/html", "location": location}
+        )
+        with patch("api_dock.fast_api.httpx.AsyncClient", return_value=client):
+            response = await _stream_upstream(self._make_prepared(follow_redirects=False))
+
+        assert response.status_code == 302
+        assert response.headers.get("location") == location
+        # Drain the body so the generator's finally runs and closes the client.
+        _ = [chunk async for chunk in response.body_iterator]
+        client.aclose.assert_awaited()
+
+    @pytest.mark.anyio
+    async def test_missing_content_type_defaults_to_octet_stream(self):
+        """Upstream without a Content-Type falls back to application/octet-stream."""
+        client = self._make_streaming_client(200, [b"data"], {})
+        with patch("api_dock.fast_api.httpx.AsyncClient", return_value=client):
+            response = await _stream_upstream(self._make_prepared())
+
+        assert response.media_type == "application/octet-stream"
+        _ = [chunk async for chunk in response.body_iterator]
+
+    @pytest.mark.anyio
+    async def test_connection_error_returns_502(self):
+        """A connection failure before any bytes returns a plain 502 JSON Response."""
+        client = MagicMock()
+        client.build_request = MagicMock(return_value=MagicMock())
+        client.send = AsyncMock(side_effect=httpx.ConnectError("refused"))
+        client.aclose = AsyncMock()
+        with patch("api_dock.fast_api.httpx.AsyncClient", return_value=client):
+            response = await _stream_upstream(self._make_prepared())
+
+        assert not isinstance(response, StreamingResponse)
+        assert response.status_code == 502
+        assert response.media_type == "application/json"
+        parsed = json.loads(response.body)
+        assert "error" in parsed
+        client.aclose.assert_awaited()
