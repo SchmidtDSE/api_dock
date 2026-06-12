@@ -35,6 +35,8 @@ class PreparedRequest:
         cookies: Filtered cookies to forward.
         body: Request body bytes, or None for non-body methods.
         follow_redirects: Whether httpx should follow 3xx automatically.
+        timeout: httpx request timeout in seconds, or None for no timeout.
+            Resolved from the `timeout` setting (default 10s).
     """
 
     url: str
@@ -44,6 +46,7 @@ class PreparedRequest:
     cookies: Dict[str, str]
     body: Optional[bytes]
     follow_redirects: bool
+    timeout: Optional[float] = None
 
 
 @dataclass
