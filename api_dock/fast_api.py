@@ -210,7 +210,9 @@ async def _stream_upstream(prepared: PreparedRequest) -> Response:
         StreamingResponse on successful upstream connection,
         or plain Response on 502/500 if the connection cannot be established.
     """
-    client = httpx.AsyncClient(follow_redirects=prepared.follow_redirects)
+    client = httpx.AsyncClient(
+        follow_redirects=prepared.follow_redirects, timeout=prepared.timeout
+    )
     req = client.build_request(
         method=prepared.method,
         url=prepared.url,
