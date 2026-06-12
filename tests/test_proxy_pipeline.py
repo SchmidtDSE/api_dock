@@ -23,7 +23,13 @@ import httpx
 from fastapi.responses import StreamingResponse
 
 from api_dock.fast_api import _filter_streaming_response_headers, _stream_upstream
-from api_dock.route_mapper import _filter_response_headers, HOP_BY_HOP_HEADERS, RouteMapper
+from api_dock.route_mapper import (
+    _filter_response_headers,
+    _resolve_timeout,
+    DEFAULT_TIMEOUT,
+    HOP_BY_HOP_HEADERS,
+    RouteMapper,
+)
 from api_dock.types import PreparedRequest, ProxyResponse
 
 
@@ -491,6 +497,7 @@ class TestPrepareRemoteRequest:
         assert result.url == "https://api.example.com/detections/"
         assert result.method == "GET"
         assert result.follow_redirects is True
+        assert result.timeout == DEFAULT_TIMEOUT
 
     @pytest.mark.anyio
     async def test_returns_error_for_unknown_remote(self):
@@ -514,6 +521,53 @@ class TestPrepareRemoteRequest:
 
         assert isinstance(result, PreparedRequest)
         assert result.follow_redirects is False
+
+    @pytest.mark.anyio
+    async def test_timeout_setting_propagated(self):
+        rm = self._make_route_mapper(settings={"timeout": 30})
+        patches = self._patch_config()
+        for p in patches:
+            p.start()
+        try:
+            result = await rm.prepare_remote_request("core", "data/", "GET")
+        finally:
+            for p in patches:
+                p.stop()
+
+        assert isinstance(result, PreparedRequest)
+        assert result.timeout == 30.0
+
+    @pytest.mark.anyio
+    async def test_timeout_null_disables(self):
+        """A null timeout setting disables the timeout (httpx timeout=None)."""
+        rm = self._make_route_mapper(settings={"timeout": None})
+        patches = self._patch_config()
+        for p in patches:
+            p.start()
+        try:
+            result = await rm.prepare_remote_request("core", "data/", "GET")
+        finally:
+            for p in patches:
+                p.stop()
+
+        assert isinstance(result, PreparedRequest)
+        assert result.timeout is None
+
+
+class TestResolveTimeout:
+    """Tests for _resolve_timeout — config value → httpx timeout seconds."""
+
+    def test_default_passthrough(self):
+        assert _resolve_timeout(DEFAULT_TIMEOUT) == DEFAULT_TIMEOUT
+
+    def test_integer_coerced_to_float(self):
+        assert _resolve_timeout(30) == 30.0
+
+    def test_none_disables(self):
+        assert _resolve_timeout(None) is None
+
+    def test_false_disables(self):
+        assert _resolve_timeout(False) is None
 
 
 class TestStreamUpstream:
