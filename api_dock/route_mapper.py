@@ -13,14 +13,14 @@ License: BSD 3-Clause
 #
 import json
 import httpx
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from api_dock.auth import validate_authentication
 from api_dock.config import filter_cookies_by_config, filter_remote_query_params, find_remote_config, find_route_mapping, get_authentication_config, get_database_names, get_remote_names, get_remote_versions, get_settings, is_route_allowed, is_versioned_remote, load_main_config, merge_inherited_config, resolve_latest_version
 from api_dock.database_config import find_database_route, get_database_versions, is_versioned_database, load_database_config, merge_query_params, resolve_latest_database_version
 from api_dock.sql_builder import build_sql_query, extract_path_parameters, process_query_parameters
 from api_dock.storage_auth import detect_required_backends, extract_table_metadata_by_backend, extract_table_uris, setup_storage_authentication
-from api_dock.types import ProxyResponse
+from api_dock.types import PreparedRequest, ProxyResponse
 
 
 #
@@ -91,24 +91,25 @@ class RouteMapper:
         }
         return metadata
 
-    async def map_route(self,
+    async def prepare_remote_request(
+            self,
             remote_name: str,
             path: str,
             method: str,
             headers: Optional[Dict[str, str]] = None,
             body: Optional[bytes] = None,
             query_params: Optional[Dict[str, str]] = None,
-            cookies: Optional[Dict[str, str]] = None) -> ProxyResponse:
-        """Map a request to a remote API and return the upstream response.
+            cookies: Optional[Dict[str, str]] = None) -> Union[ProxyResponse, PreparedRequest]:
+        """Validate and resolve a remote request without executing the HTTP call.
 
-        Upstream responses — including 4xx and 5xx — are passed through
-        verbatim with their original status code, body, and headers. Only
-        api_dock-level errors (unknown remote, blocked route, missing config)
-        produce api_dock-generated error responses.
+        Performs all route validation, version resolution, config loading,
+        URL construction, query-parameter filtering, and cookie filtering.
+        Returns either an error ProxyResponse (unknown remote, blocked route,
+        missing config) or a PreparedRequest ready for execution.
 
-        When follow_redirects is False in settings, 3xx responses are returned
-        to the client (with their Location header) rather than followed. This
-        is the correct path for S3 presigned URL redirects.
+        Callers that need streaming behaviour (FastAPI) should call this method
+        directly and issue the httpx request themselves. map_route() calls this
+        internally and adds the buffered HTTP call on top.
 
         Args:
             remote_name: Name of the remote API.
@@ -120,9 +121,7 @@ class RouteMapper:
             cookies: Cookie values from request.
 
         Returns:
-            ProxyResponse with status code, raw content bytes, content type,
-            and forwarded upstream headers. error_message is set only for
-            api_dock-level errors, not upstream errors.
+            ProxyResponse for api_dock-level errors, or PreparedRequest on success.
         """
         if remote_name not in self.remote_names:
             return _error_response(404, f"Remote '{remote_name}' not found")
@@ -168,7 +167,7 @@ class RouteMapper:
         if not remote_url:
             return _error_response(500, f"No URL configured for remote '{remote_name}'")
 
-        query_params = filter_remote_query_params(
+        filtered_query_params = filter_remote_query_params(
             query_params or {}, actual_path, method, remote_config
         )
 
@@ -193,15 +192,76 @@ class RouteMapper:
         # When True (default), httpx follows the redirect transparently.
         follow_redirects = self.settings.get("follow_redirects", True)
 
-        async with httpx.AsyncClient(follow_redirects=follow_redirects) as client:
+        return PreparedRequest(
+            url=full_url,
+            method=method,
+            headers=headers or {},
+            params=filtered_query_params,
+            cookies=filtered_cookies,
+            body=body,
+            follow_redirects=follow_redirects,
+        )
+
+    async def map_route(self,
+            remote_name: str,
+            path: str,
+            method: str,
+            headers: Optional[Dict[str, str]] = None,
+            body: Optional[bytes] = None,
+            query_params: Optional[Dict[str, str]] = None,
+            cookies: Optional[Dict[str, str]] = None) -> ProxyResponse:
+        """Map a request to a remote API and return the upstream response.
+
+        Delegates route validation and URL resolution to prepare_remote_request(),
+        then issues a buffered httpx request. Upstream responses — including 4xx
+        and 5xx — are passed through verbatim with their original status code,
+        body, and headers. Only api_dock-level errors (unknown remote, blocked
+        route, missing config) produce api_dock-generated error responses.
+
+        When follow_redirects is False in settings, 3xx responses are returned
+        to the client (with their Location header) rather than followed. This
+        is the correct path for S3 presigned URL redirects.
+
+        Note: This method buffers the entire upstream response body in memory.
+        For large responses, callers that want streaming should use
+        prepare_remote_request() directly and issue the httpx call themselves.
+
+        Args:
+            remote_name: Name of the remote API.
+            path: The path to proxy to the remote API.
+            method: HTTP method (GET, POST, etc.).
+            headers: Request headers dictionary.
+            body: Request body bytes.
+            query_params: Query parameters dictionary.
+            cookies: Cookie values from request.
+
+        Returns:
+            ProxyResponse with status code, raw content bytes, content type,
+            and forwarded upstream headers. error_message is set only for
+            api_dock-level errors, not upstream errors.
+        """
+        prepared = await self.prepare_remote_request(
+            remote_name=remote_name,
+            path=path,
+            method=method,
+            headers=headers,
+            body=body,
+            query_params=query_params,
+            cookies=cookies,
+        )
+
+        if isinstance(prepared, ProxyResponse):
+            return prepared
+
+        async with httpx.AsyncClient(follow_redirects=prepared.follow_redirects) as client:
             try:
                 response = await client.request(
-                    method=method,
-                    url=full_url,
-                    headers=headers or {},
-                    content=body,
-                    params=query_params,
-                    cookies=filtered_cookies
+                    method=prepared.method,
+                    url=prepared.url,
+                    headers=prepared.headers,
+                    content=prepared.body,
+                    params=prepared.params,
+                    cookies=prepared.cookies,
                 )
 
                 content_type = response.headers.get("content-type", "application/octet-stream")
