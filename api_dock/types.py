@@ -19,6 +19,34 @@ from typing import Dict, Optional
 # PUBLIC
 #
 @dataclass
+class PreparedRequest:
+    """Resolved upstream request info, ready for execution.
+
+    Returned by RouteMapper.prepare_remote_request() when all validation passes.
+    Contains everything needed to issue the upstream HTTP call. All values are
+    already filtered and resolved: URL is fully built, query params are filtered,
+    cookies are filtered, and follow_redirects is resolved from settings.
+
+    Attributes:
+        url: Fully resolved upstream URL including path.
+        method: HTTP method string (GET, POST, etc.).
+        headers: Request headers to forward upstream.
+        params: Filtered query parameters to forward.
+        cookies: Filtered cookies to forward.
+        body: Request body bytes, or None for non-body methods.
+        follow_redirects: Whether httpx should follow 3xx automatically.
+    """
+
+    url: str
+    method: str
+    headers: Dict[str, str]
+    params: Dict[str, str]
+    cookies: Dict[str, str]
+    body: Optional[bytes]
+    follow_redirects: bool
+
+
+@dataclass
 class ProxyResponse:
     """Complete response from a proxied upstream request.
 
