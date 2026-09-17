@@ -17,7 +17,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from typing import Any, Dict, Optional
 
-from api_dock.route_mapper import HOP_BY_HOP_HEADERS, RouteMapper
+from api_dock.route_mapper import collect_multi_query_params, HOP_BY_HOP_HEADERS, RouteMapper
 from api_dock.types import PreparedRequest, ProxyResponse
 
 
@@ -116,6 +116,9 @@ def _add_remote_routes(app: FastAPI, route_mapper: RouteMapper) -> None:
                 path=path,
                 query_params=dict(request.query_params),
                 cookies=cookies,
+                multi_query_params=collect_multi_query_params(
+                    request.query_params.multi_items()
+                ),
             )
             return Response(
                 content=proxy_resp.content,
