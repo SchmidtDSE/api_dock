@@ -553,6 +553,45 @@ class TestPrepareRemoteRequest:
         assert isinstance(result, PreparedRequest)
         assert result.timeout is None
 
+    @pytest.mark.anyio
+    async def test_multi_query_params_preserved(self):
+        """Repeated query keys are forwarded as a list, not collapsed."""
+        rm = self._make_route_mapper()
+        patches = self._patch_config()
+        for p in patches:
+            p.start()
+        try:
+            result = await rm.prepare_remote_request(
+                "core", "detections/", "GET",
+                query_params={"recording": "1"},
+                multi_query_params={"recording": ["4", "1"], "scientific_name": ["Gryllus fultoni"]},
+            )
+        finally:
+            for p in patches:
+                p.stop()
+
+        assert isinstance(result, PreparedRequest)
+        assert result.params == {"recording": ["4", "1"], "scientific_name": ["Gryllus fultoni"]}
+
+    @pytest.mark.anyio
+    async def test_falls_back_to_single_query_params(self):
+        """Without a multivalue mapping, the collapsed single-value dict is used."""
+        rm = self._make_route_mapper()
+        patches = self._patch_config()
+        for p in patches:
+            p.start()
+        try:
+            result = await rm.prepare_remote_request(
+                "core", "detections/", "GET",
+                query_params={"recording": "1"},
+            )
+        finally:
+            for p in patches:
+                p.stop()
+
+        assert isinstance(result, PreparedRequest)
+        assert result.params == {"recording": "1"}
+
 
 class TestResolveTimeout:
     """Tests for _resolve_timeout — config value → httpx timeout seconds."""
