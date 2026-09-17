@@ -139,6 +139,9 @@ def _add_remote_routes(app: FastAPI, route_mapper: RouteMapper) -> None:
             body=body,
             query_params=dict(request.query_params),
             cookies=cookies,
+            multi_query_params=collect_multi_query_params(
+                request.query_params.multi_items()
+            ),
         )
 
         if isinstance(prepared, ProxyResponse):
