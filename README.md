@@ -427,6 +427,34 @@ GET /db/users
 # SQL: SELECT * FROM users WHERE height < 200
 ```
 
+### Repeated Parameters with `multivalue_sql`
+
+A query parameter key can appear more than once in the URL (e.g. `?recording_id=1&recording_id=4`). Add a `multivalue_sql` template alongside `sql` to handle this: when **more than one** value is passed for the key, `multivalue_sql` is used instead of `sql`, and `{{param}}` expands to a parenthesized, quote-escaped SQL value list suitable for an `IN` clause.
+
+Behavior is unchanged when `multivalue_sql` is absent, and when only a single value is passed the normal `sql` template is used.
+
+```yaml
+routes:
+  - route: detections
+    sql: SELECT [[detections]].* FROM [[detections]]
+    query_params:
+      - recording_id:
+          sql: "[[detections]].recording_id = {{recording_id}}"            # single value
+          multivalue_sql: "[[detections]].recording_id IN {{recording_id}}"  # 2+ values
+      - scientific_name:
+          sql: "[[detections]].scientific_name = '{{scientific_name}}'"
+```
+
+```bash
+GET /db/detections?recording_id=4&scientific_name=Gryllus%20fultoni
+# SQL: SELECT detections.* FROM detections
+#      WHERE detections.recording_id = '4' AND detections.scientific_name = 'Gryllus fultoni'
+
+GET /db/detections?recording_id=4&recording_id=1&scientific_name=Gryllus%20fultoni
+# SQL: SELECT detections.* FROM detections
+#      WHERE detections.recording_id IN ('4', '1') AND detections.scientific_name = 'Gryllus fultoni'
+```
+
 ### Sorting and Pagination with `sql_append`
 
 Use `sql_append` to append clauses *after* the WHERE clause — for `ORDER BY`, `LIMIT`, `OFFSET`, etc. Fragments are appended in the order they appear in the YAML config, so **the YAML order must match valid SQL order** (ORDER BY before LIMIT before OFFSET).
