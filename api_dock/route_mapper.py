@@ -124,7 +124,9 @@ class RouteMapper:
             headers: Optional[Dict[str, str]] = None,
             body: Optional[bytes] = None,
             query_params: Optional[Dict[str, str]] = None,
-            cookies: Optional[Dict[str, str]] = None) -> Union[ProxyResponse, PreparedRequest]:
+            cookies: Optional[Dict[str, str]] = None,
+            multi_query_params: Optional[Dict[str, List[str]]] = None
+            ) -> Union[ProxyResponse, PreparedRequest]:
         """Validate and resolve a remote request without executing the HTTP call.
 
         Performs all route validation, version resolution, config loading,
@@ -142,8 +144,12 @@ class RouteMapper:
             method: HTTP method (GET, POST, etc.).
             headers: Request headers dictionary.
             body: Request body bytes.
-            query_params: Query parameters dictionary.
+            query_params: Query parameters dictionary (single value per key).
             cookies: Cookie values from request.
+            multi_query_params: Optional mapping of query parameter names to the
+                full list of values received, preserving keys repeated in the URL
+                (e.g. ?id=1&id=2). When provided, it is used as the source for
+                the forwarded params so repeated keys reach the upstream intact.
 
         Returns:
             ProxyResponse for api_dock-level errors, or PreparedRequest on success.
@@ -192,8 +198,11 @@ class RouteMapper:
         if not remote_url:
             return _error_response(500, f"No URL configured for remote '{remote_name}'")
 
+        # Prefer the multivalue mapping so repeated keys (?id=1&id=2) reach the
+        # upstream intact; fall back to the collapsed single-value dict.
+        source_query_params = multi_query_params if multi_query_params else (query_params or {})
         filtered_query_params = filter_remote_query_params(
-            query_params or {}, actual_path, method, remote_config
+            source_query_params, actual_path, method, remote_config
         )
 
         filtered_cookies = filter_cookies_by_config(cookies or {}, remote_config)
@@ -236,7 +245,8 @@ class RouteMapper:
             headers: Optional[Dict[str, str]] = None,
             body: Optional[bytes] = None,
             query_params: Optional[Dict[str, str]] = None,
-            cookies: Optional[Dict[str, str]] = None) -> ProxyResponse:
+            cookies: Optional[Dict[str, str]] = None,
+            multi_query_params: Optional[Dict[str, List[str]]] = None) -> ProxyResponse:
         """Map a request to a remote API and return the upstream response.
 
         Delegates route validation and URL resolution to prepare_remote_request(),
@@ -275,6 +285,7 @@ class RouteMapper:
             body=body,
             query_params=query_params,
             cookies=cookies,
+            multi_query_params=multi_query_params,
         )
 
         if isinstance(prepared, ProxyResponse):
@@ -495,7 +506,8 @@ class RouteMapper:
                       headers: Optional[Dict[str, str]] = None,
                       body: Optional[bytes] = None,
                       query_params: Optional[Dict[str, str]] = None,
-                      cookies: Optional[Dict[str, str]] = None) -> ProxyResponse:
+                      cookies: Optional[Dict[str, str]] = None,
+                      multi_query_params: Optional[Dict[str, List[str]]] = None) -> ProxyResponse:
         """Synchronous version of map_route for frameworks that don't support async.
 
         Args:
@@ -506,6 +518,8 @@ class RouteMapper:
             body: Request body bytes.
             query_params: Query parameters dictionary.
             cookies: Cookie values from request.
+            multi_query_params: Optional mapping of query parameter names to the
+                full list of values received, preserving repeated keys.
 
         Returns:
             ProxyResponse — same contract as map_route.
@@ -516,7 +530,10 @@ class RouteMapper:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             result = loop.run_until_complete(
-                self.map_route(remote_name, path, method, headers, body, query_params, cookies)
+                self.map_route(
+                    remote_name, path, method, headers, body, query_params, cookies,
+                    multi_query_params
+                )
             )
             loop.close()
             return result
