@@ -15,7 +15,7 @@ import asyncio
 from flask import Flask, jsonify, request, Response as FlaskResponse
 from typing import Any, Dict, Optional
 
-from api_dock.route_mapper import RouteMapper
+from api_dock.route_mapper import collect_multi_query_params, RouteMapper
 
 
 #
@@ -126,6 +126,9 @@ def _handle_proxy(route_mapper: RouteMapper, remote_name: str, path: str) -> Fla
                 path=path,
                 query_params=dict(request.args),
                 cookies=cookies,
+                multi_query_params=collect_multi_query_params(
+                    request.args.items(multi=True)
+                ),
             )
         )
     else:
