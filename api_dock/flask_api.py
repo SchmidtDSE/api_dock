@@ -144,6 +144,9 @@ def _handle_proxy(route_mapper: RouteMapper, remote_name: str, path: str) -> Fla
             body=body,
             query_params=dict(request.args),
             cookies=cookies,
+            multi_query_params=collect_multi_query_params(
+                request.args.items(multi=True)
+            ),
         )
 
     response = FlaskResponse(
