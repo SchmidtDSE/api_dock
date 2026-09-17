@@ -12,7 +12,7 @@ License: BSD 3-Clause
 # IMPORTS
 #
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Union
 
 
 #
@@ -31,7 +31,8 @@ class PreparedRequest:
         url: Fully resolved upstream URL including path.
         method: HTTP method string (GET, POST, etc.).
         headers: Request headers to forward upstream.
-        params: Filtered query parameters to forward.
+        params: Filtered query parameters to forward. A value may be a list to
+            forward a repeated key (e.g. ?id=1&id=2).
         cookies: Filtered cookies to forward.
         body: Request body bytes, or None for non-body methods.
         follow_redirects: Whether httpx should follow 3xx automatically.
@@ -42,7 +43,7 @@ class PreparedRequest:
     url: str
     method: str
     headers: Dict[str, str]
-    params: Dict[str, str]
+    params: Dict[str, Union[str, List[str]]]
     cookies: Dict[str, str]
     body: Optional[bytes]
     follow_redirects: bool
