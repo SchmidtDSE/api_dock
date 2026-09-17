@@ -20,6 +20,13 @@ routes:
       - category:
           sql: "[[items]].category = '{{category}}'"
 
+      # Repeated param — add multivalue_sql to support ?id=1&id=2. When more than
+      # one value is passed, multivalue_sql is used and {{id}} expands to a
+      # parenthesized value list (e.g. ('1', '2')) for use with IN.
+      - id:
+          sql: "[[items]].id = {{id}}"
+          multivalue_sql: "[[items]].id IN {{id}}"
+
       # Sorting — sql_append clauses are appended after the WHERE clause in YAML order.
       - sort:
           sql_append: ORDER BY {{sort}} {{direction}}
