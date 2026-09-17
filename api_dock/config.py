@@ -670,25 +670,29 @@ def find_route_mapping(full_route: str, method: str, remote_config: Dict[str, An
 
 
 def filter_remote_query_params(
-    query_params: Dict[str, str],
+    query_params: Dict[str, Any],
     route: str,
     method: str,
     remote_config: Dict[str, Any]
-) -> Dict[str, str]:
+) -> Dict[str, Any]:
     """Filter query parameters based on remote config settings.
 
     Checks for a route-level query_params setting first, then falls back
     to the top-level remote config query_params. If neither exists, all
     params are passed through unchanged (backward compatible).
 
+    Filtering is by key only, so values may be strings or lists of strings
+    (the latter forwarding repeated keys such as ?id=1&id=2 intact).
+
     Args:
-        query_params: Original query parameters from the request.
+        query_params: Original query parameters from the request. Values may be
+            strings or lists of strings.
         route: The actual route path (e.g., "users/123").
         method: HTTP method (e.g., "GET", "POST").
         remote_config: Remote configuration dictionary.
 
     Returns:
-        Filtered query parameters dictionary.
+        Filtered query parameters dictionary (value types preserved).
     """
     routes = remote_config.get("routes", [])
 
