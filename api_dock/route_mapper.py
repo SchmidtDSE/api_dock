@@ -13,7 +13,7 @@ License: BSD 3-Clause
 #
 import json
 import httpx
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 from api_dock.auth import validate_authentication
 from api_dock.config import filter_cookies_by_config, filter_remote_query_params, find_remote_config, find_route_mapping, get_authentication_config, get_database_names, get_remote_names, get_remote_versions, get_settings, is_route_allowed, is_versioned_remote, load_main_config, merge_inherited_config, resolve_latest_version
@@ -55,6 +55,27 @@ HOP_BY_HOP_HEADERS: frozenset = frozenset({
 #
 # PUBLIC
 #
+def collect_multi_query_params(items: Iterable[Tuple[str, str]]) -> Dict[str, List[str]]:
+    """Group repeated query string pairs into a name-to-value-list mapping.
+
+    Preserves every value for keys that appear more than once in the URL
+    (e.g. ?id=1&id=2), which a flat dict would collapse to the last value.
+
+    Args:
+        items: Iterable of (key, value) pairs, in URL order. FastAPI provides
+            these via ``request.query_params.multi_items()`` and Flask via
+            ``request.args.items(multi=True)``.
+
+    Returns:
+        Dictionary mapping each query parameter name to the list of values
+        received for it, in URL order.
+    """
+    grouped: Dict[str, List[str]] = {}
+    for key, value in items:
+        grouped.setdefault(key, []).append(value)
+    return grouped
+
+
 class RouteMapper:
     """Standalone route mapper for proxying requests to remote APIs.
 
@@ -292,14 +313,19 @@ class RouteMapper:
             database_name: str,
             path: str,
             query_params: Optional[Dict[str, str]] = None,
-            cookies: Optional[Dict[str, str]] = None) -> ProxyResponse:
+            cookies: Optional[Dict[str, str]] = None,
+            multi_query_params: Optional[Dict[str, List[str]]] = None) -> ProxyResponse:
         """Execute a SQL query for a database route and return results as JSON.
 
         Args:
             database_name: Name of the database.
             path: The path to match against database routes.
-            query_params: Optional dictionary of query parameters from URL.
+            query_params: Optional dictionary of query parameters from URL
+                (single value per key; last value wins for repeated keys).
             cookies: Optional dictionary of cookie values from request.
+            multi_query_params: Optional dictionary mapping query parameter names
+                to the full list of values received, preserving keys repeated in
+                the URL (e.g. ?id=1&id=2). Enables ``multivalue_sql`` templates.
 
         Returns:
             ProxyResponse with JSON content. error_message is set on failure.
@@ -308,6 +334,8 @@ class RouteMapper:
             query_params = {}
         if cookies is None:
             cookies = {}
+        if multi_query_params is None:
+            multi_query_params = {}
 
         if database_name not in self.database_names:
             return _error_response(404, f"Database '{database_name}' not found")
@@ -392,7 +420,10 @@ class RouteMapper:
             return _error_response(500, "Query parameter processing error")
 
         try:
-            sql_query = build_sql_query(route_config, database_config, path_params, query_params, filtered_cookies)
+            sql_query = build_sql_query(
+                route_config, database_config, path_params, query_params,
+                filtered_cookies, multi_query_params
+            )
         except ValueError:
             return _error_response(500, "SQL query error")
 
