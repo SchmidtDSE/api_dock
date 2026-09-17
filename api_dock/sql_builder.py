@@ -25,7 +25,8 @@ def build_sql_query(
         database_config: Dict[str, Any],
         path_params: Optional[Dict[str, str]] = None,
         query_params: Optional[Dict[str, str]] = None,
-        cookies: Optional[Dict[str, str]] = None) -> str:
+        cookies: Optional[Dict[str, str]] = None,
+        multi_query_params: Optional[Dict[str, List[str]]] = None) -> str:
     """Build SQL query with fragment-based WHERE clause support.
 
     Args:
@@ -34,6 +35,10 @@ def build_sql_query(
         path_params: Dictionary of path parameters extracted from the route.
         query_params: Dictionary of query parameters from URL.
         cookies: Dictionary of cookie values from request.
+        multi_query_params: Dictionary mapping query parameter names to the full
+            list of values received (for keys repeated in the URL). When a param
+            has a ``multivalue_sql`` template and more than one value was passed,
+            that template is used instead of ``sql``.
 
     Returns:
         Complete SQL query with all substitutions applied.
@@ -47,6 +52,8 @@ def build_sql_query(
         query_params = {}
     if cookies is None:
         cookies = {}
+    if multi_query_params is None:
+        multi_query_params = {}
 
     # Get the base SQL template from route config
     sql_template = route_config.get('sql', '')
@@ -74,7 +81,9 @@ def build_sql_query(
     all_params.update(cookies_params)
 
     # Build WHERE clause fragments from query parameters
-    where_fragments = build_where_clause_from_params(route_config, query_params, path_params)
+    where_fragments = build_where_clause_from_params(
+        route_config, query_params, path_params, multi_query_params
+    )
     # Expand [[table_name]] references in WHERE fragments (same syntax as main sql)
     where_fragments = [_substitute_table_references(f, database_config) for f in where_fragments]
 
@@ -244,7 +253,8 @@ def process_query_parameters(
 def build_where_clause_from_params(
         route_config: Dict[str, Any],
         query_params: Dict[str, str],
-        path_params: Dict[str, str]
+        path_params: Dict[str, str],
+        multi_query_params: Optional[Dict[str, List[str]]] = None
 ) -> List[str]:
     """Build WHERE clause fragments from parameter configurations.
 
@@ -252,10 +262,18 @@ def build_where_clause_from_params(
         route_config: Route configuration dictionary with query_params section.
         query_params: Dictionary of query parameters from URL.
         path_params: Dictionary of path parameters.
+        multi_query_params: Dictionary mapping query parameter names to the full
+            list of values received. When a param has a ``multivalue_sql``
+            template and more than one value was passed for it, that template is
+            used (with ``{{param}}`` expanded to a parenthesized SQL value list)
+            instead of the single-value ``sql`` template.
 
     Returns:
         List of SQL WHERE conditions to be joined with AND
     """
+    if multi_query_params is None:
+        multi_query_params = {}
+
     query_param_configs = route_config.get('query_params', [])
     where_fragments = []
 
@@ -275,8 +293,28 @@ def build_where_clause_from_params(
         if 'sql_append' in param_config:
             continue
 
-        # Skip value-only params (only have 'default', no sql/response/conditional/action)
-        if 'sql' not in param_config and 'conditional' not in param_config and 'response' not in param_config and 'action' not in param_config:
+        # Skip value-only params (no sql/multivalue_sql/conditional/response/action)
+        if ('sql' not in param_config and 'multivalue_sql' not in param_config
+                and 'conditional' not in param_config
+                and 'response' not in param_config and 'action' not in param_config):
+            continue
+
+        # Handle multivalue params: use multivalue_sql when more than one value
+        # was passed for this key in the URL (e.g. ?id=1&id=2).
+        param_values = multi_query_params.get(param_name)
+        if ('multivalue_sql' in param_config and param_values is not None
+                and len(param_values) > 1):
+            sql_fragment = param_config['multivalue_sql']
+            # Expand {{param_name}} to a parenthesized, escaped SQL value list.
+            substituted_fragment = _substitute_list_variable(
+                sql_fragment, param_name, param_values
+            )
+            # Substitute any other {{variables}} referenced in the fragment.
+            substituted_fragment = _substitute_variables_in_string(
+                substituted_fragment, all_params
+            ).strip()
+            if substituted_fragment:
+                where_fragments.append(substituted_fragment)
             continue
 
         # Handle conditional parameters that have SQL
@@ -545,6 +583,30 @@ def _substitute_variables_in_string(template: str, params: Dict[str, str]) -> st
                 safe_value = str(param_value)
             result = result.replace(placeholder, safe_value)
     return result
+
+
+def _substitute_list_variable(template: str, param_name: str, values: List[str]) -> str:
+    """Substitute a {{param_name}} placeholder with a parenthesized SQL value list.
+
+    Renders ``values`` as an escaped, comma-separated SQL list wrapped in
+    parentheses (e.g. ``('1', '4')``) suitable for use with a SQL ``IN`` clause.
+    Each value is quote-escaped the same way single values are, so the behavior
+    matches the single-value ``sql`` template.
+
+    Args:
+        template: String template containing a {{param_name}} placeholder.
+        param_name: Name of the parameter whose values form the list.
+        values: List of raw values received for the parameter.
+
+    Returns:
+        Template with {{param_name}} replaced by the parenthesized value list.
+    """
+    placeholder = f"{{{{{param_name}}}}}"
+    if placeholder not in template:
+        return template
+    escaped_values = [_escape_sql_value(str(value)) for value in values]
+    list_literal = "(" + ", ".join(escaped_values) + ")"
+    return template.replace(placeholder, list_literal)
 
 
 def _substitute_variables_raw(template: str, params: Dict[str, str]) -> str:
