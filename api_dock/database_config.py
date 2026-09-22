@@ -295,6 +295,10 @@ def validate_route_config(route_config: Dict[str, Any]) -> bool:
     if 'route' not in route_config:
         return False
 
+    # The sql selector may be a plain string or a list of selector rules.
+    if 'sql' in route_config and not isinstance(route_config['sql'], (str, list)):
+        return False
+
     # Validate query_params structure if present
     if 'query_params' in route_config:
         query_params = route_config['query_params']
