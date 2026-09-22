@@ -18,7 +18,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 from api_dock.auth import validate_authentication
 from api_dock.config import filter_cookies_by_config, filter_remote_query_params, find_remote_config, find_route_mapping, get_authentication_config, get_database_names, get_remote_names, get_remote_versions, get_settings, is_route_allowed, is_versioned_remote, load_main_config, merge_inherited_config, resolve_latest_version
 from api_dock.database_config import find_database_route, get_database_versions, is_versioned_database, load_database_config, merge_query_params, resolve_latest_database_version
-from api_dock.sql_builder import build_sql_query, extract_path_parameters, process_query_parameters
+from api_dock.sql_builder import build_sql_query, extract_path_parameters, process_query_parameters, SqlSelectionError
 from api_dock.storage_auth import detect_required_backends, extract_table_metadata_by_backend, extract_table_uris, setup_storage_authentication
 from api_dock.types import PreparedRequest, ProxyResponse
 
@@ -434,6 +434,13 @@ class RouteMapper:
             sql_query = build_sql_query(
                 route_config, database_config, path_params, query_params,
                 filtered_cookies, multi_query_params
+            )
+        except SqlSelectionError as e:
+            return ProxyResponse(
+                status_code=e.status_code,
+                content=json.dumps(e.response).encode(),
+                content_type="application/json",
+                error_message=str(e.response.get("error")) if e.response.get("error") else None,
             )
         except ValueError:
             return _error_response(500, "SQL query error")
