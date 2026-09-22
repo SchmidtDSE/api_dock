@@ -80,3 +80,17 @@ routes:
 # - debug:
 #     response:
 #       message: "Debug mode — no query executed"
+
+# Conditional SQL selection — pick a different base query from a param's
+# presence/value. Here ?count=<truthy> returns a histogram; otherwise rows.
+# The selected base still composes with query_params (WHERE + sql_append).
+# - route: detections
+#   sql:
+#     - when: count
+#       then:
+#         sql: SELECT [[items]].category, COUNT(*) AS count FROM [[items]]
+#         sql_append: GROUP BY [[items]].category
+#     - else: SELECT [[items]].* FROM [[items]]
+#   query_params:
+#     - category:
+#         sql: "[[items]].category = '{{category}}'"
