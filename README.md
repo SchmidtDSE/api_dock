@@ -633,6 +633,125 @@ Parameters are processed in this order (first match wins for early returns):
 
 ---
 
+## Conditional SQL Selection
+
+Some routes need a *different* base query depending on the request — for example, `?count=true` should return a species histogram (`SELECT … COUNT(*) … GROUP BY …`) rather than rows. `sql_append` can't help (it only adds trailing clauses), and a second `route:` can't either (the path is identical). For this, a route's `sql` may be a **rule list** instead of a string: a first-match-wins decision tree that picks the base query from the presence and value of path, query, and cookie params.
+
+Everything downstream is unchanged: the selected base composes with `query_params` WHERE-fragments and `sql_append` exactly as a plain `sql:` string does.
+
+### The histogram example
+
+```yaml
+routes:
+  - route: detections
+    sql:
+      # ?count=<truthy>  → species histogram
+      - when: count
+        then:
+          sql: >
+            SELECT [[detections]].common_name, [[detections]].scientific_name,
+                   COUNT(*) AS count
+            FROM [[detections]]
+          sql_append: GROUP BY [[detections]].common_name, [[detections]].scientific_name
+      # otherwise → detection rows
+      - else: SELECT [[detections]].* FROM [[detections]]
+    query_params:
+      - recording:
+          sql: "[[detections]].recording_id = {{recording}}"
+          multivalue_sql: "[[detections]].recording_id IN {{recording}}"
+      - limit:
+          sql_append: LIMIT {{limit}}          # applies in BOTH modes
+```
+
+```bash
+GET /db/detections?recording=1&count=true
+# SELECT detections.common_name, detections.scientific_name, COUNT(*) AS count
+#   FROM detections WHERE detections.recording_id = '1'
+#   GROUP BY detections.common_name, detections.scientific_name
+
+GET /db/detections?recording=1
+# SELECT detections.* FROM detections WHERE detections.recording_id = '1'
+```
+
+Note the pipeline order: the selected branch's `sql_append` (the `GROUP BY`) is applied **before** route-level `sql_append` (the shared `LIMIT`), so SQL clause order stays valid.
+
+### Rule forms
+
+A `sql` list contains rules evaluated top to bottom; the **first match wins**. Each rule's payload (an *sql node*) is a SQL string, a leaf object `{sql, sql_append}`, or a nested rule list.
+
+```yaml
+sql:
+  - when: count                       # fires when `count` is truthy (shorthand for equals: _truthy)
+    then: <sql node>
+
+  - when: mode
+    equals: 'true'                    # fires only when mode == "true" (case-insensitive)
+    then: <sql node>
+
+  - when: format                      # value map: different SQL per value
+    match:
+      species: <sql node>             # ?format=species
+      recording: <sql node>           # ?format=recording
+      _truthy: <sql node>             # any other truthy value
+      _default: <sql node>            # any present value not matched above
+
+  - when: [count, recording]          # list: fires when ALL are truthy (AND)
+    then: <sql node>
+
+  - when: [count, something_else]     # list + positional case list
+    match:
+      - values: [_any, x]             # something_else == x, count anything
+        then: <sql node>
+      - values: [_truthy, _absent]    # count truthy AND something_else not passed
+        then: <sql node>
+      - default: <sql node>
+
+  - else: <sql node>                  # default (a trailing bare string works too)
+```
+
+Nesting works because a payload can itself be a rule list:
+
+```yaml
+sql:
+  - when: some_value
+    match:
+      '4':
+        - when: count
+          then: <sql for value 4 with count>
+        - else: <sql for value 4>
+      _default: <sql for other values>
+  - else: <base sql>
+```
+
+### Value specs
+
+| spec | matches when the param… |
+|---|---|
+| `'literal'` (`'4'`, `'true'`) | is present and equals it (case-insensitive) |
+| `_truthy` / `_falsy` | present, and value is / isn't in `{"", "0", "false", "no", "off", "null", "none"}` |
+| `_present` / `_absent` | exists / does not exist |
+| `_any` | wildcard — present or absent (used for a position in a case list) |
+| `_default` | catch-all for any *present* value (value maps only) |
+
+In a single-param `match:` map, precedence is order-independent: exact literal > `_falsy`/`_truthy` > `_present`/`_absent` > `_default`. In a positional case list, cases match strictly top-to-bottom.
+
+### No match → URL error
+
+If no rule matches and there is no default (`else`, a trailing bare string, or a `_default`/`default` catch-all), the request returns a **400** with `{"error": "No matching query configuration for the given parameters", "http_status": 400}`. Customize it with a terminal `no_match` rule:
+
+```yaml
+sql:
+  - when: recording
+    then: SELECT [[detections]].* FROM [[detections]] WHERE recording_id = {{recording}}
+  - no_match:
+      error: "recording is required, or pass count=true for a histogram"
+      http_status: 400
+```
+
+Cookies participate via the `cookies.<name>` key (e.g. `when: cookies.role`, `equals: admin`).
+
+---
+
 # CLI
 
 ## Commands
