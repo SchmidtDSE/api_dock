@@ -18,8 +18,51 @@ from api_dock.database_config import get_named_query, get_table_definition
 
 
 #
+# CONSTANTS
+#
+# Query-param values treated as "falsy" for _truthy/_falsy matching in the sql
+# selector. Comparison is case-insensitive after stripping surrounding space.
+FALSY_VALUES: frozenset = frozenset({"", "0", "false", "no", "off", "null", "none"})
+
+# Response returned when an sql selector matches no branch and defines no
+# default (else / trailing string / _default) or no_match override.
+DEFAULT_NO_MATCH_RESPONSE: Dict[str, Any] = {
+    "error": "No matching query configuration for the given parameters",
+    "http_status": 400,
+}
+
+# Sentinel signalling that a selector rule did not fire (distinct from a rule
+# that fires but resolves to an empty base SQL).
+_NO_MATCH: Any = object()
+
+
+#
 # PUBLIC
 #
+class SqlSelectionError(Exception):
+    """Raised when an sql selector matches no branch and defines no default.
+
+    Carries the JSON response body and HTTP status to return to the client, so
+    the caller can surface a proper URL error (default 400) rather than a
+    generic 500.
+
+    Attributes:
+        response: JSON-serializable response body to return to the client.
+        status_code: HTTP status code to return.
+    """
+
+    def __init__(self, response: Dict[str, Any]) -> None:
+        """Initialize the error from a response spec.
+
+        Args:
+            response: Response body dict; its ``http_status`` (default 400)
+                becomes the HTTP status code.
+        """
+        self.response = response
+        self.status_code = int(response.get("http_status", 400))
+        super().__init__(str(response.get("error", "No matching query configuration")))
+
+
 def build_sql_query(
         route_config: Dict[str, Any],
         database_config: Dict[str, Any],
@@ -55,8 +98,13 @@ def build_sql_query(
     if multi_query_params is None:
         multi_query_params = {}
 
-    # Get the base SQL template from route config
-    sql_template = route_config.get('sql', '')
+    # Resolve the base SQL via the selector. ``sql`` may be a plain string or a
+    # rule-list decision tree; selection is driven by path, query, and cookie
+    # params. branch_appends are post-WHERE clauses (e.g. GROUP BY) contributed
+    # by the selected branch, applied before route-level sql_append fragments.
+    selection_params = {**path_params, **query_params}
+    selection_params.update({f"cookies.{key}": value for key, value in cookies.items()})
+    sql_template, branch_appends = resolve_route_sql(route_config, selection_params)
 
     # Check if sql_template is a reference to a named query
     if sql_template.startswith("[[") and sql_template.endswith("]]"):
@@ -98,6 +146,16 @@ def build_sql_query(
             where_clause = ' WHERE ' + ' AND '.join(where_fragments)
         sql_with_tables += where_clause
 
+    # Apply post-WHERE clauses from the selected sql branch (e.g. GROUP BY for a
+    # histogram mode). Branch appends come before route-level sql_append so a
+    # branch GROUP BY precedes a shared ORDER BY / LIMIT.
+    if branch_appends:
+        expanded_branch = [
+            _substitute_table_references(fragment, database_config)
+            for fragment in branch_appends
+        ]
+        sql_with_tables += ' ' + ' '.join(expanded_branch)
+
     # Build post-WHERE append fragments (ORDER BY, LIMIT, etc.)
     append_fragments = build_append_clause_from_params(route_config, query_params, path_params)
     # Expand [[table_name]] references in APPEND fragments (same syntax as main sql)
@@ -110,6 +168,46 @@ def build_sql_query(
     sql_with_params = _substitute_variables_in_string(sql_with_tables, all_params)
 
     return sql_with_params
+
+
+def resolve_route_sql(
+        route_config: Dict[str, Any],
+        selection_params: Dict[str, str]) -> Tuple[str, List[str]]:
+    """Resolve a route's ``sql`` selector to a base SQL string and append clauses.
+
+    The ``sql`` value may be a plain string (used directly) or a list of rules
+    forming a first-match-wins decision tree. Each rule selects an sql node based
+    on the presence and value of params. An sql node is itself a string, a leaf
+    object (``{sql, sql_append}``), or a nested rule list.
+
+    Rule forms (evaluated top-to-bottom, first match wins):
+      - ``{when: <param>, then: <node>}`` — fires when the param is truthy.
+      - ``{when: <param>, equals: <valspec>, then: <node>}`` — fires on a value.
+      - ``{when: <param>, match: {<valspec>: <node>, ...}}`` — value map.
+      - ``{when: [<params>], then: <node>}`` — fires when all params are truthy.
+      - ``{when: [<params>], match: [{values: [...], then: <node>}, ...]}``
+      - ``{else: <node>}`` or a trailing bare string — the default.
+      - ``{no_match: <response>}`` — raise a URL error instead of a default.
+
+    Args:
+        route_config: Route configuration dictionary. ``sql`` is a string or a
+            list of selector rules.
+        selection_params: Merged params available for matching, keyed by name
+            (path and query params, plus cookies as ``cookies.<name>``). A key
+            is "present" iff it appears here.
+
+    Returns:
+        Tuple of ``(base_sql, branch_appends)`` where ``branch_appends`` are
+        post-WHERE SQL fragments contributed by the selected branch.
+
+    Raises:
+        SqlSelectionError: If no branch matches and no default/no_match is given.
+    """
+    sql_spec = route_config.get('sql', '')
+    resolved = _resolve_sql_node(sql_spec, selection_params)
+    if resolved is None:
+        raise SqlSelectionError(dict(DEFAULT_NO_MATCH_RESPONSE))
+    return resolved
 
 
 # Keep backward compatibility with old signature
@@ -706,3 +804,292 @@ def _substitute_variables_in_dict(template_dict: Dict[str, Any], params: Dict[st
         else:
             result[key] = value
     return result
+
+
+def _resolve_sql_node(node: Any, params: Dict[str, str]) -> Optional[Tuple[str, List[str]]]:
+    """Resolve an sql node to a base SQL string and post-WHERE append fragments.
+
+    An sql node is a string (base SQL, no appends), a leaf object
+    (``{sql, sql_append}``), or a rule list (nested selection).
+
+    Args:
+        node: The sql node to resolve.
+        params: Merged selection params (see resolve_route_sql).
+
+    Returns:
+        Tuple of (base_sql, branch_appends), or None if a rule-list node matched
+        nothing and defined no default.
+
+    Raises:
+        SqlSelectionError: If a nested no_match rule is reached.
+    """
+    if isinstance(node, str):
+        return (node, [])
+    if isinstance(node, dict):
+        if 'sql' in node:
+            return (str(node.get('sql', '')), _as_append_list(node.get('sql_append')))
+        return None
+    if isinstance(node, list):
+        return _resolve_rule_list(node, params)
+    return None
+
+
+def _resolve_rule_list(rules: List[Any], params: Dict[str, str]) -> Optional[Tuple[str, List[str]]]:
+    """Resolve a rule list, returning the first matching branch's node.
+
+    Args:
+        rules: List of selector rules (see resolve_route_sql).
+        params: Merged selection params.
+
+    Returns:
+        Tuple of (base_sql, branch_appends), or None if nothing matched.
+
+    Raises:
+        SqlSelectionError: If a no_match rule is reached before any match.
+    """
+    for item in rules:
+        # Terminal bare-string default.
+        if isinstance(item, str):
+            return (item, [])
+        if not isinstance(item, dict):
+            continue
+        if 'else' in item:
+            return _require_node(item['else'], params)
+        if 'no_match' in item:
+            raise SqlSelectionError(_no_match_response(item['no_match']))
+        if 'when' in item:
+            matched = _match_rule(item, params)
+            if matched is _NO_MATCH:
+                continue
+            return _require_node(matched, params)
+    return None
+
+
+def _require_node(node: Any, params: Dict[str, str]) -> Tuple[str, List[str]]:
+    """Resolve an sql node that must yield a result (committed branch).
+
+    Args:
+        node: The sql node to resolve.
+        params: Merged selection params.
+
+    Returns:
+        Tuple of (base_sql, branch_appends).
+
+    Raises:
+        SqlSelectionError: If the node resolves to no match (e.g. a nested rule
+            list with no default).
+    """
+    resolved = _resolve_sql_node(node, params)
+    if resolved is None:
+        raise SqlSelectionError(dict(DEFAULT_NO_MATCH_RESPONSE))
+    return resolved
+
+
+def _match_rule(rule: Dict[str, Any], params: Dict[str, str]) -> Any:
+    """Evaluate a ``when`` rule, returning its payload node or _NO_MATCH.
+
+    Args:
+        rule: A rule dict containing ``when`` plus optional equals/match/then.
+        params: Merged selection params.
+
+    Returns:
+        The selected sql node to resolve, or _NO_MATCH if the rule did not fire.
+    """
+    when = rule.get('when')
+    if isinstance(when, list):
+        return _match_multi(rule, [str(w) for w in when], params)
+    return _match_single(rule, str(when), params)
+
+
+def _match_single(rule: Dict[str, Any], param: str, params: Dict[str, str]) -> Any:
+    """Evaluate a single-param ``when`` rule.
+
+    Args:
+        rule: The rule dict.
+        param: The single param name from ``when``.
+        params: Merged selection params.
+
+    Returns:
+        The selected sql node, or _NO_MATCH.
+    """
+    present = param in params
+    value = params.get(param)
+    if 'match' in rule:
+        node = _resolve_value_map(rule['match'], value, present)
+        return node if node is not None else _NO_MATCH
+    spec = rule.get('equals', '_truthy')
+    if _value_matches(spec, value, present):
+        return rule.get('then', '')
+    return _NO_MATCH
+
+
+def _match_multi(rule: Dict[str, Any], param_names: List[str], params: Dict[str, str]) -> Any:
+    """Evaluate a multi-param (list ``when``) rule.
+
+    ``match`` is a positional case list; otherwise the rule fires when every
+    named param satisfies ``equals`` (positional) or, by default, is truthy.
+
+    Args:
+        rule: The rule dict.
+        param_names: The param names from ``when``.
+        params: Merged selection params.
+
+    Returns:
+        The selected sql node, or _NO_MATCH.
+    """
+    if 'match' in rule:
+        cases = rule['match']
+        if not isinstance(cases, list):
+            return _NO_MATCH
+        for case in cases:
+            if not isinstance(case, dict):
+                continue
+            if 'default' in case:
+                return case['default']
+            values = case.get('values')
+            if not isinstance(values, list) or len(values) != len(param_names):
+                continue
+            if _all_positions_match(param_names, values, params):
+                return case.get('then', '')
+        return _NO_MATCH
+
+    specs = rule.get('equals')
+    if isinstance(specs, list) and len(specs) == len(param_names):
+        if _all_positions_match(param_names, specs, params):
+            return rule.get('then', '')
+        return _NO_MATCH
+
+    # Default: fire only when every named param is truthy (AND).
+    for name in param_names:
+        if not _value_matches('_truthy', params.get(name), name in params):
+            return _NO_MATCH
+    return rule.get('then', '')
+
+
+def _all_positions_match(param_names: List[str], specs: List[Any], params: Dict[str, str]) -> bool:
+    """Check that each param satisfies its positional value spec.
+
+    Args:
+        param_names: Param names, aligned with ``specs``.
+        specs: Value specs, one per param.
+        params: Merged selection params.
+
+    Returns:
+        True if every position matches, False otherwise.
+    """
+    for name, spec in zip(param_names, specs):
+        if not _value_matches(spec, params.get(name), name in params):
+            return False
+    return True
+
+
+def _resolve_value_map(value_map: Any, value: Optional[str], present: bool) -> Any:
+    """Select an sql node from a single-param value map by precedence.
+
+    Precedence (order-independent): exact literal > _falsy/_truthy >
+    _present/_absent > _default. An absent param matches only _absent.
+
+    Args:
+        value_map: Mapping of value spec -> sql node.
+        value: The param's value (or None if absent).
+        present: Whether the param is present.
+
+    Returns:
+        The matching sql node, or None if nothing matched.
+    """
+    if not isinstance(value_map, dict):
+        return None
+
+    if not present:
+        return value_map.get('_absent')
+
+    value_norm = str(value).strip().lower()
+    # 1. Exact literal (case-insensitive) among non-special keys.
+    for key, node in value_map.items():
+        if str(key).startswith('_'):
+            continue
+        if str(key).strip().lower() == value_norm:
+            return node
+    # 2. Truthiness.
+    if _is_truthy(value):
+        if '_truthy' in value_map:
+            return value_map['_truthy']
+    elif '_falsy' in value_map:
+        return value_map['_falsy']
+    # 3. Presence.
+    if '_present' in value_map:
+        return value_map['_present']
+    # 4. Catch-all.
+    return value_map.get('_default')
+
+
+def _value_matches(spec: Any, value: Optional[str], present: bool) -> bool:
+    """Check whether a param value satisfies a single value spec.
+
+    Args:
+        spec: A literal string or special token (_any, _present, _absent,
+            _truthy, _falsy, _default).
+        value: The param's value (or None if absent).
+        present: Whether the param is present.
+
+    Returns:
+        True if the value satisfies the spec, False otherwise.
+    """
+    spec_str = str(spec)
+    if spec_str in ('_any', '_default'):
+        return True
+    if spec_str == '_present':
+        return present
+    if spec_str == '_absent':
+        return not present
+    if spec_str == '_truthy':
+        return present and _is_truthy(value)
+    if spec_str == '_falsy':
+        return present and not _is_truthy(value)
+    return present and str(value).strip().lower() == spec_str.strip().lower()
+
+
+def _is_truthy(value: Optional[str]) -> bool:
+    """Return whether a param value is "truthy" per FALSY_VALUES.
+
+    Args:
+        value: The value to test.
+
+    Returns:
+        True unless the normalized value is in FALSY_VALUES.
+    """
+    return str(value).strip().lower() not in FALSY_VALUES
+
+
+def _as_append_list(value: Any) -> List[str]:
+    """Normalize a leaf node's sql_append into a list of clause strings.
+
+    Args:
+        value: A string, list of strings, or None.
+
+    Returns:
+        List of append clause strings (empty if value is None/unsupported).
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    return []
+
+
+def _no_match_response(spec: Any) -> Dict[str, Any]:
+    """Build a no_match response body, defaulting http_status to 400.
+
+    Args:
+        spec: A response dict or a plain error string/value.
+
+    Returns:
+        Response body dict with an http_status key.
+    """
+    if isinstance(spec, dict):
+        response = dict(spec)
+        response.setdefault('http_status', 400)
+        return response
+    return {'error': str(spec), 'http_status': 400}
