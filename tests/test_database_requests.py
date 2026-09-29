@@ -75,6 +75,10 @@ CATALOG_CONFIG: Dict[str, Any] = {
         # 0.7.x style: the quotes turn the marker into the text "?".
         "route": "quoted",
         "sql": "SELECT * FROM [[items]] WHERE name = '{{name}}'",
+    }, {
+        # DuckDB ignores the marker in the comment, but its value is still sent.
+        "route": "commented",
+        "sql": "SELECT * FROM [[items]] /* {{name}} */",
     }],
 }
 
@@ -228,6 +232,16 @@ class TestFilterValues:
         """A quoted {{var}} leaves its value without a marker, so DuckDB rejects the query."""
         result = await route_mapper.map_database_route(
             "catalog", "latest/quoted", {"name": "Alpha"}, {}
+        )
+        assert result.status_code == 500
+        assert json.loads(result.content) == {"error": "Database query error"}
+
+    @pytest.mark.anyio
+    async def test_commented_variable_is_database_query_error(
+            self, route_mapper: RouteMapper) -> None:
+        """A commented {{var}} leaves an unused value, so DuckDB rejects the query."""
+        result = await route_mapper.map_database_route(
+            "catalog", "latest/commented", {"name": "Alpha"}, {}
         )
         assert result.status_code == 500
         assert json.loads(result.content) == {"error": "Database query error"}
