@@ -13,11 +13,15 @@ License: BSD 3-Clause
 #
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import yaml
 
-from api_dock.sql_template_check import check_quoted_variables
+from api_dock.sql_template_check import (
+    check_comment_at_end,
+    check_commented_variables,
+    check_quoted_variables,
+)
 
 
 #
@@ -33,6 +37,14 @@ QUERY_PARAM_KEYS: frozenset = frozenset({
 
 # Keys each branch of a conditional query param may have; at least one must be present.
 CONDITION_KEYS: frozenset = frozenset({'sql', 'response', 'action'})
+
+# Checks for templates whose {{variables}} are bound. sql_append values are
+# written into the SQL, so their templates only need to not end in a comment,
+# which would hide the clauses joined after them.
+BOUND_TEMPLATE_CHECKS: Tuple[Callable[[str], None], ...] = (
+    check_quoted_variables, check_commented_variables, check_comment_at_end,
+)
+APPEND_TEMPLATE_CHECKS: Tuple[Callable[[str], None], ...] = (check_comment_at_end,)
 
 
 #
@@ -317,9 +329,10 @@ def check_database_config(database_config: Dict[str, Any]) -> None:
     """Check every named query and route of a loaded database config.
 
     Each route is merged with top-level query_params, as a request would be,
-    then checked for shape and for {{variables}} inside quotes in any template
-    whose values are bound. sql_append templates are not quote-checked because
-    their values are written into the SQL text.
+    then checked for shape and for {{variables}} inside quotes or comments in
+    any template whose values are bound. sql_append templates are not checked
+    for variables because their values are written into the SQL text. No
+    template may end inside a comment.
 
     Args:
         database_config: Database configuration, already merged with the main config.
@@ -329,7 +342,7 @@ def check_database_config(database_config: Dict[str, Any]) -> None:
             route (or query) and the template's location.
     """
     for query_name, query in database_config.get('queries', {}).items():
-        _check_template(f"queries.{query_name}", query)
+        _check_template(f"queries.{query_name}", query, BOUND_TEMPLATE_CHECKS)
 
     for index, route_config in enumerate(database_config.get('routes', [])):
         try:
@@ -337,7 +350,9 @@ def check_database_config(database_config: Dict[str, Any]) -> None:
             merged = merge_query_params(route_config, database_config)
             validate_route_config(merged)
             for location, template in _bound_templates(merged):
-                _check_template(location, template)
+                _check_template(location, template, BOUND_TEMPLATE_CHECKS)
+            for location, template in _append_templates(merged):
+                _check_template(location, template, APPEND_TEMPLATE_CHECKS)
         except ValueError as error:
             raise ValueError(f"route '{_route_label(route_config, index)}': {error}") from error
 
@@ -420,20 +435,25 @@ def _validate_conditional(param_name: str, conditional: Any) -> None:
             )
 
 
-def _check_template(location: str, template: Any) -> None:
-    """Quote-check one SQL template, adding its location to any error.
+def _check_template(
+        location: str,
+        template: Any,
+        checks: Tuple[Callable[[str], None], ...]) -> None:
+    """Run checks on one SQL template, adding its location to any error.
 
     Args:
         location: Where the template is in the config, e.g. ``query_params.name.sql``.
         template: The template; non-string values are skipped.
+        checks: Functions that raise ValueError for a bad template.
 
     Raises:
-        ValueError: If the template has a quoted variable.
+        ValueError: If a check fails.
     """
     if not isinstance(template, str):
         return
     try:
-        check_quoted_variables(template)
+        for check in checks:
+            check(template)
     except ValueError as error:
         raise ValueError(f"{location}: {error}") from error
 
@@ -463,7 +483,10 @@ def _bound_templates(route_config: Dict[str, Any]) -> List[Tuple[str, Any]]:
         ``(location, template)`` pairs for the route sql (every selector
         branch), and each query param's sql, multivalue_sql and conditional sql.
     """
-    templates = _selector_templates(route_config.get('sql', ''), 'sql')
+    templates = [
+        (location, node) if isinstance(node, str) else (f"{location}.sql", node['sql'])
+        for location, node in _selector_leaves(route_config.get('sql', ''), 'sql')
+    ]
     for param_item in route_config.get('query_params', []):
         param_name, param_config = next(iter(param_item.items()))
         prefix = f"query_params.{param_name}"
@@ -477,44 +500,70 @@ def _bound_templates(route_config: Dict[str, Any]) -> List[Tuple[str, Any]]:
     return templates
 
 
-def _selector_templates(node: Any, location: str) -> List[Tuple[str, Any]]:
-    """List the base SQL templates in an sql selector node, with their locations.
+def _append_templates(route_config: Dict[str, Any]) -> List[Tuple[str, Any]]:
+    """List a route's sql_append templates, with their locations.
+
+    Args:
+        route_config: Route configuration, merged with top-level query_params.
+
+    Returns:
+        ``(location, template)`` pairs for each selector branch's sql_append
+        (a string or a list) and each query param's sql_append.
+    """
+    templates = []
+    for location, node in _selector_leaves(route_config.get('sql', ''), 'sql'):
+        append = node.get('sql_append') if isinstance(node, dict) else None
+        if isinstance(append, list):
+            templates.extend(
+                (f"{location}.sql_append[{index}]", item) for index, item in enumerate(append)
+            )
+        elif append is not None:
+            templates.append((f"{location}.sql_append", append))
+    for param_item in route_config.get('query_params', []):
+        param_name, param_config = next(iter(param_item.items()))
+        if 'sql_append' in param_config:
+            templates.append((f"query_params.{param_name}.sql_append", param_config['sql_append']))
+    return templates
+
+
+def _selector_leaves(node: Any, location: str) -> List[Tuple[str, Any]]:
+    """List the leaves of an sql selector node, with their locations.
 
     A node is a string, a leaf ``{sql, sql_append}``, a rule, or a list of
-    rules (see sql_builder.resolve_route_sql). Leaf sql_append is skipped
-    because its values are not bound.
+    rules (see sql_builder.resolve_route_sql).
 
     Args:
         node: The selector node.
         location: The node's location in the route config.
 
     Returns:
-        ``(location, template)`` pairs for every base SQL string under node.
+        ``(location, leaf)`` pairs, where each leaf is a SQL string or a
+        mapping with an ``sql`` key.
     """
     if isinstance(node, str):
         return [(location, node)]
     if isinstance(node, list):
         return [
-            template
+            leaf
             for index, item in enumerate(node)
-            for template in _selector_templates(item, f"{location}[{index}]")
+            for leaf in _selector_leaves(item, f"{location}[{index}]")
         ]
     if not isinstance(node, dict):
         return []
     if 'sql' in node:
-        return [(f"{location}.sql", node['sql'])]
+        return [(location, node)]
 
-    templates = []
+    leaves = []
     for key in ('then', 'else', 'default'):
         if key in node:
-            templates.extend(_selector_templates(node[key], f"{location}.{key}"))
+            leaves.extend(_selector_leaves(node[key], f"{location}.{key}"))
     match = node.get('match')
     if isinstance(match, dict):
         for value, branch in match.items():
-            templates.extend(_selector_templates(branch, f"{location}.match.{value}"))
+            leaves.extend(_selector_leaves(branch, f"{location}.match.{value}"))
     elif isinstance(match, list):
-        templates.extend(_selector_templates(match, f"{location}.match"))
-    return templates
+        leaves.extend(_selector_leaves(match, f"{location}.match"))
+    return leaves
 
 
 def _load_yaml_file(file_path: str) -> Dict[str, Any]:

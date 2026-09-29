@@ -71,10 +71,6 @@ CATALOG_CONFIG: Dict[str, Any] = {
     }, {
         "route": "missing",
         "sql": "SELECT * FROM [[items]] WHERE id = {{nope}}",
-    }, {
-        # DuckDB ignores the marker in the comment, but its value is still sent.
-        "route": "commented",
-        "sql": "SELECT * FROM [[items]] /* {{name}} */",
     }],
 }
 
@@ -221,16 +217,6 @@ class TestFilterValues:
         result = await route_mapper.map_database_route("catalog", "latest/missing", {}, {})
         assert result.status_code == 500
         assert json.loads(result.content) == {"error": "SQL query error"}
-
-    @pytest.mark.anyio
-    async def test_commented_variable_is_database_query_error(
-            self, route_mapper: RouteMapper) -> None:
-        """A commented {{var}} leaves an unused value, so DuckDB rejects the query."""
-        result = await route_mapper.map_database_route(
-            "catalog", "latest/commented", {"name": "Alpha"}, {}
-        )
-        assert result.status_code == 500
-        assert json.loads(result.content) == {"error": "Database query error"}
 
 
 class TestCookieValues:

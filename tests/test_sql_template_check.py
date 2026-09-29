@@ -3,9 +3,12 @@
 Tests for the quoted-variable check on SQL templates.
 
 Values are bound, so a ``{{var}}`` inside a quoted string would be read as
-literal text. The check refuses such templates and shows the fixed form. It
-tracks single-quoted strings (with ``''`` escapes), double-quoted identifiers,
-``--`` line comments and ``/* */`` block comments.
+literal text. The check refuses such templates and shows the fixed form. A
+``{{var}}`` inside a comment is refused too, as is a template that ends inside a
+comment, which would comment out the SQL added after it. The scanner tracks
+single-quoted strings (with ``''`` escapes), dollar-quoted strings,
+double-quoted identifiers, ``--`` line comments and nested ``/* */`` block
+comments.
 
 License: BSD 3-Clause
 
@@ -16,7 +19,11 @@ License: BSD 3-Clause
 #
 import pytest
 
-from api_dock.sql_template_check import check_quoted_variables
+from api_dock.sql_template_check import (
+    check_comment_at_end,
+    check_commented_variables,
+    check_quoted_variables,
+)
 
 
 #
@@ -63,6 +70,40 @@ class TestQuotedVariablesRejected:
         assert "WHERE name = {{name}}" in str(error.value)
 
 
+class TestCommentedVariablesRejected:
+    """A {{var}} inside a comment is an error that asks for it to be removed."""
+
+    @pytest.mark.parametrize("template", [
+        "SELECT 1 -- {{name}}\nWHERE id = {{id}}",
+        "SELECT 1 /* {{name}} */",
+        "-- '{{old}}' was the 0.7 form\nid = {{id}}",
+        "SELECT 1 /* outer /* inner */ {{name}} */",
+    ])
+    def test_commented_variable(self, template: str) -> None:
+        """The error says to remove the variable and suggests no rewrite."""
+        with pytest.raises(ValueError) as error:
+            check_commented_variables(template)
+        message = str(error.value)
+        assert "comment" in message
+        assert "remove" in message
+        assert "Use:" not in message
+
+
+class TestCommentAtEndRejected:
+    """A template ending inside a comment would comment out the SQL after it."""
+
+    @pytest.mark.parametrize("template", [
+        "SELECT * FROM t -- all rows",
+        "a = {{a}} -- first filter\n   ",
+        "ORDER BY x /* newest first",
+        "SELECT 1 /* outer /* inner */",
+    ])
+    def test_ends_in_comment(self, template: str) -> None:
+        """The error says to move the comment onto its own line or use /* */."""
+        with pytest.raises(ValueError, match=r"own line.*/\* \*/"):
+            check_comment_at_end(template)
+
+
 class TestTemplatesAccepted:
     """Templates without quoted variables pass unchanged."""
 
@@ -73,7 +114,6 @@ class TestTemplatesAccepted:
         "note = 'it''s' AND id = {{id}}",
         "-- don't match subspecies\nWHERE name = {{name}}",
         "/* it's a block\n comment */ id = {{id}}",
-        "-- '{{old}}' was the 0.7 form\nid = {{id}}",
         'SELECT "Column Name" FROM t WHERE id = {{id}}',
         "SELECT 1",
         "SELECT $$it's$$ AS note WHERE id = {{id}}",
@@ -82,7 +122,17 @@ class TestTemplatesAccepted:
         "SELECT '}}{{' AS braces",
         'SELECT "{{" FROM t',
         "SELECT $1",
+        "SELECT 1 /* outer /* inner */ still comment */ WHERE id = {{id}}",
+        "SELECT 1 /* outer /* inner */ it's */ WHERE id = {{id}}",
+        "SELECT 1 /*/ it's */ WHERE id = {{id}}",
+        "SELECT 1 /* outer /* inner */ comment */ {{name}}",
+        "-- note\nWHERE id = {{id}}",
+        "SELECT * FROM t /* note */",
+        "name = 'a -- b'",
+        "name = 'a /* b'",
     ])
     def test_accepted(self, template: str) -> None:
-        """No error is raised and nothing is returned."""
+        """No check raises and none returns anything."""
         assert check_quoted_variables(template) is None
+        assert check_commented_variables(template) is None
+        assert check_comment_at_end(template) is None

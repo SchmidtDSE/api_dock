@@ -2,9 +2,12 @@
 
 SQL Template Check Module for API Dock
 
-Refuses SQL templates that put a {{variable}} inside quotes. Values are sent to
-the database separately from the SQL text, so a marker inside a quoted string
-would be read as literal text instead of the value.
+Refuses SQL templates that put a {{variable}} inside quotes or a comment.
+Values are sent to the database separately from the SQL text, so a marker inside
+a quoted string would be read as literal text instead of the value, and a marker
+inside a comment would be ignored while its value is still sent. Also refuses a
+template that ends inside a comment, which would comment out the SQL that
+api_dock adds after it.
 
 License: BSD 3-Clause
 
@@ -43,8 +46,8 @@ def check_quoted_variables(template: str) -> None:
 
     Single-quoted strings (with '' as an escaped quote), dollar-quoted strings
     ($$...$$ and $tag$...$tag$), double-quoted identifiers, -- line comments
-    and /* */ block comments are recognized.
-    Variables inside comments are ignored. The template is not changed.
+    and nested /* */ block comments are recognized. Variables inside comments
+    are left to check_commented_variables. The template is not changed.
 
     Args:
         template: SQL template to check.
@@ -71,6 +74,53 @@ def check_quoted_variables(template: str) -> None:
         raise ValueError(
             "Variables are sent as values, so they cannot be inside quotes. "
             f"Use: {fixed}"
+        )
+
+
+def check_commented_variables(template: str) -> None:
+    """Raise if a {{variable}} appears inside a SQL comment.
+
+    The binder still sends the variable's value, but the database ignores the
+    marker in the comment, so it gets one more value than the query uses.
+
+    Args:
+        template: SQL template to check.
+
+    Raises:
+        ValueError: If a comment contains a variable. No rewrite is suggested,
+            because only the author knows whether the comment is still needed.
+    """
+    for kind, text in _split_sql(template):
+        if kind == COMMENT and VARIABLE_TOKEN.search(text):
+            raise ValueError(
+                f"A variable can't be inside a SQL comment: {text.strip()}. Its value "
+                "would be sent with nothing in the query to use it, so remove the "
+                "variable from the comment."
+            )
+
+
+def check_comment_at_end(template: str) -> None:
+    """Raise if a template ends inside a -- comment or an unclosed /* comment.
+
+    The SQL builder strips each template's trailing whitespace, including a
+    final newline, and adds WHERE conditions and sql_append clauses after it
+    on the same line, so they would end up inside the comment.
+
+    Args:
+        template: SQL template to check.
+
+    Raises:
+        ValueError: If the template, with trailing whitespace removed, ends
+            inside a comment.
+    """
+    segments = _split_sql(template.rstrip())
+    if not segments:
+        return
+    kind, text = segments[-1]
+    if kind == COMMENT and (text.startswith('--') or _block_comment_end(text, 0) is None):
+        raise ValueError(
+            "This SQL ends inside a comment, so the SQL api_dock adds after it would "
+            "be commented out. Move the comment onto its own line or use /* */."
         )
 
 
@@ -135,8 +185,8 @@ def _special_segment(template: str, start: int) -> Optional[Tuple[str, int]]:
         end = template.find('\n', start)
         return COMMENT, len(template) if end == -1 else end
     if template.startswith('/*', start):
-        end = template.find('*/', start + 2)
-        return COMMENT, len(template) if end == -1 else end + 2
+        end = _block_comment_end(template, start)
+        return COMMENT, len(template) if end is None else end
     if template[start] == "'":
         return STRING, _quoted_end(template, start, "'")
     dollar = DOLLAR_QUOTE.match(template, start)
@@ -145,6 +195,35 @@ def _special_segment(template: str, start: int) -> Optional[Tuple[str, int]]:
         return STRING, len(template) if end == -1 else end + len(dollar.group())
     if template[start] == '"':
         return IDENTIFIER, _quoted_end(template, start, '"')
+    return None
+
+
+def _block_comment_end(template: str, start: int) -> Optional[int]:
+    """Find the end of a block comment, counting nested /* */ pairs.
+
+    DuckDB and PostgreSQL nest block comments, so the comment ends at the */
+    that matches its opening /*, not at the first */.
+
+    Args:
+        template: SQL text.
+        start: Index of the opening /*.
+
+    Returns:
+        Index just past the matching */, or None if the comment is unclosed.
+    """
+    depth = 0
+    position = start
+    while position < len(template):
+        if template.startswith('/*', position):
+            depth += 1
+            position += 2
+        elif template.startswith('*/', position):
+            depth -= 1
+            position += 2
+            if depth == 0:
+                return position
+        else:
+            position += 1
     return None
 
 

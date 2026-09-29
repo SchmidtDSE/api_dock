@@ -3,8 +3,9 @@
 Tests for the database config check that runs when a RouteMapper is created.
 
 Every database listed in the main config, and every version of a versioned
-database, is loaded and each route is checked for shape and for quoted
-variables. A failure stops startup with an error naming the database, version,
+database, is loaded and each route is checked for shape, for variables in
+quotes or comments, and for templates that end inside a comment. A failure
+stops startup with an error naming the database, version,
 route and reason. Config files are read from the main config's directory.
 
 License: BSD 3-Clause
@@ -143,6 +144,58 @@ class TestStartupQuoteCheck:
     def test_valid_config_loads(self, tmp_path: Path) -> None:
         """A config without quoted variables starts."""
         config_path = _write_config(tmp_path, {"catalog": _database([VALID_ROUTE])})
+        assert RouteMapper(config_path).database_names == ["catalog"]
+
+
+class TestStartupCommentCheck:
+    """A variable in a comment, or a template ending in a comment, stops startup."""
+
+    def test_commented_variable_names_database_route_and_location(
+            self, tmp_path: Path) -> None:
+        """The error names where the variable is and suggests no rewrite."""
+        route = _route(query_params=[
+            {"name": {"sql": "[[items]].name = {{name}} /* was '{{name}}' */"}},
+        ])
+        config_path = _write_config(tmp_path, {"catalog": {"1.0": _database([route])}})
+        with pytest.raises(ValueError) as error:
+            RouteMapper(config_path)
+        message = str(error.value)
+        for expected in ["catalog", "1.0", "items", "query_params.name.sql", "comment"]:
+            assert expected in message
+        assert "Use:" not in message
+
+    @pytest.mark.parametrize("route_kwargs, location", [
+        ({"sql": "SELECT * FROM [[items]] -- all rows\n"}, "sql"),
+        ({"query_params": [{"sort": {"sql_append": "ORDER BY id -- newest first"}}]},
+         "query_params.sort.sql_append"),
+        ({"sql": [{"else": {
+            "sql": "SELECT * FROM [[items]]", "sql_append": "ORDER BY id -- by id",
+        }}]}, "sql[0].else.sql_append"),
+    ])
+    def test_template_ending_in_comment_names_location(
+            self, tmp_path: Path, route_kwargs: Dict[str, Any], location: str) -> None:
+        """Route sql, sql_append and a branch's sql_append may not end in a comment."""
+        config_path = _write_config(tmp_path, {"catalog": _database([_route(**route_kwargs)])})
+        with pytest.raises(ValueError) as error:
+            RouteMapper(config_path)
+        message = str(error.value)
+        assert f"{location}:" in message
+        assert "own line" in message
+
+    def test_named_query_ending_in_comment(self, tmp_path: Path) -> None:
+        """A queries: entry may not end in a comment."""
+        database = _database([_route(sql="[[all_items]]")])
+        database["queries"] = {"all_items": "SELECT * FROM [[items]] -- every row"}
+        config_path = _write_config(tmp_path, {"catalog": database})
+        with pytest.raises(ValueError, match=r"queries\.all_items"):
+            RouteMapper(config_path)
+
+    def test_commented_variable_in_sql_append_is_allowed(self, tmp_path: Path) -> None:
+        """sql_append values are written into the SQL, so a commented one is harmless."""
+        route = _route(query_params=[
+            {"sort": {"sql_append": "/* by {{sort}} */ ORDER BY {{sort}}"}},
+        ])
+        config_path = _write_config(tmp_path, {"catalog": _database([route])})
         assert RouteMapper(config_path).database_names == ["catalog"]
 
 
