@@ -255,6 +255,7 @@ class TestMapDatabaseRouteSelection:
 
     def _make_rm(self):
         rm = RouteMapper.__new__(RouteMapper)
+        rm.config_dir = "api_dock_config"
         rm.remote_names = []
         rm.database_names = ["mydb"]
         rm.config = {}

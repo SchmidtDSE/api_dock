@@ -12,18 +12,17 @@ License: BSD 3-Clause
 # IMPORTS
 #
 import json
+import os
 import httpx
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 from api_dock.auth import validate_authentication
-from api_dock.config import filter_cookies_by_config, filter_remote_query_params, find_remote_config, find_route_mapping, get_authentication_config, get_database_names, get_remote_names, get_remote_versions, get_settings, is_route_allowed, is_versioned_remote, load_main_config, merge_inherited_config, resolve_latest_version
-from api_dock.database_config import find_database_route, get_database_versions, is_versioned_database, load_database_config, merge_query_params, resolve_latest_database_version
+from api_dock.config import DEFAULT_CONFIG_DIR, filter_cookies_by_config, filter_remote_query_params, find_remote_config, find_route_mapping, get_authentication_config, get_database_names, get_remote_names, get_remote_versions, get_settings, is_route_allowed, is_versioned_remote, load_main_config, merge_inherited_config, resolve_latest_version
+from api_dock.database_config import check_database_config, find_database_route, get_database_versions, is_versioned_database, load_database_config, merge_query_params, resolve_latest_database_version
 from api_dock.listings import build_listing, resolve_listing_specs
 from api_dock.sql_builder import build_sql_query, extract_path_parameters, process_query_parameters, SqlSelectionError
 from api_dock.storage_auth import detect_required_backends, extract_table_metadata_by_backend, extract_table_uris, setup_storage_authentication
 from api_dock.types import PreparedRequest, ProxyResponse
-
-
 #
 # CONSTANTS
 #
@@ -87,18 +86,29 @@ class RouteMapper:
     def __init__(self, config_path: Optional[str] = None) -> None:
         """Initialize RouteMapper with configuration.
 
+        Remote and database config files are read from the directory holding
+        the main config file. Every listed database config is checked here, so
+        a bad config stops startup instead of failing on a live request.
+
         Args:
             config_path: Path to main config file. If None, uses default.
+
+        Raises:
+            ValueError: If a listed database config is missing or fails a check.
         """
         try:
             self.config = load_main_config(config_path)
         except (FileNotFoundError, Exception):
             self.config = {"name": "api-dock", "description": "API Dock wrapper", "authors": []}
 
-        self.remote_names = get_remote_names(self.config)
+        self.config_dir = os.path.dirname(config_path) if config_path else DEFAULT_CONFIG_DIR
+        self.remote_names = get_remote_names(self.config, self.config_dir)
         self.database_names = get_database_names(self.config)
         self.settings = get_settings(self.config)
         self.listing_specs, self.listing_warnings = resolve_listing_specs(self.config)
+
+        for database_name in self.database_names:
+            _check_database(database_name, self.config, self.config_dir)
 
     def get_config_metadata(self) -> Dict[str, Any]:
         """Get API metadata from configuration.
@@ -177,7 +187,7 @@ class RouteMapper:
         if remote_name not in self.remote_names:
             return _error_response(404, f"Remote '{remote_name}' not found")
 
-        is_versioned = is_versioned_remote(remote_name, self.config)
+        is_versioned = is_versioned_remote(remote_name, self.config, self.config_dir)
 
         path_parts = path.split("/") if path else []
         version = None
@@ -185,7 +195,7 @@ class RouteMapper:
 
         if is_versioned and path_parts:
             potential_version = path_parts[0]
-            available_versions = get_remote_versions(remote_name, self.config)
+            available_versions = get_remote_versions(remote_name, self.config, self.config_dir)
 
             if potential_version == "latest":
                 version = resolve_latest_version(available_versions)
@@ -200,17 +210,22 @@ class RouteMapper:
             else:
                 return _error_response(404, f"Configuration for remote '{remote_name}' not found")
         elif is_versioned and not path:
-            available_versions = get_remote_versions(remote_name, self.config)
+            available_versions = get_remote_versions(remote_name, self.config, self.config_dir)
             return _json_response({"versions": available_versions})
 
         if not actual_path:
             actual_path = ""
 
-        if not is_route_allowed(actual_path, self.config, remote_name, version, method):
+        allowed = is_route_allowed(
+            actual_path, self.config, remote_name, version, method, self.config_dir
+        )
+        if not allowed:
             return _error_response(403, f"Route '{actual_path}' not allowed for remote '{remote_name}'")
 
         try:
-            remote_config = find_remote_config(remote_name, self.config, version=version)
+            remote_config = find_remote_config(
+                remote_name, self.config, self.config_dir, version=version
+            )
         except FileNotFoundError:
             return _error_response(404, f"Configuration for remote '{remote_name}' not found")
 
@@ -371,7 +386,7 @@ class RouteMapper:
         if database_name not in self.database_names:
             return _error_response(404, f"Database '{database_name}' not found")
 
-        is_versioned = is_versioned_database(database_name)
+        is_versioned = is_versioned_database(database_name, self.config_dir)
 
         path_parts = path.split("/") if path else []
         version = None
@@ -379,7 +394,7 @@ class RouteMapper:
 
         if is_versioned and path_parts:
             potential_version = path_parts[0]
-            available_versions = get_database_versions(database_name)
+            available_versions = get_database_versions(database_name, self.config_dir)
 
             if potential_version == "latest":
                 version = resolve_latest_database_version(available_versions)
@@ -394,11 +409,13 @@ class RouteMapper:
             else:
                 return _error_response(404, f"Configuration for database '{database_name}' not found")
         elif is_versioned and not path:
-            available_versions = get_database_versions(database_name)
+            available_versions = get_database_versions(database_name, self.config_dir)
             return _json_response({"versions": available_versions})
 
         try:
-            database_config = load_database_config(database_name, version=version)
+            database_config = load_database_config(
+                database_name, self.config_dir, version=version
+            )
         except FileNotFoundError:
             return _error_response(404, f"Configuration for database '{database_name}' not found")
 
@@ -593,7 +610,7 @@ class RouteMapper:
         """
         from api_dock.config import get_remote_mapping
 
-        mapping = get_remote_mapping(self.config)
+        mapping = get_remote_mapping(self.config, self.config_dir)
         for remote_name, config_path in mapping.items():
             if config_path and filename in config_path:
                 return remote_name
@@ -603,6 +620,39 @@ class RouteMapper:
 #
 # INTERNAL
 #
+def _check_database(database_name: str, main_config: Dict[str, Any], config_dir: str) -> None:
+    """Load and check every version of a database config listed in the main config.
+
+    Args:
+        database_name: Name of the database.
+        main_config: Main configuration dictionary, for inheritance.
+        config_dir: Directory holding the config files.
+
+    Raises:
+        ValueError: If a config file is missing or fails a check. The message
+            names the database and version.
+    """
+    if is_versioned_database(database_name, config_dir):
+        versions: List[Optional[str]] = list(get_database_versions(database_name, config_dir))
+    else:
+        versions = [None]
+
+    for version in versions:
+        label = f"Database '{database_name}'"
+        if version is not None:
+            label += f" version '{version}'"
+        try:
+            database_config = load_database_config(database_name, config_dir, version=version)
+        except FileNotFoundError as error:
+            raise ValueError(
+                f"{label} is listed in the main config but has no config file"
+            ) from error
+        try:
+            check_database_config(merge_inherited_config(database_config, main_config))
+        except ValueError as error:
+            raise ValueError(f"{label}, {error}") from error
+
+
 def _resolve_timeout(value: Any) -> Optional[float]:
     """Resolve the configured timeout to seconds, or None to disable it.
 

@@ -465,7 +465,7 @@ Because the value is sent separately, **do not put quotes around variables**:
 | `UPPER(name) = UPPER({{name}})` | `UPPER(name) = UPPER('{{name}}')` |
 | `name ILIKE '%' \|\| {{name}} \|\| '%'` | `name ILIKE '%{{name}}%'` |
 
-Inside quotes, the value's placeholder is read as literal text, so a request to a route with a quoted variable fails with `500 Database query error`. A variable also can't be inside a SQL comment (`-- {{x}}` or `/* {{x}} */`). Its value is still sent, but the database ignores the comment, so it gets one more value than the query uses and the request fails with `500 Database query error`. A variable also can't be used as a column name in double quotes (`"{{column}}"`).
+A quoted variable would be read as literal text, so api_dock refuses to start and prints the route with the fixed form. A variable can't be used as a column name in double quotes (`"{{column}}"`) either. A variable inside a SQL comment (`-- {{x}}` or `/* {{x}} */`) is sent with nothing in the query to use it, so the request fails with `500 Database query error`.
 
 `sql_append` works differently. Its values are column names, `ASC`/`DESC` or numbers, which a database can't accept as separate values, so they are written into the SQL text. Each one must contain only letters, digits, spaces and `_ . , ( ) -`, and must not contain `--`. The same applies to the `sql_append` of a [conditional SQL selection](#conditional-sql-selection) branch.
 
