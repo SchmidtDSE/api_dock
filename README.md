@@ -453,6 +453,24 @@ routes:
 ## URL Query Parameters
 
 
+### How values reach the database
+
+api_dock does not paste request values into SQL. Each `{{variable}}` in `sql`, `multivalue_sql`, conditional `sql` and `queries:` becomes a placeholder, and its value (from the path, query string, a `default`, or a cookie) is sent to DuckDB separately. DuckDB converts the value to the column's type, so number, date and boolean filters work as written. A value that is not a valid number, date or boolean for its column, such as `?age=25 OR true`, is rejected with an error instead of being run as SQL.
+
+Because the value is sent separately, **do not put quotes around variables**:
+
+| Write | Not |
+|---|---|
+| `department = {{department}}` | `department = '{{department}}'` |
+| `UPPER(name) = UPPER({{name}})` | `UPPER(name) = UPPER('{{name}}')` |
+| `name ILIKE '%' \|\| {{name}} \|\| '%'` | `name ILIKE '%{{name}}%'` |
+
+Inside quotes, the value's placeholder is read as literal text, so a request to a route with a quoted variable fails with `500 Database query error`. A variable also can't be used as a column name in double quotes (`"{{column}}"`).
+
+`sql_append` works differently. Its values are column names, `ASC`/`DESC` or numbers, which a database can't accept as separate values, so they are written into the SQL text. Each one must contain only letters, digits, spaces and `_ . , ( ) -`, and must not contain `--`. The same applies to the `sql_append` of a [conditional SQL selection](#conditional-sql-selection) branch.
+
+The `# SQL:` comments in the examples below show values in place so the queries are easier to read.
+
 ### Basic Filtering with `sql`
 
 Use `sql` to add WHERE clause fragments. Each fragment is joined with `AND`. Optional by default — only included if the parameter is in the URL.
@@ -465,7 +483,7 @@ routes:
       - age:
           sql: age = {{age}}            # optional — only if ?age= provided
       - department:
-          sql: department = '{{department}}'
+          sql: department = {{department}}
       - height:
           sql: height < {{height}}
           default: 200                  # always included (uses 200 if not in URL)
@@ -481,7 +499,7 @@ GET /db/users
 
 ### Repeated Parameters with `multivalue_sql`
 
-A query parameter key can appear more than once in the URL (e.g. `?recording_id=1&recording_id=4`). Add a `multivalue_sql` template alongside `sql` to handle this: when **more than one** value is passed for the key, `multivalue_sql` is used instead of `sql`, and `{{param}}` expands to a parenthesized, quote-escaped SQL value list suitable for an `IN` clause.
+A query parameter key can appear more than once in the URL (e.g. `?recording_id=1&recording_id=4`). Add a `multivalue_sql` template alongside `sql` to handle this: when **more than one** value is passed for the key, `multivalue_sql` is used instead of `sql`, and `{{param}}` expands to a parenthesized list with one value per URL entry, suitable for an `IN` clause. Each value is sent to the database separately, like any other variable.
 
 Behavior is unchanged when `multivalue_sql` is absent, and when only a single value is passed the normal `sql` template is used.
 
@@ -494,7 +512,7 @@ routes:
           sql: "[[detections]].recording_id = {{recording_id}}"            # single value
           multivalue_sql: "[[detections]].recording_id IN {{recording_id}}"  # 2+ values
       - scientific_name:
-          sql: "[[detections]].scientific_name = '{{scientific_name}}'"
+          sql: "[[detections]].scientific_name = {{scientific_name}}"
 ```
 
 ```bash
@@ -520,7 +538,7 @@ routes:
     query_params:
       # WHERE clause params
       - department:
-          sql: department = '{{department}}'
+          sql: department = {{department}}
       # Post-WHERE params
       - sort:
           sql_append: ORDER BY {{sort}} {{sort_direction}}
@@ -633,13 +651,13 @@ routes:
     query_params:
       # WHERE clause filters
       - name:
-          sql: name ILIKE '%{{name}}%'
+          sql: name ILIKE '%' || {{name}} || '%'
       - age_min:
           sql: age >= {{age_min}}
       - age_max:
           sql: age <= {{age_max}}
       - department:
-          sql: department = '{{department}}'
+          sql: department = {{department}}
       # Sorting and pagination (sql_append)
       - sort:
           sql_append: ORDER BY {{sort}} {{sort_direction}}
@@ -887,7 +905,7 @@ Forwarded cookies are accessible in SQL queries using `{{cookies.cookie_name}}`:
 ```yaml
 routes:
   - route: user/profile
-    sql: SELECT * FROM [[users]] WHERE session_id = '{{cookies.session_id}}'
+    sql: SELECT * FROM [[users]] WHERE session_id = {{cookies.session_id}}
 ```
 
 ### Injecting cookies from the server environment
@@ -1230,9 +1248,9 @@ routes:
     sql: SELECT * FROM [[events]]
     query_params:
       - date_from:
-          sql: event_date >= '{{date_from}}'
+          sql: event_date >= {{date_from}}
       - event_type:
-          sql: type = '{{event_type}}'
+          sql: type = {{event_type}}
       - user_id:
           sql: user_id = {{user_id}}
           required: true
@@ -1308,13 +1326,13 @@ tables:
 
 routes:
   - route: my-activity
-    sql: SELECT * FROM [[user_activity]] WHERE user_id = '{{cookies.user_id}}'
+    sql: SELECT * FROM [[user_activity]] WHERE user_id = {{cookies.user_id}}
 
   - route: user-settings
     sql: |
       SELECT * FROM [[user_activity]]
-      WHERE user_id = '{{cookies.user_id}}'
-      AND session_token = '{{cookies.session_token}}'
+      WHERE user_id = {{cookies.user_id}}
+      AND session_token = {{cookies.session_token}}
 ```
 
 ---

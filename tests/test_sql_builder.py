@@ -5,7 +5,8 @@ Tests for multivalue query parameter support in the SQL builder.
 Covers the multivalue_sql feature: when a query parameter key is repeated in
 the URL (e.g. ?recording_id=1&recording_id=4), a param configured with a
 multivalue_sql template renders that template with {{param}} expanded to a
-parenthesized SQL value list, instead of the single-value sql template.
+parenthesized list with one bound-value marker per value, instead of the
+single-value sql template.
 
 License: BSD 3-Clause
 
@@ -35,7 +36,7 @@ ROUTE_CONFIG = {
                 "multivalue_sql": "[[detections]].recording_id in {{recording_id}}",
             }
         },
-        {"scientific_name": {"sql": "[[detections]].scientific_name = '{{scientific_name}}'"}},
+        {"scientific_name": {"sql": "[[detections]].scientific_name = {{scientific_name}}"}},
     ],
 }
 
@@ -67,7 +68,7 @@ class TestMultivalueWhereClause:
         fragments = build_where_clause_from_params(
             ROUTE_CONFIG, query_params, {}, multi
         )
-        assert fragments == ["[[detections]].recording_id in ('4', '1')"]
+        assert fragments == [("[[detections]].recording_id in (?, ?)", ["4", "1"])]
 
     def test_single_value_uses_sql(self) -> None:
         """A single value falls back to the single-value sql template."""
@@ -76,21 +77,21 @@ class TestMultivalueWhereClause:
         fragments = build_where_clause_from_params(
             ROUTE_CONFIG, query_params, {}, multi
         )
-        assert fragments == ["[[detections]].recording_id == '4'"]
+        assert fragments == [("[[detections]].recording_id == ?", ["4"])]
 
     def test_no_multi_dict_uses_sql(self) -> None:
         """Omitting multi_query_params preserves the original single-value behavior."""
         query_params = {"recording_id": "4"}
         fragments = build_where_clause_from_params(ROUTE_CONFIG, query_params, {})
-        assert fragments == ["[[detections]].recording_id == '4'"]
+        assert fragments == [("[[detections]].recording_id == ?", ["4"])]
 
-    def test_multivalue_escapes_quotes(self) -> None:
-        """Each value in the list is quote-escaped like single values are."""
+    def test_multivalue_binds_values_unchanged(self) -> None:
+        """Each value in the list is bound as received, quotes included."""
         route_config = {
             "query_params": [
                 {
                     "name": {
-                        "sql": "name = '{{name}}'",
+                        "sql": "name = {{name}}",
                         "multivalue_sql": "name in {{name}}",
                     }
                 }
@@ -100,7 +101,7 @@ class TestMultivalueWhereClause:
         fragments = build_where_clause_from_params(
             route_config, {"name": "Smith"}, {}, multi
         )
-        assert fragments == ["name in ('O''Brien', 'Smith')"]
+        assert fragments == [("name in (?, ?)", ["O'Brien", "Smith"])]
 
 
 class TestBuildSqlQueryMultivalue:
@@ -113,25 +114,27 @@ class TestBuildSqlQueryMultivalue:
             "recording_id": ["4", "1"],
             "scientific_name": ["Gryllus fultoni"],
         }
-        sql = build_sql_query(
+        sql, values = build_sql_query(
             ROUTE_CONFIG, DATABASE_CONFIG, {}, query_params, {}, multi
         )
         expected = (
             "SELECT detections.* FROM 'data/detections.parquet' AS detections "
-            "WHERE detections.recording_id in ('4', '1') "
-            "AND detections.scientific_name = 'Gryllus fultoni'"
+            "WHERE detections.recording_id in (?, ?) "
+            "AND detections.scientific_name = ?"
         )
         assert sql == expected
+        assert values == ["4", "1", "Gryllus fultoni"]
 
     def test_single_value_end_to_end(self) -> None:
         """A single recording_id uses the == template end to end."""
         query_params = {"recording_id": "4"}
         multi = {"recording_id": ["4"]}
-        sql = build_sql_query(
+        sql, values = build_sql_query(
             ROUTE_CONFIG, DATABASE_CONFIG, {}, query_params, {}, multi
         )
         expected = (
             "SELECT detections.* FROM 'data/detections.parquet' AS detections "
-            "WHERE detections.recording_id == '4'"
+            "WHERE detections.recording_id == ?"
         )
         assert sql == expected
+        assert values == ["4"]

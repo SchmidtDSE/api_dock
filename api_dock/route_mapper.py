@@ -451,7 +451,7 @@ class RouteMapper:
             return _error_response(500, "Query parameter processing error")
 
         try:
-            sql_query = build_sql_query(
+            sql_query, sql_values = build_sql_query(
                 route_config, database_config, path_params, query_params,
                 filtered_cookies, multi_query_params
             )
@@ -475,7 +475,7 @@ class RouteMapper:
             backend_metadata = extract_table_metadata_by_backend(database_config)
             setup_storage_authentication(conn, required_backends, backend_metadata)
 
-            result = conn.execute(sql_query).fetchall()
+            result = conn.execute(sql_query, sql_values).fetchall()
             columns = [desc[0] for desc in conn.description] if conn.description else []
             conn.close()
 
