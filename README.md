@@ -242,7 +242,7 @@ expose:
     dict: true                         # per-endpoint override of the top-level `dict`
 ```
 
-Custom multi-segment routes (e.g. `list/databases`) take precedence over the `/{remote}/{path}` proxy. If a listing route would shadow a configured remote/database, or an `include` names something that doesn't exist, API Dock emits a startup warning. The exposed routes are also reflected in the root (`/`) metadata's `endpoints`.
+Each listing route is served both with and without a trailing slash (e.g. `/sources` and `/sources/` both work), so it doesn't matter which convention your clients use. Custom multi-segment routes (e.g. `list/databases`) take precedence over the `/{remote}/{path}` proxy. If a listing route would shadow a configured remote/database, or an `include` names something that doesn't exist, API Dock emits a startup warning. The exposed routes are also reflected in the root (`/`) metadata's `endpoints`.
 
 ---
 
