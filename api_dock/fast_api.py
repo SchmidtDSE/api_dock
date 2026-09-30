@@ -12,6 +12,7 @@ License: BSD 3-Clause
 # IMPORTS
 #
 import json
+import warnings
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -57,7 +58,11 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
 
     app.state.route_mapper = route_mapper
 
+    for message in route_mapper.listing_warnings:
+        warnings.warn(message, stacklevel=2)
+
     _add_main_routes(app, route_mapper)
+    _add_listing_routes(app, route_mapper)
     _add_remote_routes(app, route_mapper)
     _add_error_handlers(app)
 
@@ -79,6 +84,27 @@ def _add_main_routes(app: FastAPI, route_mapper: RouteMapper) -> None:
     async def get_meta() -> Dict[str, Any]:
         """Return metadata from main config."""
         return route_mapper.get_config_metadata()
+
+
+def _add_listing_routes(app: FastAPI, route_mapper: RouteMapper) -> None:
+    """Add optional catalog-listing routes to the FastAPI app.
+
+    Registered before the remote proxy catch-all so custom multi-segment routes
+    (e.g. /list/databases) win over /{remote_name}/{path}.
+
+    Args:
+        app: FastAPI application instance.
+        route_mapper: RouteMapper instance.
+    """
+
+    def _make_endpoint(spec: Any):
+        async def _listing() -> Response:
+            """Return the models/versions for this listing."""
+            return JSONResponse(content=route_mapper.get_listing(spec))
+        return _listing
+
+    for spec in route_mapper.listing_specs:
+        app.add_api_route(f"/{spec.route}", _make_endpoint(spec), methods=["GET"])
 
 
 def _add_remote_routes(app: FastAPI, route_mapper: RouteMapper) -> None:
