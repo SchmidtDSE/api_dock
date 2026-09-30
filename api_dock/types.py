@@ -12,7 +12,7 @@ License: BSD 3-Clause
 # IMPORTS
 #
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 
 #
@@ -87,3 +87,27 @@ class ProxyResponse:
     content_type: str
     headers: Dict[str, str] = field(default_factory=dict)
     error_message: Optional[str] = None
+
+
+@dataclass
+class ListingSpec:
+    """A resolved catalog-listing endpoint to expose.
+
+    Produced by ``listings.resolve_listing_specs()`` from the main config's
+    ``expose`` section. Each spec becomes one GET route that returns the
+    models/versions of databases, remotes, or both ("sources").
+
+    Attributes:
+        kind: One of "databases", "remotes", or "sources" (both combined).
+        route: URL path for the endpoint, without a leading slash
+            (e.g. "databases" or "list/databases").
+        as_dict: If True, each entry is ``{"model": ..., "version": ...}``;
+            if False, each entry is a ``"model/version"`` string.
+        include: True (all), False (none), or a list of selectors naming which
+            models to include, optionally with a ``versions`` filter.
+    """
+
+    kind: str
+    route: str
+    as_dict: bool
+    include: Any = True
