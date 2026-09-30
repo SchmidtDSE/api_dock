@@ -202,3 +202,20 @@ class TestAdapterRegistration:
         app = create_fastapi_app(str(cfg))
         paths = {route.path for route in app.routes}
         assert "/databases" not in paths
+
+    def test_fastapi_accepts_both_slash_forms(self, tmp_path) -> None:
+        """Both /route and /route/ resolve to the listing (not the proxy)."""
+        from fastapi.testclient import TestClient
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("name: t\nexpose: true\n")
+        client = TestClient(create_fastapi_app(str(cfg)))
+        for path in ("/sources", "/sources/", "/databases", "/databases/"):
+            assert client.get(path).status_code == 200, path
+
+    def test_flask_accepts_both_slash_forms(self, tmp_path) -> None:
+        """Flask's strict_slashes=False accepts both /route and /route/."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("name: t\nexpose: true\n")
+        client = create_flask_app(str(cfg)).test_client()
+        for path in ("/sources", "/sources/", "/databases", "/databases/"):
+            assert client.get(path).status_code == 200, path
