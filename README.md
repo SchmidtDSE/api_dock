@@ -192,6 +192,58 @@ The optional `settings` section controls HTTP behavior:
 
 - **`timeout`** (default: `10`): Upstream request timeout in seconds, applied to both the streaming and buffered proxy paths. Raise it for slow upstreams (e.g. large aggregation queries) that would otherwise return a 502 on timeout. Set to `null` or `false` to disable the timeout entirely (not recommended — a stalled upstream can hold the connection open indefinitely).
 
+### Catalog Endpoints (`expose`)
+
+The optional `expose` section adds read-only endpoints that list the models and versions of your configured databases, remotes, or both ("sources"). Listings are **opt-in** — with no `expose` key nothing is added.
+
+```yaml
+# Enable all three defaults: /databases, /remotes, /sources
+expose: true
+```
+
+```yaml
+GET /databases
+# [{"model": "birdnet", "version": "2.4"},
+#  {"model": "birdnet", "version": "3.0"},
+#  {"model": "owl", "version": "0.5"}]
+
+GET /sources        # databases + remotes, combined
+# [{"model": "birdnet", "version": "2.4"}, ..., {"model": "core", "version": "0.5.0"}]
+```
+
+Versions are the config filename stems, so semver like `0.5.0` is preserved; unversioned sources report `version: null`. Enable only what you want, and control the output shape with `dict`:
+
+```yaml
+expose:
+  dict: false          # return "model/version" strings instead of {model, version} dicts
+  databases: true      # add /databases
+  remotes: true        # add /remotes
+  # sources omitted → not added
+
+# GET /databases -> ["birdnet/2.4", "birdnet/3.0", "owl/0.5"]
+```
+
+Each of `databases` / `remotes` / `sources` accepts several forms:
+
+```yaml
+expose:
+  databases: false                     # do not add the endpoint
+
+  remotes: "list/remotes"              # custom route path (same as true, but at /list/remotes)
+
+  databases:                           # explicit list of models (optionally version-filtered)
+    - birdnet
+    - owl:
+        versions: [4.0, 5.0]           # ints/floats/strings all match the "4.0"/"5.0" stems
+
+  sources:                             # most explicit form
+    route: "list/sources"
+    include: [birdnet, core]           # true (default) | false | list of models
+    dict: true                         # per-endpoint override of the top-level `dict`
+```
+
+Custom multi-segment routes (e.g. `list/databases`) take precedence over the `/{remote}/{path}` proxy. If a listing route would shadow a configured remote/database, or an `include` names something that doesn't exist, API Dock emits a startup warning. The exposed routes are also reflected in the root (`/`) metadata's `endpoints`.
+
 ---
 
 ## Remote Configurations

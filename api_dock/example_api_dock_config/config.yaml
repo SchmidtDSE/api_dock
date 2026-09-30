@@ -21,3 +21,11 @@ settings:
 # restricted:
 #   - route: "*"
 #     method: delete
+
+# Optional catalog endpoints listing models/versions (opt-in; omit to disable).
+# `expose: true` adds /databases, /remotes, and /sources.
+# expose:
+#   dict: true          # {model, version} dicts (false → "model/version" strings)
+#   databases: true     # add /databases
+#   remotes: true       # add /remotes
+#   # sources: true     # add /sources (databases + remotes combined)
