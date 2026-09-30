@@ -12,6 +12,7 @@ License: BSD 3-Clause
 # IMPORTS
 #
 import asyncio
+import warnings
 from flask import Flask, jsonify, request, Response as FlaskResponse
 from typing import Any, Dict, Optional
 
@@ -43,6 +44,10 @@ def create_app(config_path: Optional[str] = None) -> Flask:
 
     app.config['route_mapper'] = route_mapper
 
+    for message in route_mapper.listing_warnings:
+        warnings.warn(message, stacklevel=2)
+
+    _add_listing_routes(app, route_mapper)
     _add_remote_routes(app, route_mapper)
     _add_main_routes(app, route_mapper)
     _add_error_handlers(app)
@@ -65,6 +70,32 @@ def _add_main_routes(app: Flask, route_mapper: RouteMapper) -> None:
     def get_meta() -> Dict[str, Any]:
         """Return metadata from main config."""
         return jsonify(route_mapper.get_config_metadata())
+
+
+def _add_listing_routes(app: Flask, route_mapper: RouteMapper) -> None:
+    """Add optional catalog-listing routes to the Flask app.
+
+    Flask prefers static rules over the dynamic proxy rule, so custom
+    multi-segment routes (e.g. /list/databases) win over /<remote_name>/<path>.
+
+    Args:
+        app: Flask application instance.
+        route_mapper: RouteMapper instance.
+    """
+
+    def _make_view(spec: Any):
+        def _listing():
+            """Return the models/versions for this listing."""
+            return jsonify(route_mapper.get_listing(spec))
+        return _listing
+
+    for index, spec in enumerate(route_mapper.listing_specs):
+        app.add_url_rule(
+            f"/{spec.route}",
+            endpoint=f"listing_{index}_{spec.kind}",
+            view_func=_make_view(spec),
+            methods=["GET"],
+        )
 
 
 def _add_remote_routes(app: Flask, route_mapper: RouteMapper) -> None:
