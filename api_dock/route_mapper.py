@@ -18,6 +18,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 from api_dock.auth import validate_authentication
 from api_dock.config import filter_cookies_by_config, filter_remote_query_params, find_remote_config, find_route_mapping, get_authentication_config, get_database_names, get_remote_names, get_remote_versions, get_settings, is_route_allowed, is_versioned_remote, load_main_config, merge_inherited_config, resolve_latest_version
 from api_dock.database_config import find_database_route, get_database_versions, is_versioned_database, load_database_config, merge_query_params, resolve_latest_database_version
+from api_dock.listings import build_listing, resolve_listing_specs
 from api_dock.sql_builder import build_sql_query, extract_path_parameters, process_query_parameters, SqlSelectionError
 from api_dock.storage_auth import detect_required_backends, extract_table_metadata_by_backend, extract_table_uris, setup_storage_authentication
 from api_dock.types import PreparedRequest, ProxyResponse
@@ -97,6 +98,7 @@ class RouteMapper:
         self.remote_names = get_remote_names(self.config)
         self.database_names = get_database_names(self.config)
         self.settings = get_settings(self.config)
+        self.listing_specs, self.listing_warnings = resolve_listing_specs(self.config)
 
     def get_config_metadata(self) -> Dict[str, Any]:
         """Get API metadata from configuration.
@@ -107,14 +109,32 @@ class RouteMapper:
         """
         all_remotes = self.remote_names + self.database_names
 
+        endpoints = list(self.config.get("endpoints", ["/"]))
+        for spec in getattr(self, "listing_specs", []):
+            endpoint = f"/{spec.route}"
+            if endpoint not in endpoints:
+                endpoints.append(endpoint)
+
         metadata = {
             "name": self.config.get("name", "API Dock"),
             "description": self.config.get("description", "API wrapper using configuration files"),
             "authors": self.config.get("authors", []),
-            "endpoints": self.config.get("endpoints", ["/"]),
+            "endpoints": endpoints,
             "remotes": all_remotes
         }
         return metadata
+
+    def get_listing(self, spec: Any) -> List[Any]:
+        """Build the response body for a catalog-listing endpoint.
+
+        Args:
+            spec: A ListingSpec produced during initialization.
+
+        Returns:
+            A list of ``{"model", "version"}`` dicts or ``"model/version"``
+            strings, per the spec's format.
+        """
+        return build_listing(spec, self.config)
 
     async def prepare_remote_request(
             self,
