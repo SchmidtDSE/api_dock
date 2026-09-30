@@ -104,7 +104,14 @@ def _add_listing_routes(app: FastAPI, route_mapper: RouteMapper) -> None:
         return _listing
 
     for spec in route_mapper.listing_specs:
-        app.add_api_route(f"/{spec.route}", _make_endpoint(spec), methods=["GET"])
+        endpoint = _make_endpoint(spec)
+        base = spec.route.rstrip("/")
+        # Register both /route and /route/ so the listing works regardless of the
+        # client's trailing-slash convention. Without the slash alias the proxy
+        # catch-all (/{remote_name}/{path}) would swallow the trailing-slash form.
+        # The alias is hidden from the OpenAPI schema to keep the docs clean.
+        app.add_api_route(f"/{base}", endpoint, methods=["GET"])
+        app.add_api_route(f"/{base}/", endpoint, methods=["GET"], include_in_schema=False)
 
 
 def _add_remote_routes(app: FastAPI, route_mapper: RouteMapper) -> None:
