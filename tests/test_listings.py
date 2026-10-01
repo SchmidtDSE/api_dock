@@ -14,11 +14,16 @@ License: BSD 3-Clause
 #
 # IMPORTS
 #
+from pathlib import Path
 from unittest.mock import patch
+
+import pytest
+import yaml
 
 from api_dock.fast_api import create_app as create_fastapi_app
 from api_dock.flask_api import create_app as create_flask_app
 from api_dock.listings import build_listing, resolve_listing_specs
+from api_dock.route_mapper import RouteMapper
 from api_dock.types import ListingSpec
 
 
@@ -27,6 +32,11 @@ from api_dock.types import ListingSpec
 #
 DBS = {"birdnet": ["2.4", "3.0"], "owl": ["0.5"]}
 REMOTES = {"core": ["0.5.0"]}
+DATABASE_CONFIG = {
+    "name": "catalog",
+    "tables": {"items": "items.parquet"},
+    "routes": [{"route": "items", "sql": "SELECT * FROM [[items]]"}],
+}
 
 
 #
@@ -219,3 +229,68 @@ class TestAdapterRegistration:
         client = create_flask_app(str(cfg)).test_client()
         for path in ("/sources", "/sources/", "/databases", "/databases/"):
             assert client.get(path).status_code == 200, path
+
+
+class TestConfigOutsideDefaultFolder:
+    """Listings read the folder that holds the main config, not the default one."""
+
+    def test_database_versions(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        mapper = _mapper_outside_default_folder(tmp_path, monkeypatch)
+        spec = ListingSpec(kind="databases", route="databases", as_dict=False)
+        assert mapper.get_listing(spec) == ["catalog/1.0", "catalog/2.0"]
+
+    def test_remote_versions(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        mapper = _mapper_outside_default_folder(tmp_path, monkeypatch)
+        spec = ListingSpec(kind="remotes", route="remotes", as_dict=False)
+        assert mapper.get_listing(spec) == ["weather/0.1", "forecast"]
+
+    def test_include_uses_remote_name_from_file(
+            self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        mapper = _mapper_outside_default_folder(tmp_path, monkeypatch)
+        assert mapper.listing_warnings == []
+
+
+#
+# INTERNAL
+#
+def _mapper_outside_default_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RouteMapper:
+    """Write a config to a non-default folder and load it from another directory.
+
+    The folder has a versioned database, a versioned remote, and a remote whose
+    file name (``fc``) differs from the ``name`` inside it (``forecast``).
+
+    Args:
+        tmp_path: Pytest temp directory.
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        RouteMapper loaded from the config.
+    """
+    config_dir = tmp_path / "my_config"
+    for version in ("1.0", "2.0"):
+        _write_yaml(config_dir / "databases" / "catalog" / f"{version}.yaml", DATABASE_CONFIG)
+    _write_yaml(config_dir / "remotes" / "weather" / "0.1.yaml",
+                {"name": "weather", "url": "https://example.com"})
+    _write_yaml(config_dir / "remotes" / "fc.yaml",
+                {"name": "forecast", "url": "https://example.com"})
+    _write_yaml(config_dir / "config.yaml", {
+        "name": "test",
+        "databases": ["catalog"],
+        "remotes": ["weather", "fc"],
+        "expose": {"remotes": ["weather", "forecast"]},
+    })
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    return RouteMapper(str(config_dir / "config.yaml"))
+
+
+def _write_yaml(path: Path, data: dict) -> None:
+    """Write data to path as YAML, creating parent folders.
+
+    Args:
+        path: File to write.
+        data: Data to serialize.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(data))

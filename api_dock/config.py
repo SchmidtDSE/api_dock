@@ -553,7 +553,7 @@ def resolve_latest_version(versions: List[str]) -> Optional[str]:
         return sorted_versions[0]
 
 
-def is_route_allowed(route: str, config: Dict[str, Any], remote_name: Optional[str] = None, version: Optional[str] = None, method: Optional[str] = None) -> bool:
+def is_route_allowed(route: str, config: Dict[str, Any], remote_name: Optional[str] = None, version: Optional[str] = None, method: Optional[str] = None, config_dir: Optional[str] = None) -> bool:
     """Check if a route is allowed based on configuration restrictions.
 
     Args:
@@ -562,6 +562,8 @@ def is_route_allowed(route: str, config: Dict[str, Any], remote_name: Optional[s
         remote_name: Name of the remote API (for remote-specific restrictions).
         version: Version string for versioned remotes.
         method: HTTP method (e.g., "GET", "POST", "DELETE").
+        config_dir: Directory holding the remote config files. If omitted, it
+            is guessed from a few common locations.
 
     Returns:
         True if route is allowed, False otherwise.
@@ -581,9 +583,8 @@ def is_route_allowed(route: str, config: Dict[str, Any], remote_name: Optional[s
         try:
             # Try to infer config_dir by checking which directory exists
             # This is a heuristic to support both default and custom config locations
-            config_dir = None
             remotes = config.get("remotes", [])
-            if remotes:
+            if config_dir is None and remotes:
                 first_remote = remotes[0] if isinstance(remotes[0], str) else remotes[0].get("name") if isinstance(remotes[0], dict) else None
                 if first_remote:
                     # Try common locations
