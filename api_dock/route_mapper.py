@@ -105,7 +105,9 @@ class RouteMapper:
         self.remote_names = get_remote_names(self.config, self.config_dir)
         self.database_names = get_database_names(self.config)
         self.settings = get_settings(self.config)
-        self.listing_specs, self.listing_warnings = resolve_listing_specs(self.config)
+        self.listing_specs, self.listing_warnings = resolve_listing_specs(
+            self.config, self.config_dir
+        )
 
         for database_name in self.database_names:
             _check_database(database_name, self.config, self.config_dir)
@@ -144,7 +146,7 @@ class RouteMapper:
             A list of ``{"model", "version"}`` dicts or ``"model/version"``
             strings, per the spec's format.
         """
-        return build_listing(spec, self.config)
+        return build_listing(spec, self.config, self.config_dir)
 
     async def prepare_remote_request(
             self,
