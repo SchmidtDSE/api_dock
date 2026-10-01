@@ -18,11 +18,11 @@ routes:
     query_params:
       # WHERE clause filter — only applied when the param is present in the URL.
       - category:
-          sql: "[[items]].category = '{{category}}'"
+          sql: "[[items]].category = {{category}}"
 
       # Repeated param — add multivalue_sql to support ?id=1&id=2. When more than
       # one value is passed, multivalue_sql is used and {{id}} expands to a
-      # parenthesized value list (e.g. ('1', '2')) for use with IN.
+      # parenthesized list with one value per entry, for use with IN.
       - id:
           sql: "[[items]].id = {{id}}"
           multivalue_sql: "[[items]].id IN {{id}}"
@@ -60,7 +60,7 @@ routes:
 #   sql: SELECT [[items]].* FROM [[items]]
 #   query_params:
 #     - q:
-#         sql: "[[items]].name ILIKE '%{{q}}%'"
+#         sql: "[[items]].name ILIKE '%' || {{q}} || '%'"
 #         required: true
 #         missing_response:
 #           error: "q is required"
@@ -93,4 +93,4 @@ routes:
 #     - else: SELECT [[items]].* FROM [[items]]
 #   query_params:
 #     - category:
-#         sql: "[[items]].category = '{{category}}'"
+#         sql: "[[items]].category = {{category}}"
