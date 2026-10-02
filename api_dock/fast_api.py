@@ -33,6 +33,9 @@ from api_dock.types import PreparedRequest, ProxyResponse
 # because httpx decompresses there and the header would otherwise be wrong.)
 _STREAMING_EXCLUDED_HEADERS: frozenset = HOP_BY_HOP_HEADERS - frozenset({"content-encoding"})
 
+# The default app, built on the first read of `app` (see __getattr__).
+_default_app: Optional[FastAPI] = None
+
 
 #
 # PUBLIC
@@ -67,6 +70,29 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     _add_error_handlers(app)
 
     return app
+
+
+def __getattr__(name: str) -> Any:
+    """Build the default FastAPI app the first time ``app`` is read.
+
+    The app is not built at import, because building it loads the config from
+    the current directory. Later reads return the same app.
+
+    Args:
+        name: Attribute name not otherwise defined in this module.
+
+    Returns:
+        The default FastAPI app, when name is ``app``.
+
+    Raises:
+        AttributeError: If name is not ``app``.
+    """
+    global _default_app
+    if name != "app":
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    if _default_app is None:
+        _default_app = create_app()
+    return _default_app
 
 
 #
@@ -292,7 +318,3 @@ async def _stream_upstream(prepared: PreparedRequest) -> Response:
         headers=headers,
         media_type=upstream.headers.get("content-type", "application/octet-stream"),
     )
-
-
-# Default app instance
-app = create_app()

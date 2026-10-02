@@ -175,6 +175,26 @@ class TestBuildSqlQueryValues:
         with pytest.raises(ValueError):
             build_sql_query(route, DATABASE_CONFIG, {}, {})
 
+    def test_marker_argument_is_written_for_every_value(self) -> None:
+        """The given marker replaces ? in base SQL, WHERE and multivalue fragments."""
+        route = {
+            "route": "groups/{{group_id}}/items",
+            "sql": "SELECT * FROM [[d]] WHERE d.group_id = {{group_id}}",
+            "query_params": [
+                {"weight": {"sql": "d.weight >= {{weight}}"}},
+                {"id": {"sql": "id = {{id}}", "multivalue_sql": "id IN {{id}}"}},
+            ],
+        }
+        sql, values = build_sql_query(
+            route, DATABASE_CONFIG, {"group_id": "42"}, {"weight": "0.5", "id": "2"},
+            {}, {"id": ["1", "2"]}, marker="%s",
+        )
+        assert sql == (
+            f"SELECT * FROM {TABLE_SQL} WHERE d.group_id = %s"
+            " AND d.weight >= %s AND id IN (%s, %s)"
+        )
+        assert values == ["42", "0.5", "1", "2"]
+
 
 class TestSqlAppendValues:
     """sql_append values are checked and written into the SQL text, not bound."""

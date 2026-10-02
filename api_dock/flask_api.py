@@ -22,6 +22,8 @@ from api_dock.route_mapper import collect_multi_query_params, RouteMapper
 #
 # CONSTANTS
 #
+# The default app, built on the first read of `app` (see __getattr__).
+_default_app: Optional[Flask] = None
 
 
 #
@@ -53,6 +55,29 @@ def create_app(config_path: Optional[str] = None) -> Flask:
     _add_error_handlers(app)
 
     return app
+
+
+def __getattr__(name: str) -> Any:
+    """Build the default Flask app the first time ``app`` is read.
+
+    The app is not built at import, because building it loads the config from
+    the current directory. Later reads return the same app.
+
+    Args:
+        name: Attribute name not otherwise defined in this module.
+
+    Returns:
+        The default Flask app, when name is ``app``.
+
+    Raises:
+        AttributeError: If name is not ``app``.
+    """
+    global _default_app
+    if name != "app":
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    if _default_app is None:
+        _default_app = create_app()
+    return _default_app
 
 
 #
@@ -212,7 +237,3 @@ def _add_error_handlers(app: Flask) -> None:
     def internal_error(error):
         """Return JSON response for 500 errors."""
         return jsonify({"error": "Internal server error"}), 500
-
-
-# Default app instance
-app = create_app()
