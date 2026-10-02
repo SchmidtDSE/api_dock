@@ -11,22 +11,35 @@ License: BSD 3-Clause
 #
 # IMPORTS
 #
+import base64
+import ipaddress
 import json
 import os
-import httpx
+from datetime import date, datetime, timedelta
+from decimal import Decimal
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+from uuid import UUID
+
+import httpx
 
 from api_dock.auth import validate_authentication
 from api_dock.config import DEFAULT_CONFIG_DIR, filter_cookies_by_config, filter_remote_query_params, find_remote_config, find_route_mapping, get_authentication_config, get_database_names, get_remote_names, get_remote_versions, get_settings, is_route_allowed, is_versioned_remote, load_main_config, merge_inherited_config, resolve_latest_version
+from api_dock.database_backends import DuckDBBackend
 from api_dock.database_config import check_database_config, find_database_route, get_database_versions, is_versioned_database, load_database_config, merge_query_params, resolve_latest_database_version
 from api_dock.listings import build_listing, resolve_listing_specs
 from api_dock.sql_builder import build_sql_query, extract_path_parameters, process_query_parameters, SqlSelectionError
-from api_dock.storage_auth import detect_required_backends, extract_table_metadata_by_backend, extract_table_uris, setup_storage_authentication
 from api_dock.types import PreparedRequest, ProxyResponse
 #
 # CONSTANTS
 #
 DEFAULT_VERSION: str = "latest"
+
+# Network address types that are written to JSON as their string form.
+IP_ADDRESS_TYPES: Tuple[type, ...] = (
+    ipaddress.IPv4Address, ipaddress.IPv6Address,
+    ipaddress.IPv4Interface, ipaddress.IPv6Interface,
+    ipaddress.IPv4Network, ipaddress.IPv6Network,
+)
 
 # Default upstream request timeout in seconds. Override with the `timeout`
 # setting; set it to null/false to disable the timeout entirely.
@@ -469,10 +482,11 @@ class RouteMapper:
         except Exception:
             return _error_response(500, "Query parameter processing error")
 
+        backend = DuckDBBackend(database_config)
         try:
             sql_query, sql_values = build_sql_query(
                 route_config, database_config, path_params, query_params,
-                filtered_cookies, multi_query_params
+                filtered_cookies, multi_query_params, marker=backend.marker
             )
         except SqlSelectionError as e:
             return ProxyResponse(
@@ -485,26 +499,11 @@ class RouteMapper:
             return _error_response(500, "SQL query error")
 
         try:
-            import duckdb
-
-            conn = duckdb.connect(database=':memory:')
-
-            table_uris = extract_table_uris(database_config)
-            required_backends = detect_required_backends(table_uris)
-            backend_metadata = extract_table_metadata_by_backend(database_config)
-            setup_storage_authentication(conn, required_backends, backend_metadata)
-
-            result = conn.execute(sql_query, sql_values).fetchall()
-            columns = [desc[0] for desc in conn.description] if conn.description else []
-            conn.close()
-
-            response_data = []
-            for row in result:
-                row_dict = {}
-                for col, val in zip(columns, row):
-                    row_dict[col] = _make_json_safe(val)
-                response_data.append(row_dict)
-
+            columns, rows = await backend.execute(sql_query, sql_values)
+            response_data = [
+                {column: _make_json_safe(value) for column, value in zip(columns, row)}
+                for row in rows
+            ]
             return _json_response(response_data)
 
         except Exception:
@@ -728,10 +727,13 @@ def _filter_response_headers(headers: Dict[str, str]) -> Dict[str, str]:
 
 
 def _make_json_safe(value: Any) -> Any:
-    """Convert non-JSON-serializable values to JSON-safe types.
+    """Convert a database value to a value json can write.
 
-    Handles datetime objects, dates, decimals, and other common types
-    that DuckDB returns but aren't directly JSON serializable.
+    Dictionaries, lists and tuples are converted item by item; tuples become
+    lists. Dates and times become ISO strings, decimals become floats (which
+    may lose precision), bytes become base64 text, UUIDs and network addresses
+    become strings, and intervals become a number of seconds. Other values are
+    returned unchanged, so an unsupported type still fails JSON encoding.
 
     Args:
         value: Value to convert.
@@ -739,17 +741,18 @@ def _make_json_safe(value: Any) -> Any:
     Returns:
         JSON-safe version of the value.
     """
-    from datetime import date, datetime
-    from decimal import Decimal
-
-    if value is None:
-        return None
-    elif isinstance(value, (datetime, date)):
+    if isinstance(value, dict):
+        return {key: _make_json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_make_json_safe(item) for item in value]
+    if isinstance(value, (datetime, date)):
         return value.isoformat()
-    elif isinstance(value, Decimal):
+    if isinstance(value, Decimal):
         return float(value)
-    elif isinstance(value, bytes):
-        import base64
+    if isinstance(value, bytes):
         return base64.b64encode(value).decode('utf-8')
-    else:
-        return value
+    if isinstance(value, timedelta):
+        return value.total_seconds()
+    if isinstance(value, (UUID,) + IP_ADDRESS_TYPES):
+        return str(value)
+    return value
