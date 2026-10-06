@@ -19,6 +19,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import yaml
 
 from api_dock.postgres_config import check_postgres_config
+from api_dock.route_headers import HEADERS_KEY, check_route_headers
 from api_dock.sql_template_check import (
     check_comment_at_end,
     check_commented_variables,
@@ -36,6 +37,9 @@ BACKEND_KEY: str = "backend"
 DUCKDB_BACKEND: str = "duckdb"
 POSTGRES_BACKEND: str = "postgres"
 BACKENDS: Tuple[str, ...] = (DUCKDB_BACKEND, POSTGRES_BACKEND)
+
+# internal: true hides a database from HTTP requests, metadata and listings.
+INTERNAL_KEY: str = "internal"
 
 # Keys a query_params entry may have; at least one must be present.
 QUERY_PARAM_KEYS: frozenset = frozenset({
@@ -353,6 +357,33 @@ def get_backend_name(database_config: Dict[str, Any]) -> str:
     return backend
 
 
+def is_internal_database(database_config: Dict[str, Any]) -> bool:
+    """Return whether a checked database config sets ``internal: true``."""
+    return database_config.get(INTERNAL_KEY, False) is True
+
+
+def needs_startup_snapshot(database_config: Any) -> bool:
+    """Return whether a config uses a setting that is read only at startup.
+
+    These settings are ``internal:`` and route ``headers:``. A key counts even
+    if its value is malformed, so a live config can't start to use one.
+
+    Args:
+        database_config: Database config as loaded from its file.
+
+    Returns:
+        True if the config has one of these keys.
+    """
+    if not isinstance(database_config, dict):
+        return False
+    if INTERNAL_KEY in database_config:
+        return True
+    routes = database_config.get('routes')
+    if not isinstance(routes, list):
+        return False
+    return any(isinstance(route, dict) and HEADERS_KEY in route for route in routes)
+
+
 def check_database_config(database_config: Dict[str, Any]) -> None:
     """Check the backend, every named query and every route of a loaded database config.
 
@@ -362,7 +393,8 @@ def check_database_config(database_config: Dict[str, Any]) -> None:
     then checked for shape and for {{variables}} inside quotes or comments in
     any template whose values are bound. sql_append templates are not checked
     for variables because their values are written into the SQL text. No
-    template may end inside a comment.
+    template may end inside a comment. ``internal:`` must be true or false,
+    and route ``headers:`` are checked with check_route_headers().
 
     Args:
         database_config: Database configuration, already merged with the main config.
@@ -371,6 +403,7 @@ def check_database_config(database_config: Dict[str, Any]) -> None:
         ValueError: If a query or route fails a check. The message names the
             route (or query) and the template's location.
     """
+    _check_internal(database_config)
     is_postgres = get_backend_name(database_config) == POSTGRES_BACKEND
     if is_postgres:
         check_postgres_config(database_config)
@@ -382,6 +415,7 @@ def check_database_config(database_config: Dict[str, Any]) -> None:
     for index, route_config in enumerate(database_config.get('routes', [])):
         try:
             validate_route_config(route_config)
+            check_route_headers(route_config)
             merged = merge_query_params(route_config, database_config)
             validate_route_config(merged)
             for location, template in _bound_templates(merged):
@@ -421,6 +455,13 @@ def load_database_config_with_inheritance(database_filename: str, main_config: D
 #
 # INTERNAL
 #
+def _check_internal(database_config: Dict[str, Any]) -> None:
+    """Refuse an ``internal:`` value that is not true or false."""
+    value = database_config.get(INTERNAL_KEY, False)
+    if not isinstance(value, bool):
+        raise ValueError(f"internal: must be true or false, not {value!r}")
+
+
 def _validate_query_param(param_item: Any) -> None:
     """Check the shape of one query_params entry.
 

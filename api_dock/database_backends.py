@@ -16,7 +16,7 @@ License: BSD 3-Clause
 #
 import asyncio
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import duckdb
 
@@ -54,14 +54,16 @@ class DatabaseBackend(ABC):
     marker: str
 
     @abstractmethod
-    async def execute(self, sql: str, values: List[str]) -> Tuple[List[str], List[Tuple[Any, ...]]]:
+    async def execute(
+            self, sql: str,
+            values: List[Optional[str]]) -> Tuple[List[str], List[Tuple[Any, ...]]]:
         """Run SQL and return all of its rows.
 
         Errors from the database are raised for the caller to handle.
 
         Args:
             sql: SQL text with one marker per bound value.
-            values: Values for the markers, in marker order.
+            values: Values for the markers, in marker order. None is SQL NULL.
 
         Returns:
             Tuple of the column names and every row.
@@ -88,7 +90,9 @@ class DuckDBBackend(DatabaseBackend):
         """
         self.database_config = database_config
 
-    async def execute(self, sql: str, values: List[str]) -> Tuple[List[str], List[Tuple[Any, ...]]]:
+    async def execute(
+            self, sql: str,
+            values: List[Optional[str]]) -> Tuple[List[str], List[Tuple[Any, ...]]]:
         """Run SQL in a worker thread and return all of its rows.
 
         Args:
@@ -101,7 +105,8 @@ class DuckDBBackend(DatabaseBackend):
         return await asyncio.to_thread(self._execute_in_thread, sql, values)
 
     def _execute_in_thread(
-            self, sql: str, values: List[str]) -> Tuple[List[str], List[Tuple[Any, ...]]]:
+            self, sql: str,
+            values: List[Optional[str]]) -> Tuple[List[str], List[Tuple[Any, ...]]]:
         """Open a connection, run SQL, fetch every row and close the connection.
 
         Args:

@@ -14,7 +14,7 @@ License: BSD 3-Clause
 #
 # IMPORTS
 #
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import psycopg
 from psycopg.conninfo import make_conninfo
@@ -66,7 +66,9 @@ class PostgresBackend(DatabaseBackend):
         """Use an open pool for one database version."""
         self.pool = pool
 
-    async def execute(self, sql: str, values: List[str]) -> Tuple[List[str], List[Tuple[Any, ...]]]:
+    async def execute(
+            self, sql: str,
+            values: List[Optional[str]]) -> Tuple[List[str], List[Tuple[Any, ...]]]:
         """Run SQL on a pooled connection and return all of its rows.
 
         Args:
@@ -188,7 +190,8 @@ def _libpq_keywords() -> Set[str]:
 
 
 async def _run_and_roll_back(
-        conn: Any, sql: str, values: List[str]) -> Tuple[List[str], List[Tuple[Any, ...]]]:
+        conn: Any, sql: str,
+        values: List[Optional[str]]) -> Tuple[List[str], List[Tuple[Any, ...]]]:
     """Execute one prepared query, fetch its columns and rows, and always roll back."""
     try:
         async with conn.cursor() as cursor:

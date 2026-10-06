@@ -18,7 +18,7 @@ import logging
 import os
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 from uuid import UUID
 
 import httpx
@@ -39,13 +39,16 @@ from api_dock.database_config import (
     find_database_route,
     get_backend_name,
     get_database_versions,
+    is_internal_database,
     is_versioned_database,
     load_database_config,
     merge_query_params,
+    needs_startup_snapshot,
     resolve_latest_database_version,
 )
 from api_dock.listings import build_listing, resolve_listing_specs
 from api_dock.postgres_pools import DatabaseKey, PostgresPools, database_label
+from api_dock.route_headers import HEADERS_KEY, HeaderValueError, fill_route_headers
 from api_dock.sql_builder import build_sql_query, extract_path_parameters, process_query_parameters, SqlSelectionError
 from api_dock.types import PreparedRequest, ProxyResponse
 #
@@ -58,6 +61,9 @@ logger: logging.Logger = logging.getLogger(__name__)
 # Returned when a database that had only DuckDB versions at startup now has a
 # PostgreSQL config, which needs a pool that only a new mapper can open.
 RESTART_REQUIRED_MESSAGE: str = "Database configuration changed; restart required"
+
+# Returned when a route's headers: can't be filled. The details are logged.
+RESOLVER_ERROR_MESSAGE: str = "Resolver error"
 
 # Network address types that are written to JSON as their string form.
 IP_ADDRESS_TYPES: Tuple[type, ...] = (
@@ -127,15 +133,18 @@ class RouteMapper:
         Remote and database config files are read from the directory holding
         the main config file. Every listed database config is checked here, so
         a bad config stops startup instead of failing on a live request. A
-        database with any PostgreSQL version is kept as loaded here, with all
-        its versions, until a new mapper is created. No connection is opened
-        until start().
+        database with any PostgreSQL version, or any version that uses
+        internal: or route headers:, is kept as loaded here, with all its
+        versions, until a new mapper is created. Internal databases are left
+        out of database_names, which the adapters use for dispatch. No
+        connection is opened until start().
 
         Args:
             config_path: Path to main config file. If None, uses default.
 
         Raises:
-            ValueError: If a listed database config is missing or fails a check.
+            ValueError: If a listed database config is missing or fails a check,
+                or the versions of a database differ in internal:.
         """
         try:
             self.config = load_main_config(config_path)
@@ -144,17 +153,22 @@ class RouteMapper:
 
         self.config_dir = os.path.dirname(config_path) if config_path else DEFAULT_CONFIG_DIR
         self.remote_names = get_remote_names(self.config, self.config_dir)
-        self.database_names = get_database_names(self.config)
         self.settings = get_settings(self.config)
-        self.listing_specs, self.listing_warnings = resolve_listing_specs(
-            self.config, self.config_dir
-        )
 
         self._snapshots: Dict[str, Dict[Optional[str], Dict[str, Any]]] = {}
-        for database_name in self.database_names:
+        internal_names = set()
+        for database_name in get_database_names(self.config):
             configs = _load_checked_database(database_name, self.config, self.config_dir)
-            if any(get_backend_name(config) == POSTGRES_BACKEND for config in configs.values()):
+            if _internal_setting(database_name, configs):
+                internal_names.add(database_name)
+            if _needs_snapshot(configs):
                 self._snapshots[database_name] = configs
+        self.database_names = [
+            name for name in get_database_names(self.config) if name not in internal_names
+        ]
+        self.listing_specs, self.listing_warnings = resolve_listing_specs(
+            self.config, self.config_dir, database_names=self.database_names
+        )
         self._postgres = PostgresPools(self._postgres_configs())
 
     @property
@@ -221,7 +235,8 @@ class RouteMapper:
             strings, per the spec's format.
         """
         return build_listing(
-            spec, self.config, self.config_dir, database_versions=self._listed_versions
+            spec, self.config, self.config_dir, database_versions=self._listed_versions,
+            database_names=self.database_names,
         )
 
     async def prepare_remote_request(
@@ -441,6 +456,10 @@ class RouteMapper:
             multi_query_params: Optional[Dict[str, List[str]]] = None) -> ProxyResponse:
         """Execute a SQL query for a database route and return results as JSON.
 
+        A route's headers: are filled from its path values and added to a
+        successful response only. A filled value that can't be sent gives
+        500 Resolver error.
+
         Args:
             database_name: Name of the database.
             path: The path to match against database routes.
@@ -461,6 +480,7 @@ class RouteMapper:
         if multi_query_params is None:
             multi_query_params = {}
 
+        # database_names leaves out internal databases, so they answer as unknown.
         if database_name not in self.database_names:
             return _error_response(404, f"Database '{database_name}' not found")
 
@@ -491,6 +511,10 @@ class RouteMapper:
         if early_response is not None:
             return early_response
 
+        headers = _route_headers(route_config, path_params, (database_name, version))
+        if isinstance(headers, ProxyResponse):
+            return headers
+
         backend = self._select_backend(database_name, version, database_config)
         query = _build_query(
             route_config, database_config, path_params, query_params,
@@ -499,7 +523,10 @@ class RouteMapper:
         if isinstance(query, ProxyResponse):
             return query
         sql, values = query
-        return await _run_query(backend, sql, values, (database_name, version))
+        response = await _run_query(backend, sql, values, (database_name, version))
+        if response.error_message is None:
+            response.headers.update(headers)
+        return response
 
     def is_remote_name(self, name: str) -> bool:
         """Check if a given name is a configured remote name.
@@ -591,10 +618,10 @@ class RouteMapper:
             path: str) -> Union[ProxyResponse, Tuple[Optional[str], str, Dict[str, Any]]]:
         """Return (version, route path, config), or a listing/error response.
 
-        A database with a PostgreSQL version uses the configs loaded at startup.
-        Other databases are read from their files on each request. If one of
-        those files now uses PostgreSQL, the request returns a restart-required
-        error.
+        A snapshotted database uses the configs loaded at startup. Other
+        databases are read from their files on each request. If one of those
+        files now uses PostgreSQL or a startup-only setting, the request
+        returns a restart-required error.
         """
         versions = self._database_versions(database_name)
         if self._latest_needs_restart(database_name, path, versions):
@@ -619,35 +646,42 @@ class RouteMapper:
             version: Optional[str]) -> Union[ProxyResponse, Dict[str, Any]]:
         """Load and merge one DuckDB config.
 
-        Return 404 for a missing file or a restart-required error for a changed backend.
+        Return 404 for a missing file, or a restart-required error for a changed
+        backend or a startup-only setting.
         """
         try:
             database_config = load_database_config(database_name, self.config_dir, version=version)
         except FileNotFoundError:
             return _error_response(404, f"Configuration for database '{database_name}' not found")
-        if database_config.get(BACKEND_KEY, DUCKDB_BACKEND) != DUCKDB_BACKEND:
+        if _needs_restart(database_config):
             return _error_response(500, RESTART_REQUIRED_MESSAGE)
         return merge_inherited_config(database_config, self.config)
 
-    def _requires_restart(self, database_name: str, version: Optional[str]) -> bool:
-        """Return whether a live config loads successfully and names a non-DuckDB backend."""
+    def _requires_restart(
+            self, database_name: str, version: Optional[str],
+            check: Optional[Callable[[Dict[str, Any]], bool]] = None) -> bool:
+        """Return whether a live config loads and fails check (default _needs_restart)."""
         try:
             database_config = load_database_config(database_name, self.config_dir, version=version)
         except Exception:
             return False
-        return database_config.get(BACKEND_KEY, DUCKDB_BACKEND) != DUCKDB_BACKEND
+        return (check or _needs_restart)(database_config)
 
     def _listed_versions(self, database_name: str) -> List[Optional[str]]:
         """Return versions for catalog listings; [None] denotes an unversioned database.
 
         Use startup versions for snapshotted databases. For live databases, omit
-        versions that require a restart.
+        versions that now use another backend. A version that adds a
+        startup-only setting stays listed: visibility is fixed until restart.
         """
         versions = self._database_versions(database_name)
         listed: List[Optional[str]] = [None] if versions is None else list(versions)
         if self._snapshot(database_name) is not None:
             return listed
-        return [v for v in listed if not self._requires_restart(database_name, v)]
+        return [
+            v for v in listed
+            if not self._requires_restart(database_name, v, _backend_changed)
+        ]
 
     def _snapshot(self, database_name: str) -> Optional[Dict[Optional[str], Dict[str, Any]]]:
         """Return the configs loaded at startup, or None if the database is read live."""
@@ -672,7 +706,7 @@ class RouteMapper:
         """Return whether a version listing or a latest request must wait for a restart.
 
         Both requests depend on every version of a live database. If any of
-        those version files now uses PostgreSQL, the answer would be wrong
+        those version files now needs a restart, the answer would be wrong
         until restart. Snapshotted and unversioned databases never need this.
         """
         if versions is None or self._snapshot(database_name) is not None:
@@ -760,6 +794,42 @@ def _load_checked_database(
     return configs
 
 
+def _internal_setting(
+        database_name: str, configs: Dict[Optional[str], Dict[str, Any]]) -> bool:
+    """Return the database's internal: value; versions that differ raise ValueError."""
+    settings = {version: is_internal_database(config) for version, config in configs.items()}
+    if len(set(settings.values())) > 1:
+        detail = ", ".join(
+            f"{version}: {str(internal).lower()}" for version, internal in settings.items()
+        )
+        raise ValueError(
+            f"Database '{database_name}': all versions must have the same internal: "
+            f"setting ({detail})"
+        )
+    return any(settings.values())
+
+
+def _needs_snapshot(configs: Dict[Optional[str], Dict[str, Any]]) -> bool:
+    """Return whether any version uses PostgreSQL or a startup-only setting."""
+    return any(
+        get_backend_name(config) == POSTGRES_BACKEND or needs_startup_snapshot(config)
+        for config in configs.values()
+    )
+
+
+def _needs_restart(database_config: Dict[str, Any]) -> bool:
+    """Return whether a live config names a non-DuckDB backend or a startup-only setting.
+
+    The setting's key is enough, even if its value is malformed.
+    """
+    return _backend_changed(database_config) or needs_startup_snapshot(database_config)
+
+
+def _backend_changed(database_config: Dict[str, Any]) -> bool:
+    """Return whether a live config names a backend other than DuckDB."""
+    return database_config.get(BACKEND_KEY, DUCKDB_BACKEND) != DUCKDB_BACKEND
+
+
 def _split_version(
         database_name: str,
         path: str,
@@ -828,6 +898,21 @@ def _early_query_response(
     )
 
 
+def _route_headers(
+        route_config: Dict[str, Any],
+        path_params: Dict[str, str],
+        key: DatabaseKey) -> Union[ProxyResponse, Dict[str, str]]:
+    """Fill the route's headers: from its path values, or return 500 Resolver error.
+
+    The log names the database, the route, the header and the reason, not the value.
+    """
+    try:
+        return fill_route_headers(route_config.get(HEADERS_KEY, {}), path_params)
+    except HeaderValueError as error:
+        logger.warning("%s, route '%s': %s", database_label(key), route_config.get("route"), error)
+        return _error_response(500, RESOLVER_ERROR_MESSAGE)
+
+
 def _build_query(
         route_config: Dict[str, Any],
         database_config: Dict[str, Any],
@@ -835,7 +920,7 @@ def _build_query(
         query_params: Dict[str, str],
         cookies: Dict[str, str],
         multi_query_params: Dict[str, List[str]],
-        marker: str) -> Union[ProxyResponse, Tuple[str, List[str]]]:
+        marker: str) -> Union[ProxyResponse, Tuple[str, List[Optional[str]]]]:
     """Build SQL and bound values for the backend, or return a selection/build error."""
     try:
         return build_sql_query(
@@ -854,7 +939,8 @@ def _build_query(
 
 
 async def _run_query(
-        backend: DatabaseBackend, sql: str, values: List[str], key: DatabaseKey) -> ProxyResponse:
+        backend: DatabaseBackend, sql: str, values: List[Optional[str]],
+        key: DatabaseKey) -> ProxyResponse:
     """Return query rows as JSON, 503 for unavailability or 500 for other errors.
 
     Error responses exclude driver diagnostics. Unexpected pool closure is logged.

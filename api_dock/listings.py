@@ -37,7 +37,8 @@ EXPOSE_KEYS: frozenset = frozenset({"dict", *LISTING_KINDS})
 #
 def resolve_listing_specs(
         config: Dict[str, Any],
-        config_dir: Optional[str] = None) -> Tuple[List[ListingSpec], List[str]]:
+        config_dir: Optional[str] = None,
+        database_names: Optional[List[str]] = None) -> Tuple[List[ListingSpec], List[str]]:
     """Resolve the main config's ``expose`` section into listing specs.
 
     Listings are opt-in: with no ``expose`` key (or ``expose: false``) nothing is
@@ -47,6 +48,8 @@ def resolve_listing_specs(
     Args:
         config: Main configuration dictionary.
         config_dir: Directory holding the config files. If None, uses default.
+        database_names: Database names that can be listed. If None, all
+            databases in the main config. Other names count as unknown.
 
     Returns:
         Tuple of (specs, warnings). ``warnings`` are human-readable strings for
@@ -86,8 +89,10 @@ def resolve_listing_specs(
         if spec is not None:
             specs.append(spec)
 
-    _add_collision_warnings(specs, config, config_dir, warnings_out)
-    _add_unknown_include_warnings(specs, config, config_dir, warnings_out)
+    if database_names is None:
+        database_names = get_database_names(config)
+    _add_collision_warnings(specs, config, config_dir, database_names, warnings_out)
+    _add_unknown_include_warnings(specs, config, config_dir, database_names, warnings_out)
     return (specs, warnings_out)
 
 
@@ -95,7 +100,8 @@ def build_listing(
         spec: ListingSpec,
         config: Dict[str, Any],
         config_dir: Optional[str] = None,
-        database_versions: Optional[Callable[[str], List[Optional[str]]]] = None) -> List[Any]:
+        database_versions: Optional[Callable[[str], List[Optional[str]]]] = None,
+        database_names: Optional[List[str]] = None) -> List[Any]:
     """Build the response body for a single listing endpoint.
 
     Args:
@@ -105,6 +111,8 @@ def build_listing(
         database_versions: Optional function giving the versions to list for
             a database: ``[None]`` for an unversioned database, ``[]`` to leave
             it out. If None, versions are read from the config folder.
+        database_names: Database names that can be listed. If None, all
+            databases in the main config.
 
     Returns:
         A list of ``{"model", "version"}`` dicts (when ``spec.as_dict``) or
@@ -119,7 +127,8 @@ def build_listing(
     rows: List[Any] = []
     if spec.kind in ("databases", "sources"):
         rows.extend(_source_rows(
-            "databases", config, config_dir, selectors, spec.as_dict, database_versions
+            "databases", config, config_dir, selectors, spec.as_dict, database_versions,
+            database_names
         ))
     if spec.kind in ("remotes", "sources"):
         rows.extend(_source_rows("remotes", config, config_dir, selectors, spec.as_dict))
@@ -177,6 +186,7 @@ def _add_collision_warnings(
         specs: List[ListingSpec],
         config: Dict[str, Any],
         config_dir: Optional[str],
+        database_names: List[str],
         warnings_out: List[str]) -> None:
     """Warn when a listing route shadows a proxy or duplicates another listing.
 
@@ -184,9 +194,10 @@ def _add_collision_warnings(
         specs: The resolved listing specs.
         config: Main configuration dictionary.
         config_dir: Directory holding the config files. If None, uses default.
+        database_names: Database names that can be listed.
         warnings_out: List to append warnings to.
     """
-    proxy_names = set(get_remote_names(config, config_dir)) | set(get_database_names(config))
+    proxy_names = set(get_remote_names(config, config_dir)) | set(database_names)
     seen_routes: Dict[str, str] = {}
 
     for spec in specs:
@@ -209,6 +220,7 @@ def _add_unknown_include_warnings(
         specs: List[ListingSpec],
         config: Dict[str, Any],
         config_dir: Optional[str],
+        database_names: List[str],
         warnings_out: List[str]) -> None:
     """Warn when an ``include`` list names a database/remote that doesn't exist.
 
@@ -216,9 +228,10 @@ def _add_unknown_include_warnings(
         specs: The resolved listing specs.
         config: Main configuration dictionary.
         config_dir: Directory holding the config files. If None, uses default.
+        database_names: Database names that can be listed.
         warnings_out: List to append warnings to.
     """
-    db_names = set(get_database_names(config))
+    db_names = set(database_names)
     remote_names = set(get_remote_names(config, config_dir))
 
     for spec in specs:
@@ -271,7 +284,8 @@ def _source_rows(
         config_dir: Optional[str],
         selectors: Optional[Dict[str, Optional[List[Any]]]],
         as_dict: bool,
-        database_versions: Optional[Callable[[str], List[Optional[str]]]] = None) -> List[Any]:
+        database_versions: Optional[Callable[[str], List[Optional[str]]]] = None,
+        database_names: Optional[List[str]] = None) -> List[Any]:
     """Build listing rows for one source type (databases or remotes).
 
     Args:
@@ -281,12 +295,13 @@ def _source_rows(
         selectors: Name -> allowed-versions mapping, or None for all.
         as_dict: Output format flag (see build_listing).
         database_versions: Optional database version lookup (see build_listing).
+        database_names: Optional database names to list (see build_listing).
 
     Returns:
         List of row entries for the given source type.
     """
     if source_type == "databases":
-        names = get_database_names(config)
+        names = get_database_names(config) if database_names is None else database_names
 
         def versions_of(name: str) -> List[str]:
             if not is_versioned_database(name, config_dir):

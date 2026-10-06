@@ -84,7 +84,7 @@ def build_sql_query(
         query_params: Optional[Dict[str, str]] = None,
         cookies: Optional[Dict[str, str]] = None,
         multi_query_params: Optional[Dict[str, List[str]]] = None,
-        marker: str = SQL_MARKER) -> Tuple[str, List[str]]:
+        marker: str = SQL_MARKER) -> Tuple[str, List[Optional[str]]]:
     """Build SQL query text and the values to bind to its markers.
 
     Each ``{{var}}`` in the base SQL, named queries, and WHERE fragments is
@@ -108,7 +108,7 @@ def build_sql_query(
 
     Returns:
         Tuple of ``(sql, values)``: the SQL text with markers and the
-        values in the order the markers appear.
+        values in the order the markers appear. A None value is SQL NULL.
 
     Raises:
         ValueError: If a referenced table or query is not defined in config, a
@@ -303,7 +303,7 @@ def build_where_clause_from_params(
         multi_query_params: Optional[Dict[str, List[str]]] = None,
         cookies: Optional[Dict[str, str]] = None,
         marker: str = SQL_MARKER
-) -> List[Tuple[str, List[str]]]:
+) -> List[Tuple[str, List[Optional[str]]]]:
     """Build WHERE clause fragments, with their bound values, from parameter configurations.
 
     Args:
@@ -646,9 +646,9 @@ def _substitution_params(
 
 def _add_where_fragments(
         sql: str,
-        values: List[str],
-        fragments: List[Tuple[str, List[str]]],
-        database_config: Dict[str, Any]) -> Tuple[str, List[str]]:
+        values: List[Optional[str]],
+        fragments: List[Tuple[str, List[Optional[str]]]],
+        database_config: Dict[str, Any]) -> Tuple[str, List[Optional[str]]]:
     """Join bound WHERE fragments onto the base SQL with AND.
 
     Args:
@@ -722,7 +722,7 @@ def _bind_variables(
         template: str,
         params: Dict[str, str],
         list_params: Optional[Dict[str, List[str]]] = None,
-        marker: str = SQL_MARKER) -> Tuple[str, List[str]]:
+        marker: str = SQL_MARKER) -> Tuple[str, List[Optional[str]]]:
     """Replace each {{variable}} in an SQL template with a marker and collect its value.
 
     The template is read in one pass, so a value is never scanned for further
@@ -738,13 +738,14 @@ def _bind_variables(
 
     Returns:
         Tuple of the SQL text with markers and the values in marker order.
+        A None value stays None, so it is bound as SQL NULL.
 
     Raises:
         ValueError: If a placeholder has no value in params or list_params.
     """
     if list_params is None:
         list_params = {}
-    values: List[str] = []
+    values: List[Optional[str]] = []
     template = _escape_percent(template, marker)
 
     def replace_variable(match: re.Match[str]) -> str:
@@ -754,7 +755,8 @@ def _bind_variables(
             return "(" + ", ".join(marker for _ in list_params[name]) + ")"
         if name not in params:
             raise ValueError(f"No value for SQL variable '{name}'")
-        values.append(str(params[name]))
+        value = params[name]
+        values.append(None if value is None else str(value))
         return marker
 
     sql = VARIABLE_PATTERN.sub(replace_variable, template)
@@ -762,7 +764,7 @@ def _bind_variables(
 
 
 def _append_bound_fragment(
-        fragments: List[Tuple[str, List[str]]],
+        fragments: List[Tuple[str, List[Optional[str]]]],
         template: str,
         params: Dict[str, str],
         marker: str,
