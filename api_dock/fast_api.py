@@ -13,10 +13,11 @@ License: BSD 3-Clause
 #
 import json
 import warnings
+from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from typing import Any, Dict, Optional
+from typing import Any, AsyncIterator, Callable, Dict, Optional
 
 from api_dock.route_mapper import collect_multi_query_params, HOP_BY_HOP_HEADERS, RouteMapper
 from api_dock.types import PreparedRequest, ProxyResponse
@@ -43,6 +44,11 @@ _default_app: Optional[FastAPI] = None
 def create_app(config_path: Optional[str] = None) -> FastAPI:
     """Create and configure the FastAPI application.
 
+    The app's lifespan opens PostgreSQL connection pools when the server
+    starts and closes them when it stops. Creating the app opens nothing. An
+    app mounted inside another app doesn't run its own lifespan; the parent
+    must call ``app.state.route_mapper.start()`` and ``aclose()``.
+
     Args:
         config_path: Path to main config file. If None, uses default.
 
@@ -56,7 +62,8 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     app = FastAPI(
         title=metadata.get("name", "API Dock"),
         description=metadata.get("description", "API wrapper using configuration files"),
-        version="0.1.0"
+        version="0.1.0",
+        lifespan=_lifespan(route_mapper),
     )
 
     app.state.route_mapper = route_mapper
@@ -98,6 +105,20 @@ def __getattr__(name: str) -> Any:
 #
 # INTERNAL
 #
+def _lifespan(route_mapper: RouteMapper) -> Callable[[FastAPI], Any]:
+    """Build the application lifespan that starts and closes the route mapper."""
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        await route_mapper.start()
+        try:
+            yield
+        finally:
+            await route_mapper.aclose()
+
+    return lifespan
+
+
 def _add_main_routes(app: FastAPI, route_mapper: RouteMapper) -> None:
     """Add main API routes to the FastAPI app.
 

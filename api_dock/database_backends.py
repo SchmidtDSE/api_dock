@@ -4,7 +4,8 @@ Database Backends Module for API Dock
 
 Runs a database route's SQL and returns its columns and rows. Each backend
 states the marker it uses for bound values, so the SQL builder can write SQL
-for it.
+for it. The PostgreSQL backend is in postgres_backend, which is imported only
+when a PostgreSQL database is configured.
 
 License: BSD 3-Clause
 
@@ -31,6 +32,18 @@ from api_dock.storage_auth import (
 #
 # PUBLIC
 #
+class DatabaseUnavailableError(Exception):
+    """Raised when a database can't be reached or has no free connection."""
+
+
+class DatabaseLifecycleError(RuntimeError):
+    """Raised when a PostgreSQL database is used outside its start/close lifecycle.
+
+    That is: before start(), after aclose(), from an event loop other than the
+    one that started it, or after its pool closed unexpectedly.
+    """
+
+
 class DatabaseBackend(ABC):
     """Runs SQL with bound values against one database.
 

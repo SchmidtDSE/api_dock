@@ -14,7 +14,12 @@ License: BSD 3-Clause
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from api_dock.database_config import get_named_query, get_table_definition
+from api_dock.database_config import (
+    BACKEND_KEY,
+    POSTGRES_BACKEND,
+    get_named_query,
+    get_table_definition,
+)
 
 
 #
@@ -33,6 +38,9 @@ DEFAULT_NO_MATCH_RESPONSE: Dict[str, Any] = {
 
 # Default marker written into SQL for each bound value (DuckDB's positional style).
 SQL_MARKER: str = "?"
+
+# psycopg's marker. With it, every literal % in the SQL must be written %%.
+POSTGRES_MARKER: str = "%s"
 
 # A {{variable}} placeholder; group 1 is the variable name.
 VARIABLE_PATTERN: re.Pattern[str] = re.compile(r'\{\{([^{}]+)\}\}')
@@ -94,7 +102,9 @@ def build_sql_query(
             list of values received (for keys repeated in the URL). When a param
             has a ``multivalue_sql`` template and more than one value was passed,
             that template is used instead of ``sql``.
-        marker: Text written for each bound value: ``?`` for DuckDB.
+        marker: Text written for each bound value: ``?`` for DuckDB,
+            ``%s`` for PostgreSQL. With ``%s``, each literal ``%`` in the
+            config's SQL is written ``%%``.
 
     Returns:
         Tuple of ``(sql, values)``: the SQL text with markers and the
@@ -139,7 +149,8 @@ def build_sql_query(
     )
 
     post_where = _post_where_clauses(
-        route_config, branch_appends, query_params, path_params, params, database_config
+        route_config, branch_appends, query_params, path_params, params, database_config,
+        marker
     )
     if post_where:
         sql_query += ' ' + ' '.join(post_where)
@@ -384,7 +395,8 @@ def build_where_clause_from_params(
 def build_append_clause_from_params(
         route_config: Dict[str, Any],
         query_params: Dict[str, str],
-        path_params: Dict[str, str]
+        path_params: Dict[str, str],
+        marker: str = SQL_MARKER
 ) -> List[str]:
     """Build post-WHERE SQL fragments from sql_append parameter configurations.
 
@@ -396,6 +408,8 @@ def build_append_clause_from_params(
         route_config: Route configuration dictionary with query_params section.
         query_params: Dictionary of query parameters from URL.
         path_params: Dictionary of path parameters.
+        marker: Marker the SQL is written for; with ``%s``, literal ``%`` in
+            each template is doubled before values are substituted.
 
     Returns:
         List of SQL fragments to append after WHERE clause, in config order.
@@ -417,7 +431,7 @@ def build_append_clause_from_params(
             continue
 
         param_value = query_params.get(param_name)
-        sql_append_fragment = param_config['sql_append']
+        sql_append_fragment = _escape_percent(param_config['sql_append'], marker)
 
         # Handle parameters with default values (always include)
         if 'default' in param_config:
@@ -548,13 +562,42 @@ def _substitute_table_references(sql: str, database_config: Dict[str, Any]) -> s
 
         if 'FROM' in context_before or 'JOIN' in context_before:
             # Full reference for FROM/JOIN clauses
-            return f"'{table_path}' AS {table_name}"
+            return _full_table_reference(table_name, table_path, database_config)
         else:
             # Just the table name (alias) for other contexts like SELECT
-            return table_name
+            return _table_alias(table_name, database_config)
 
     result_sql = re.sub(table_pattern, replace_table_reference, sql)
     return result_sql
+
+
+def _full_table_reference(
+        table_name: str, table_path: str, database_config: Dict[str, Any]) -> str:
+    """Write a table source with its alias.
+
+    DuckDB uses a quoted path; PostgreSQL quotes each validated identifier part.
+    """
+    if database_config.get(BACKEND_KEY) != POSTGRES_BACKEND:
+        return f"'{table_path}' AS {table_name}"
+    quoted = '.'.join(f'"{part}"' for part in table_path.split('.'))
+    return f'{quoted} AS "{table_name}"'
+
+
+def _table_alias(table_name: str, database_config: Dict[str, Any]) -> str:
+    """Return the table alias, quoted for PostgreSQL."""
+    if database_config.get(BACKEND_KEY) != POSTGRES_BACKEND:
+        return table_name
+    return f'"{table_name}"'
+
+
+def _escape_percent(template: str, marker: str) -> str:
+    """Double literal % for psycopg; leave other backends unchanged.
+
+    Apply once per config fragment, before adding markers or substituting values.
+    """
+    if marker != POSTGRES_MARKER:
+        return template
+    return template.replace('%', '%%')
 
 
 def _resolve_named_query(sql_template: str, database_config: Dict[str, Any]) -> str:
@@ -637,7 +680,8 @@ def _post_where_clauses(
         query_params: Dict[str, str],
         path_params: Dict[str, str],
         params: Dict[str, str],
-        database_config: Dict[str, Any]) -> List[str]:
+        database_config: Dict[str, Any],
+        marker: str = SQL_MARKER) -> List[str]:
     """Build the clauses that follow WHERE, in the order they are written.
 
     Branch appends from the sql selector come before route-level sql_append
@@ -651,6 +695,7 @@ def _post_where_clauses(
         path_params: Dictionary of path parameters.
         params: All substitution values (see _substitution_params).
         database_config: Database configuration, for [[table]] references.
+        marker: Marker the SQL is written for (see _escape_percent).
 
     Returns:
         SQL clauses to append after the WHERE clause.
@@ -659,12 +704,16 @@ def _post_where_clauses(
         ValueError: If a value fails the allowed-character check or a table is undefined.
     """
     branch = [
-        _substitute_variables_raw(_substitute_table_references(clause, database_config), params)
+        _substitute_variables_raw(
+            _escape_percent(_substitute_table_references(clause, database_config), marker), params
+        )
         for clause in branch_appends
     ]
     route = [
         _substitute_table_references(clause, database_config)
-        for clause in build_append_clause_from_params(route_config, query_params, path_params)
+        for clause in build_append_clause_from_params(
+            route_config, query_params, path_params, marker
+        )
     ]
     return branch + route
 
@@ -677,7 +726,8 @@ def _bind_variables(
     """Replace each {{variable}} in an SQL template with a marker and collect its value.
 
     The template is read in one pass, so a value is never scanned for further
-    {{variables}}.
+    {{variables}}. Literal % in the template is escaped first (see
+    _escape_percent); values are not changed.
 
     Args:
         template: SQL template with {{variable}} placeholders.
@@ -695,6 +745,7 @@ def _bind_variables(
     if list_params is None:
         list_params = {}
     values: List[str] = []
+    template = _escape_percent(template, marker)
 
     def replace_variable(match: re.Match[str]) -> str:
         name = match.group(1)

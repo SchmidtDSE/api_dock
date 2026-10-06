@@ -12,11 +12,13 @@ License: BSD 3-Clause
 # IMPORTS
 #
 import os
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import yaml
 
+from api_dock.postgres_config import check_postgres_config
 from api_dock.sql_template_check import (
     check_comment_at_end,
     check_commented_variables,
@@ -28,6 +30,12 @@ from api_dock.sql_template_check import (
 # CONSTANTS
 #
 DATABASES_DIR: str = "databases"
+
+# The backend: key selects the database that runs a config's SQL.
+BACKEND_KEY: str = "backend"
+DUCKDB_BACKEND: str = "duckdb"
+POSTGRES_BACKEND: str = "postgres"
+BACKENDS: Tuple[str, ...] = (DUCKDB_BACKEND, POSTGRES_BACKEND)
 
 # Keys a query_params entry may have; at least one must be present.
 QUERY_PARAM_KEYS: frozenset = frozenset({
@@ -325,9 +333,31 @@ def validate_route_config(route_config: Dict[str, Any]) -> None:
         _validate_query_param(param_item)
 
 
-def check_database_config(database_config: Dict[str, Any]) -> None:
-    """Check every named query and route of a loaded database config.
+def get_backend_name(database_config: Dict[str, Any]) -> str:
+    """Get the backend a database config uses.
 
+    Args:
+        database_config: Database configuration dictionary.
+
+    Returns:
+        ``duckdb`` when there is no backend key, otherwise the key's value.
+
+    Raises:
+        ValueError: If the value is not a known backend.
+    """
+    backend = database_config.get(BACKEND_KEY, DUCKDB_BACKEND)
+    if backend not in BACKENDS:
+        raise ValueError(
+            f"unknown backend '{backend}'; use one of {', '.join(BACKENDS)}"
+        )
+    return backend
+
+
+def check_database_config(database_config: Dict[str, Any]) -> None:
+    """Check the backend, every named query and every route of a loaded database config.
+
+    PostgreSQL configs also have their connection fields, resource limits and
+    table names checked, and E'...' strings are recognised in their templates.
     Each route is merged with top-level query_params, as a request would be,
     then checked for shape and for {{variables}} inside quotes or comments in
     any template whose values are bound. sql_append templates are not checked
@@ -341,8 +371,13 @@ def check_database_config(database_config: Dict[str, Any]) -> None:
         ValueError: If a query or route fails a check. The message names the
             route (or query) and the template's location.
     """
+    is_postgres = get_backend_name(database_config) == POSTGRES_BACKEND
+    if is_postgres:
+        check_postgres_config(database_config)
+    bound_checks, append_checks = _template_checks(is_postgres)
+
     for query_name, query in database_config.get('queries', {}).items():
-        _check_template(f"queries.{query_name}", query, BOUND_TEMPLATE_CHECKS)
+        _check_template(f"queries.{query_name}", query, bound_checks)
 
     for index, route_config in enumerate(database_config.get('routes', [])):
         try:
@@ -350,9 +385,9 @@ def check_database_config(database_config: Dict[str, Any]) -> None:
             merged = merge_query_params(route_config, database_config)
             validate_route_config(merged)
             for location, template in _bound_templates(merged):
-                _check_template(location, template, BOUND_TEMPLATE_CHECKS)
+                _check_template(location, template, bound_checks)
             for location, template in _append_templates(merged):
-                _check_template(location, template, APPEND_TEMPLATE_CHECKS)
+                _check_template(location, template, append_checks)
         except ValueError as error:
             raise ValueError(f"route '{_route_label(route_config, index)}': {error}") from error
 
@@ -433,6 +468,17 @@ def _validate_conditional(param_name: str, conditional: Any) -> None:
                 f"query param '{param_name}' conditional '{condition_key}' needs one of "
                 f"{sorted(CONDITION_KEYS)}"
             )
+
+
+def _template_checks(escape_strings: bool) -> Tuple[
+        Tuple[Callable[[str], None], ...], Tuple[Callable[[str], None], ...]]:
+    """Return bound and append checks, recognizing PostgreSQL escape strings if enabled."""
+    if not escape_strings:
+        return BOUND_TEMPLATE_CHECKS, APPEND_TEMPLATE_CHECKS
+    return (
+        tuple(partial(check, escape_strings=True) for check in BOUND_TEMPLATE_CHECKS),
+        tuple(partial(check, escape_strings=True) for check in APPEND_TEMPLATE_CHECKS),
+    )
 
 
 def _check_template(

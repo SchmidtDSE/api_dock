@@ -16,6 +16,7 @@ import warnings
 from flask import Flask, jsonify, request, Response as FlaskResponse
 from typing import Any, Dict, Optional
 
+from api_dock.postgres_pools import database_label
 from api_dock.route_mapper import collect_multi_query_params, RouteMapper
 
 
@@ -24,6 +25,11 @@ from api_dock.route_mapper import collect_multi_query_params, RouteMapper
 #
 # The default app, built on the first read of `app` (see __getattr__).
 _default_app: Optional[Flask] = None
+
+POSTGRES_UNSUPPORTED: str = (
+    "PostgreSQL requires the FastAPI server; use --backbone fastapi, or use RouteMapper "
+    "in an async application with start()/aclose()."
+)
 
 
 #
@@ -37,8 +43,13 @@ def create_app(config_path: Optional[str] = None) -> Flask:
 
     Returns:
         Configured Flask application.
+
+    Raises:
+        RuntimeError: If any database version uses PostgreSQL, which needs an
+            async server.
     """
     route_mapper = RouteMapper(config_path)
+    _reject_postgres(route_mapper)
 
     app = Flask(__name__)
 
@@ -83,6 +94,17 @@ def __getattr__(name: str) -> Any:
 #
 # INTERNAL
 #
+def _reject_postgres(route_mapper: RouteMapper) -> None:
+    """Reject PostgreSQL configs before any connection attempt.
+
+    Flask uses a separate event loop per database request; PostgreSQL pools must
+    stay on one loop. The error names the first PostgreSQL database/version.
+    """
+    if route_mapper.postgres_databases:
+        label = database_label(route_mapper.postgres_databases[0])
+        raise RuntimeError(f"{label} uses PostgreSQL. {POSTGRES_UNSUPPORTED}")
+
+
 def _add_main_routes(app: Flask, route_mapper: RouteMapper) -> None:
     """Add main API routes to the Flask app.
 

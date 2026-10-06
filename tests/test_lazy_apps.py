@@ -111,15 +111,62 @@ class TestLazyApps:
         """)
 
 
+class TestLazyAppsWithPostgres:
+    """With a PostgreSQL database configured, only reading the Flask app fails."""
+
+    def test_flask_app_read_raises(self, tmp_path: Path) -> None:
+        """Importing and the FastAPI app work; reading flask_app raises the Flask error."""
+        _write_postgres_config(tmp_path)
+        _run_python(tmp_path, """
+            import fastapi
+            import api_dock
+            from api_dock import fast_api, postgres_pools
+
+            def refuse(*args, **kwargs):
+                raise AssertionError("a pool was opened")
+
+            postgres_pools.PostgresPools.start = refuse
+            assert isinstance(api_dock.app, fastapi.FastAPI)
+            from uvicorn.importer import import_from_string
+            assert import_from_string("api_dock.fast_api:app") is api_dock.app
+            import api_dock.flask_api
+
+            for read in (lambda: api_dock.flask_app, lambda: api_dock.flask_api.app):
+                try:
+                    read()
+                except RuntimeError as error:
+                    assert "use --backbone fastapi" in str(error), error
+                else:
+                    raise AssertionError("the Flask app was built")
+        """)
+
+
 #
 # INTERNAL
 #
+def _write_postgres_config(root: Path) -> None:
+    """Write an api_dock_config folder with one PostgreSQL database.
+
+    Args:
+        root: Folder to write api_dock_config into.
+    """
+    folder = root / "api_dock_config"
+    (folder / "databases").mkdir(parents=True)
+    (folder / "config.yaml").write_text("name: test\ndatabases: [shop]\n")
+    (folder / "databases" / "shop.yaml").write_text(textwrap.dedent("""
+        name: shop
+        backend: postgres
+        connection: {host: 127.0.0.1, dbname: shop, user: reader}
+        routes: [{route: items, sql: SELECT 1}]
+    """))
+
+
 def _run_python(cwd: Path, code: str) -> None:
     """Run code in a new Python process and fail the test if it fails.
 
     Args:
-        cwd: Directory to run in. It has no api_dock_config, so the bundled
-            example config is used.
+        cwd: Directory to run in. Unless a test writes an api_dock_config
+            there, the bundled example config is used.
         code: Python code to run.
     """
     result = subprocess.run(

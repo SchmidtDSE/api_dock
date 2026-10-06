@@ -14,6 +14,7 @@ License: BSD 3-Clause
 import base64
 import ipaddress
 import json
+import logging
 import os
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -24,15 +25,39 @@ import httpx
 
 from api_dock.auth import validate_authentication
 from api_dock.config import DEFAULT_CONFIG_DIR, filter_cookies_by_config, filter_remote_query_params, find_remote_config, find_route_mapping, get_authentication_config, get_database_names, get_remote_names, get_remote_versions, get_settings, is_route_allowed, is_versioned_remote, load_main_config, merge_inherited_config, resolve_latest_version
-from api_dock.database_backends import DuckDBBackend
-from api_dock.database_config import check_database_config, find_database_route, get_database_versions, is_versioned_database, load_database_config, merge_query_params, resolve_latest_database_version
+from api_dock.database_backends import (
+    DatabaseBackend,
+    DatabaseLifecycleError,
+    DatabaseUnavailableError,
+    DuckDBBackend,
+)
+from api_dock.database_config import (
+    BACKEND_KEY,
+    DUCKDB_BACKEND,
+    POSTGRES_BACKEND,
+    check_database_config,
+    find_database_route,
+    get_backend_name,
+    get_database_versions,
+    is_versioned_database,
+    load_database_config,
+    merge_query_params,
+    resolve_latest_database_version,
+)
 from api_dock.listings import build_listing, resolve_listing_specs
+from api_dock.postgres_pools import DatabaseKey, PostgresPools, database_label
 from api_dock.sql_builder import build_sql_query, extract_path_parameters, process_query_parameters, SqlSelectionError
 from api_dock.types import PreparedRequest, ProxyResponse
 #
 # CONSTANTS
 #
 DEFAULT_VERSION: str = "latest"
+
+logger: logging.Logger = logging.getLogger(__name__)
+
+# Returned when a database that had only DuckDB versions at startup now has a
+# PostgreSQL config, which needs a pool that only a new mapper can open.
+RESTART_REQUIRED_MESSAGE: str = "Database configuration changed; restart required"
 
 # Network address types that are written to JSON as their string form.
 IP_ADDRESS_TYPES: Tuple[type, ...] = (
@@ -101,7 +126,10 @@ class RouteMapper:
 
         Remote and database config files are read from the directory holding
         the main config file. Every listed database config is checked here, so
-        a bad config stops startup instead of failing on a live request.
+        a bad config stops startup instead of failing on a live request. A
+        database with any PostgreSQL version is kept as loaded here, with all
+        its versions, until a new mapper is created. No connection is opened
+        until start().
 
         Args:
             config_path: Path to main config file. If None, uses default.
@@ -122,8 +150,41 @@ class RouteMapper:
             self.config, self.config_dir
         )
 
+        self._snapshots: Dict[str, Dict[Optional[str], Dict[str, Any]]] = {}
         for database_name in self.database_names:
-            _check_database(database_name, self.config, self.config_dir)
+            configs = _load_checked_database(database_name, self.config, self.config_dir)
+            if any(get_backend_name(config) == POSTGRES_BACKEND for config in configs.values()):
+                self._snapshots[database_name] = configs
+        self._postgres = PostgresPools(self._postgres_configs())
+
+    @property
+    def postgres_databases(self) -> List[DatabaseKey]:
+        """List the database versions that use PostgreSQL.
+
+        Returns:
+            ``(database name, version)`` pairs; version is None for an
+            unversioned database.
+        """
+        return list(self._postgres_configs())
+
+    async def start(self) -> None:
+        """Open the connection pools of PostgreSQL databases.
+
+        Call this once, on the event loop that will serve requests, before
+        serving PostgreSQL routes; the FastAPI app does this in its lifespan.
+        Calling it again on that loop does nothing. Configs without PostgreSQL
+        don't need it.
+
+        Raises:
+            RuntimeError: If the PostgreSQL dependencies are not installed.
+            ValueError: If a database's connection settings are invalid.
+            DatabaseLifecycleError: If the mapper is closed.
+        """
+        await self._postgres.start()
+
+    async def aclose(self) -> None:
+        """Close the connection pools. A closed mapper can't be started again."""
+        await self._postgres.aclose()
 
     def get_config_metadata(self) -> Dict[str, Any]:
         """Get API metadata from configuration.
@@ -159,7 +220,9 @@ class RouteMapper:
             A list of ``{"model", "version"}`` dicts or ``"model/version"``
             strings, per the spec's format.
         """
-        return build_listing(spec, self.config, self.config_dir)
+        return build_listing(
+            spec, self.config, self.config_dir, database_versions=self._listed_versions
+        )
 
     async def prepare_remote_request(
             self,
@@ -401,113 +464,42 @@ class RouteMapper:
         if database_name not in self.database_names:
             return _error_response(404, f"Database '{database_name}' not found")
 
-        is_versioned = is_versioned_database(database_name, self.config_dir)
-
-        path_parts = path.split("/") if path else []
-        version = None
-        actual_path = path
-
-        if is_versioned and path_parts:
-            potential_version = path_parts[0]
-            available_versions = get_database_versions(database_name, self.config_dir)
-
-            if potential_version == "latest":
-                version = resolve_latest_database_version(available_versions)
-                if version is None:
-                    return _error_response(404, f"No versions found for database '{database_name}'")
-                actual_path = "/".join(path_parts[1:])
-            elif potential_version in available_versions:
-                version = potential_version
-                actual_path = "/".join(path_parts[1:])
-            elif not path:
-                return _json_response({"versions": available_versions})
-            else:
-                return _error_response(404, f"Configuration for database '{database_name}' not found")
-        elif is_versioned and not path:
-            available_versions = get_database_versions(database_name, self.config_dir)
-            return _json_response({"versions": available_versions})
-
-        try:
-            database_config = load_database_config(
-                database_name, self.config_dir, version=version
-            )
-        except FileNotFoundError:
-            return _error_response(404, f"Configuration for database '{database_name}' not found")
-
-        database_config = merge_inherited_config(database_config, self.config)
+        located = self._locate_database_request(database_name, path)
+        if isinstance(located, ProxyResponse):
+            return located
+        version, actual_path, database_config = located
 
         filtered_cookies = filter_cookies_by_config(cookies, database_config)
+        auth_error = _check_database_auth(filtered_cookies, database_config)
+        if auth_error is not None:
+            return auth_error
 
-        auth_config = get_authentication_config(database_config)
-        if auth_config:
-            try:
-                is_valid, status_code, response_body = validate_authentication(filtered_cookies, auth_config)
-                if not is_valid:
-                    content = json.dumps(response_body).encode() if response_body else b'{"error": "Authentication failed"}'
-                    return ProxyResponse(
-                        status_code=status_code,
-                        content=content,
-                        content_type="application/json",
-                        error_message="Authentication failed",
-                    )
-            except Exception:
-                return _error_response(500, "Authentication error")
-
-        if not actual_path or actual_path == "":
+        if not actual_path:
             routes = database_config.get("routes", [])
             route_list = [r.get("route", "") for r in routes if isinstance(r, dict)]
             return _json_response({"routes": route_list})
 
         route_config = find_database_route(actual_path, database_config)
         if route_config is None:
-            return _error_response(404, f"Route '{actual_path}' not found in database '{database_name}'")
-
+            return _error_response(
+                404, f"Route '{actual_path}' not found in database '{database_name}'"
+            )
         route_config = merge_query_params(route_config, database_config)
+        path_params = extract_path_parameters(actual_path, route_config.get("route", ""))
 
-        route_pattern = route_config.get("route", "")
-        path_params = extract_path_parameters(actual_path, route_pattern)
+        early_response = _early_query_response(route_config, query_params, path_params, cookies)
+        if early_response is not None:
+            return early_response
 
-        try:
-            should_return_early, response_data, status_code, error_message = process_query_parameters(
-                route_config, query_params, path_params, cookies
-            )
-            if should_return_early:
-                content = json.dumps(response_data).encode() if response_data is not None else b""
-                return ProxyResponse(
-                    status_code=status_code,
-                    content=content,
-                    content_type="application/json",
-                    error_message=error_message,
-                )
-        except Exception:
-            return _error_response(500, "Query parameter processing error")
-
-        backend = DuckDBBackend(database_config)
-        try:
-            sql_query, sql_values = build_sql_query(
-                route_config, database_config, path_params, query_params,
-                filtered_cookies, multi_query_params, marker=backend.marker
-            )
-        except SqlSelectionError as e:
-            return ProxyResponse(
-                status_code=e.status_code,
-                content=json.dumps(e.response).encode(),
-                content_type="application/json",
-                error_message=str(e.response.get("error")) if e.response.get("error") else None,
-            )
-        except ValueError:
-            return _error_response(500, "SQL query error")
-
-        try:
-            columns, rows = await backend.execute(sql_query, sql_values)
-            response_data = [
-                {column: _make_json_safe(value) for column, value in zip(columns, row)}
-                for row in rows
-            ]
-            return _json_response(response_data)
-
-        except Exception:
-            return _error_response(500, "Database query error")
+        backend = self._select_backend(database_name, version, database_config)
+        query = _build_query(
+            route_config, database_config, path_params, query_params,
+            filtered_cookies, multi_query_params, backend.marker
+        )
+        if isinstance(query, ProxyResponse):
+            return query
+        sql, values = query
+        return await _run_query(backend, sql, values, (database_name, version))
 
     def is_remote_name(self, name: str) -> bool:
         """Check if a given name is a configured remote name.
@@ -585,6 +577,121 @@ class RouteMapper:
         except Exception as e:
             return _error_response(500, f"Sync wrapper error: {str(e)}")
 
+    def _postgres_configs(self) -> Dict[DatabaseKey, Dict[str, Any]]:
+        """Collect PostgreSQL configs by (database name, version)."""
+        return {
+            (name, version): config
+            for name, configs in self._snapshots.items()
+            for version, config in configs.items()
+            if get_backend_name(config) == POSTGRES_BACKEND
+        }
+
+    def _locate_database_request(
+            self, database_name: str,
+            path: str) -> Union[ProxyResponse, Tuple[Optional[str], str, Dict[str, Any]]]:
+        """Return (version, route path, config), or a listing/error response.
+
+        A database with a PostgreSQL version uses the configs loaded at startup.
+        Other databases are read from their files on each request. If one of
+        those files now uses PostgreSQL, the request returns a restart-required
+        error.
+        """
+        versions = self._database_versions(database_name)
+        if self._latest_needs_restart(database_name, path, versions):
+            return _error_response(500, RESTART_REQUIRED_MESSAGE)
+        if versions is not None and not path:
+            return _json_response({"versions": versions})
+
+        located = _split_version(database_name, path, versions)
+        if isinstance(located, ProxyResponse):
+            return located
+        version, actual_path = located
+        snapshot = self._snapshot(database_name)
+        if snapshot is not None:
+            return version, actual_path, snapshot[version]
+        database_config = self._load_live_config(database_name, version)
+        if isinstance(database_config, ProxyResponse):
+            return database_config
+        return version, actual_path, database_config
+
+    def _load_live_config(
+            self, database_name: str,
+            version: Optional[str]) -> Union[ProxyResponse, Dict[str, Any]]:
+        """Load and merge one DuckDB config.
+
+        Return 404 for a missing file or a restart-required error for a changed backend.
+        """
+        try:
+            database_config = load_database_config(database_name, self.config_dir, version=version)
+        except FileNotFoundError:
+            return _error_response(404, f"Configuration for database '{database_name}' not found")
+        if database_config.get(BACKEND_KEY, DUCKDB_BACKEND) != DUCKDB_BACKEND:
+            return _error_response(500, RESTART_REQUIRED_MESSAGE)
+        return merge_inherited_config(database_config, self.config)
+
+    def _requires_restart(self, database_name: str, version: Optional[str]) -> bool:
+        """Return whether a live config loads successfully and names a non-DuckDB backend."""
+        try:
+            database_config = load_database_config(database_name, self.config_dir, version=version)
+        except Exception:
+            return False
+        return database_config.get(BACKEND_KEY, DUCKDB_BACKEND) != DUCKDB_BACKEND
+
+    def _listed_versions(self, database_name: str) -> List[Optional[str]]:
+        """Return versions for catalog listings; [None] denotes an unversioned database.
+
+        Use startup versions for snapshotted databases. For live databases, omit
+        versions that require a restart.
+        """
+        versions = self._database_versions(database_name)
+        listed: List[Optional[str]] = [None] if versions is None else list(versions)
+        if self._snapshot(database_name) is not None:
+            return listed
+        return [v for v in listed if not self._requires_restart(database_name, v)]
+
+    def _snapshot(self, database_name: str) -> Optional[Dict[Optional[str], Dict[str, Any]]]:
+        """Return the configs loaded at startup, or None if the database is read live."""
+        # getattr, as in get_config_metadata, for mappers built without __init__.
+        return getattr(self, "_snapshots", {}).get(database_name)
+
+    def _database_versions(self, database_name: str) -> Optional[List[str]]:
+        """Return the database's versions, or None if it is unversioned.
+
+        A snapshotted database uses its startup versions. Other databases are
+        read from the config folder.
+        """
+        snapshot = self._snapshot(database_name)
+        if snapshot is not None:
+            return None if None in snapshot else sorted(snapshot)
+        if is_versioned_database(database_name, self.config_dir):
+            return list(get_database_versions(database_name, self.config_dir))
+        return None
+
+    def _latest_needs_restart(
+            self, database_name: str, path: str, versions: Optional[List[str]]) -> bool:
+        """Return whether a version listing or a latest request must wait for a restart.
+
+        Both requests depend on every version of a live database. If any of
+        those version files now uses PostgreSQL, the answer would be wrong
+        until restart. Snapshotted and unversioned databases never need this.
+        """
+        if versions is None or self._snapshot(database_name) is not None:
+            return False
+        if path and path.partition("/")[0] != "latest":
+            return False
+        return any(self._requires_restart(database_name, v) for v in versions)
+
+    def _select_backend(
+            self, database_name: str, version: Optional[str],
+            database_config: Dict[str, Any]) -> DatabaseBackend:
+        """Return the started PostgreSQL backend or a fresh DuckDB backend.
+
+        PostgreSQL access outside its owning lifecycle raises DatabaseLifecycleError.
+        """
+        if get_backend_name(database_config) == POSTGRES_BACKEND:
+            return self._postgres.backend((database_name, version))
+        return DuckDBBackend(database_config)
+
     def _is_remote_filename(self, filename: str) -> bool:
         """Check if a filename corresponds to a remote config file.
 
@@ -621,37 +728,150 @@ class RouteMapper:
 #
 # INTERNAL
 #
-def _check_database(database_name: str, main_config: Dict[str, Any], config_dir: str) -> None:
-    """Load and check every version of a database config listed in the main config.
+def _load_checked_database(
+        database_name: str,
+        main_config: Dict[str, Any],
+        config_dir: str) -> Dict[Optional[str], Dict[str, Any]]:
+    """Load, merge and validate every version of a configured database.
 
-    Args:
-        database_name: Name of the database.
-        main_config: Main configuration dictionary, for inheritance.
-        config_dir: Directory holding the config files.
-
-    Raises:
-        ValueError: If a config file is missing or fails a check. The message
-            names the database and version.
+    Return configs keyed by version (None if unversioned). Missing or invalid
+    configs raise ValueError naming the database and version.
     """
     if is_versioned_database(database_name, config_dir):
         versions: List[Optional[str]] = list(get_database_versions(database_name, config_dir))
     else:
         versions = [None]
 
+    configs: Dict[Optional[str], Dict[str, Any]] = {}
     for version in versions:
-        label = f"Database '{database_name}'"
-        if version is not None:
-            label += f" version '{version}'"
+        label = database_label((database_name, version))
         try:
             database_config = load_database_config(database_name, config_dir, version=version)
         except FileNotFoundError as error:
             raise ValueError(
                 f"{label} is listed in the main config but has no config file"
             ) from error
+        merged = merge_inherited_config(database_config, main_config)
         try:
-            check_database_config(merge_inherited_config(database_config, main_config))
+            check_database_config(merged)
         except ValueError as error:
             raise ValueError(f"{label}, {error}") from error
+        configs[version] = merged
+    return configs
+
+
+def _split_version(
+        database_name: str,
+        path: str,
+        versions: Optional[List[str]]) -> Union[ProxyResponse, Tuple[Optional[str], str]]:
+    """Resolve the leading version, including latest, and return the remaining path.
+
+    None means unversioned. Unknown versions return a 404 response.
+    """
+    if versions is None:
+        return None, path
+    first, _, rest = path.partition("/")
+    if first == "latest":
+        version = resolve_latest_database_version(versions)
+        if version is None:
+            return _error_response(404, f"No versions found for database '{database_name}'")
+        return version, rest
+    if first in versions:
+        return first, rest
+    return _error_response(404, f"Configuration for database '{database_name}' not found")
+
+
+def _check_database_auth(
+        cookies: Dict[str, str], database_config: Dict[str, Any]) -> Optional[ProxyResponse]:
+    """Return an authentication error response, or None when authentication succeeds."""
+    auth_config = get_authentication_config(database_config)
+    if not auth_config:
+        return None
+    try:
+        is_valid, status_code, response_body = validate_authentication(cookies, auth_config)
+    except Exception:
+        return _error_response(500, "Authentication error")
+    if is_valid:
+        return None
+    if response_body:
+        content = json.dumps(response_body).encode()
+    else:
+        content = b'{"error": "Authentication failed"}'
+    return ProxyResponse(
+        status_code=status_code,
+        content=content,
+        content_type="application/json",
+        error_message="Authentication failed",
+    )
+
+
+def _early_query_response(
+        route_config: Dict[str, Any],
+        query_params: Dict[str, str],
+        path_params: Dict[str, str],
+        cookies: Dict[str, str]) -> Optional[ProxyResponse]:
+    """Return a parameter-driven response, or None when SQL should run."""
+    try:
+        should_return_early, response_data, status_code, error_message = process_query_parameters(
+            route_config, query_params, path_params, cookies
+        )
+    except Exception:
+        return _error_response(500, "Query parameter processing error")
+    if not should_return_early:
+        return None
+    content = json.dumps(response_data).encode() if response_data is not None else b""
+    return ProxyResponse(
+        status_code=status_code,
+        content=content,
+        content_type="application/json",
+        error_message=error_message,
+    )
+
+
+def _build_query(
+        route_config: Dict[str, Any],
+        database_config: Dict[str, Any],
+        path_params: Dict[str, str],
+        query_params: Dict[str, str],
+        cookies: Dict[str, str],
+        multi_query_params: Dict[str, List[str]],
+        marker: str) -> Union[ProxyResponse, Tuple[str, List[str]]]:
+    """Build SQL and bound values for the backend, or return a selection/build error."""
+    try:
+        return build_sql_query(
+            route_config, database_config, path_params, query_params,
+            cookies, multi_query_params, marker=marker
+        )
+    except SqlSelectionError as e:
+        return ProxyResponse(
+            status_code=e.status_code,
+            content=json.dumps(e.response).encode(),
+            content_type="application/json",
+            error_message=str(e.response.get("error")) if e.response.get("error") else None,
+        )
+    except ValueError:
+        return _error_response(500, "SQL query error")
+
+
+async def _run_query(
+        backend: DatabaseBackend, sql: str, values: List[str], key: DatabaseKey) -> ProxyResponse:
+    """Return query rows as JSON, 503 for unavailability or 500 for other errors.
+
+    Error responses exclude driver diagnostics. Unexpected pool closure is logged.
+    """
+    try:
+        columns, rows = await backend.execute(sql, values)
+        return _json_response([
+            {column: _make_json_safe(value) for column, value in zip(columns, row)}
+            for row in rows
+        ])
+    except DatabaseUnavailableError:
+        return _error_response(503, "Database unavailable")
+    except DatabaseLifecycleError:
+        logger.exception("%s: connection pool closed unexpectedly", database_label(key))
+        return _error_response(500, "Database query error")
+    except Exception:
+        return _error_response(500, "Database query error")
 
 
 def _resolve_timeout(value: Any) -> Optional[float]:

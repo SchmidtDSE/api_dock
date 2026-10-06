@@ -41,7 +41,7 @@ COMMENT: str = "comment"
 #
 # PUBLIC
 #
-def check_quoted_variables(template: str) -> None:
+def check_quoted_variables(template: str, escape_strings: bool = False) -> None:
     """Raise if a {{variable}} appears inside a quoted string or identifier.
 
     Single-quoted strings (with '' as an escaped quote), dollar-quoted strings
@@ -51,13 +51,15 @@ def check_quoted_variables(template: str) -> None:
 
     Args:
         template: SQL template to check.
+        escape_strings: Also recognize PostgreSQL's E'...' strings, in which
+            a backslash escapes the next character.
 
     Raises:
         ValueError: If a variable is quoted. For a string the message
             contains the template with that string rewritten without quotes
             around the variable.
     """
-    segments = _split_sql(template)
+    segments = _split_sql(template, escape_strings)
 
     for kind, text in segments:
         if kind == IDENTIFIER and VARIABLE_TOKEN.search(text):
@@ -77,7 +79,7 @@ def check_quoted_variables(template: str) -> None:
         )
 
 
-def check_commented_variables(template: str) -> None:
+def check_commented_variables(template: str, escape_strings: bool = False) -> None:
     """Raise if a {{variable}} appears inside a SQL comment.
 
     The binder still sends the variable's value, but the database ignores the
@@ -85,12 +87,13 @@ def check_commented_variables(template: str) -> None:
 
     Args:
         template: SQL template to check.
+        escape_strings: Also recognize PostgreSQL's E'...' strings.
 
     Raises:
         ValueError: If a comment contains a variable. No rewrite is suggested,
             because only the author knows whether the comment is still needed.
     """
-    for kind, text in _split_sql(template):
+    for kind, text in _split_sql(template, escape_strings):
         if kind == COMMENT and VARIABLE_TOKEN.search(text):
             raise ValueError(
                 f"A variable can't be inside a SQL comment: {text.strip()}. Its value "
@@ -99,7 +102,7 @@ def check_commented_variables(template: str) -> None:
             )
 
 
-def check_comment_at_end(template: str) -> None:
+def check_comment_at_end(template: str, escape_strings: bool = False) -> None:
     """Raise if a template ends inside a -- comment or an unclosed /* comment.
 
     The SQL builder strips each template's trailing whitespace, including a
@@ -108,12 +111,13 @@ def check_comment_at_end(template: str) -> None:
 
     Args:
         template: SQL template to check.
+        escape_strings: Also recognize PostgreSQL's E'...' strings.
 
     Raises:
         ValueError: If the template, with trailing whitespace removed, ends
             inside a comment.
     """
-    segments = _split_sql(template.rstrip())
+    segments = _split_sql(template.rstrip(), escape_strings)
     if not segments:
         return
     kind, text = segments[-1]
@@ -140,13 +144,14 @@ def _is_quoted_variable(kind: str, text: str) -> bool:
     return kind == STRING and VARIABLE_TOKEN.search(text) is not None
 
 
-def _split_sql(template: str) -> List[Tuple[str, str]]:
+def _split_sql(template: str, escape_strings: bool = False) -> List[Tuple[str, str]]:
     """Split SQL into code, string, identifier and comment segments.
 
     Joining the segments' text gives back the template exactly.
 
     Args:
         template: SQL text.
+        escape_strings: Also recognize E'...' strings.
 
     Returns:
         List of ``(kind, text)`` pairs in order. Quoted and comment segments
@@ -156,7 +161,7 @@ def _split_sql(template: str) -> List[Tuple[str, str]]:
     code_start = 0
     position = 0
     while position < len(template):
-        special = _special_segment(template, position)
+        special = _special_segment(template, position, escape_strings)
         if special is None:
             position += 1
             continue
@@ -170,12 +175,14 @@ def _split_sql(template: str) -> List[Tuple[str, str]]:
     return segments
 
 
-def _special_segment(template: str, start: int) -> Optional[Tuple[str, int]]:
+def _special_segment(
+        template: str, start: int, escape_strings: bool = False) -> Optional[Tuple[str, int]]:
     """Identify a string, identifier or comment starting at a position.
 
     Args:
         template: SQL text.
         start: Index to look at.
+        escape_strings: Also recognize E'...' strings.
 
     Returns:
         Tuple of the segment kind and the index just past its end, or None if
@@ -187,6 +194,8 @@ def _special_segment(template: str, start: int) -> Optional[Tuple[str, int]]:
     if template.startswith('/*', start):
         end = _block_comment_end(template, start)
         return COMMENT, len(template) if end is None else end
+    if escape_strings and _is_escape_string_start(template, start):
+        return STRING, _escape_string_end(template, start + 1)
     if template[start] == "'":
         return STRING, _quoted_end(template, start, "'")
     dollar = DOLLAR_QUOTE.match(template, start)
@@ -196,6 +205,31 @@ def _special_segment(template: str, start: int) -> Optional[Tuple[str, int]]:
     if template[start] == '"':
         return IDENTIFIER, _quoted_end(template, start, '"')
     return None
+
+
+def _is_escape_string_start(template: str, start: int) -> bool:
+    """Recognize E' or e' outside an identifier."""
+    if template[start] not in "eE" or _follows_identifier(template, start):
+        return False
+    return template.startswith("'", start + 1)
+
+
+def _escape_string_end(template: str, start: int) -> int:
+    """Return the index after an escape string, or the text length if unterminated.
+
+    Start is the opening quote. A backslash escapes the next character.
+    """
+    position = start + 1
+    while position < len(template):
+        if template[position] == "\\":
+            position += 2
+        elif template.startswith("''", position):
+            position += 2
+        elif template[position] == "'":
+            return position + 1
+        else:
+            position += 1
+    return len(template)
 
 
 def _block_comment_end(template: str, start: int) -> Optional[int]:
@@ -270,19 +304,21 @@ def _unquoted_form(literal: str) -> str:
 
     ``'%{{q}}%'`` becomes ``'%' || {{q}} || '%'`` and ``'{{x}}'`` becomes
     ``{{x}}``. Empty strings are dropped. The text of a dollar-quoted string
-    is written in single quotes, with each ' doubled.
+    is written in single quotes, with each ' doubled. The text of an E'...'
+    string stays in E'...' strings.
 
     Args:
-        literal: A single-quoted or dollar-quoted SQL string, including its
-            quotes.
+        literal: A single-quoted, dollar-quoted or E'...' SQL string,
+            including its quotes.
 
     Returns:
         SQL expression joining the string's text and variables with ||.
     """
-    content = _string_content(literal)
+    prefix = literal[0] if literal[0] in "eE" else ""
+    content = _string_content(literal[len(prefix):])
     parts = [part for part in VARIABLE_TOKEN.split(content) if part]
     return ' || '.join(
-        part if VARIABLE_TOKEN.fullmatch(part) else f"'{part}'" for part in parts
+        part if VARIABLE_TOKEN.fullmatch(part) else f"{prefix}'{part}'" for part in parts
     )
 
 

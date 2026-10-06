@@ -12,7 +12,7 @@ License: BSD 3-Clause
 #
 # IMPORTS
 #
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from api_dock.config import get_remote_names, get_remote_versions, is_versioned_remote
 from api_dock.database_config import (
@@ -94,13 +94,17 @@ def resolve_listing_specs(
 def build_listing(
         spec: ListingSpec,
         config: Dict[str, Any],
-        config_dir: Optional[str] = None) -> List[Any]:
+        config_dir: Optional[str] = None,
+        database_versions: Optional[Callable[[str], List[Optional[str]]]] = None) -> List[Any]:
     """Build the response body for a single listing endpoint.
 
     Args:
         spec: The resolved listing spec.
         config: Main configuration dictionary.
         config_dir: Directory holding the config files. If None, uses default.
+        database_versions: Optional function giving the versions to list for
+            a database: ``[None]`` for an unversioned database, ``[]`` to leave
+            it out. If None, versions are read from the config folder.
 
     Returns:
         A list of ``{"model", "version"}`` dicts (when ``spec.as_dict``) or
@@ -114,7 +118,9 @@ def build_listing(
 
     rows: List[Any] = []
     if spec.kind in ("databases", "sources"):
-        rows.extend(_source_rows("databases", config, config_dir, selectors, spec.as_dict))
+        rows.extend(_source_rows(
+            "databases", config, config_dir, selectors, spec.as_dict, database_versions
+        ))
     if spec.kind in ("remotes", "sources"):
         rows.extend(_source_rows("remotes", config, config_dir, selectors, spec.as_dict))
     return rows
@@ -264,7 +270,8 @@ def _source_rows(
         config: Dict[str, Any],
         config_dir: Optional[str],
         selectors: Optional[Dict[str, Optional[List[Any]]]],
-        as_dict: bool) -> List[Any]:
+        as_dict: bool,
+        database_versions: Optional[Callable[[str], List[Optional[str]]]] = None) -> List[Any]:
     """Build listing rows for one source type (databases or remotes).
 
     Args:
@@ -273,6 +280,7 @@ def _source_rows(
         config_dir: Directory holding the config files. If None, uses default.
         selectors: Name -> allowed-versions mapping, or None for all.
         as_dict: Output format flag (see build_listing).
+        database_versions: Optional database version lookup (see build_listing).
 
     Returns:
         List of row entries for the given source type.
@@ -297,7 +305,13 @@ def _source_rows(
         if selectors is not None and name not in selectors:
             continue
         allowed = selectors.get(name) if selectors is not None else None
-        stems = versions_of(name)
+        if source_type == "databases" and database_versions is not None:
+            listed = database_versions(name)
+            if not listed:
+                continue
+            stems = [stem for stem in listed if stem is not None]
+        else:
+            stems = versions_of(name)
 
         if not stems:
             # Unversioned source. Skip it if the config asked for specific versions.

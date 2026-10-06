@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "api_dock"
-version = "0.9.0"
+version = "0.10.0"
 description = "A flexible API gateway that allows you to proxy requests to multiple remote APIs and Databases"
 readme = "README.md"
 license = "BSD-3-Clause"
@@ -47,6 +47,10 @@ dev = [
     "pandas>=2.3.2,<3",
     "pytest>=9.0.2,<10"
 ]
+postgres = [
+    "psycopg[binary]>=3.3.6,<4",
+    "psycopg_pool>=3.3.2,<4"
+]
 
 [project.scripts]
 api-dock = "api_dock.cli:main"
@@ -66,10 +70,11 @@ api_dock = { path = ".", editable = true }
 
 [tool.pixi.environments]
 default = { features = [] }
-dev = { features = ["dev"] }
+dev = { features = ["dev", "postgres"] }
 
 [tool.pixi.feature.dev.dependencies]
 twine = "*"
+postgresql = ">=18"
 
 [tool.pixi.feature.dev.pypi-dependencies]
 build = "*"

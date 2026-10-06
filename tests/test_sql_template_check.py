@@ -136,3 +136,35 @@ class TestTemplatesAccepted:
         assert check_quoted_variables(template) is None
         assert check_commented_variables(template) is None
         assert check_comment_at_end(template) is None
+
+
+class TestEscapeStrings:
+    """With escape_strings, E'...' strings use backslash escapes (PostgreSQL)."""
+
+    @pytest.mark.parametrize("template, fixed", [
+        ("note = E'a{{x}}'", "note = E'a' || {{x}}"),
+        ("note = e'{{x}}\\n'", "note = {{x}} || e'\\n'"),
+        ("SELECT E'it\\'s', '{{x}}'", "SELECT E'it\\'s', {{x}}"),
+    ])
+    def test_quoted_variable_rejected(self, template: str, fixed: str) -> None:
+        """A variable in or after an E'...' string is found; the fix keeps the E prefix."""
+        with pytest.raises(ValueError) as error:
+            check_quoted_variables(template, escape_strings=True)
+        assert str(error.value).endswith(f"Use: {fixed}")
+
+    @pytest.mark.parametrize("template", [
+        "SELECT E'it\\'s' || {{x}}",
+        "SELECT E'a\\\\' AS slash WHERE id = {{id}}",
+        "SELECT E'-- not a comment' WHERE id = {{id}}",
+        "SELECT name FROM tablE WHERE id = {{id}}",
+    ])
+    def test_accepted(self, template: str) -> None:
+        """Escaped quotes and backslashes end the string at its real closing quote."""
+        assert check_quoted_variables(template, escape_strings=True) is None
+        assert check_commented_variables(template, escape_strings=True) is None
+        assert check_comment_at_end(template, escape_strings=True) is None
+
+    def test_off_by_default(self) -> None:
+        """Without escape_strings, a backslash does not escape a quote."""
+        with pytest.raises(ValueError):
+            check_quoted_variables("SELECT E'it\\'s' || {{x}}")

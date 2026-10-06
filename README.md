@@ -12,6 +12,7 @@ API Dock allows users to quickly build API-s that proxy requests to multiple rem
   - [Remote Configurations](#remote-configurations)
   - [SQL Database Support](#sql-database-support)
   - [URL Query Parameters](#url-query-parameters)
+  - [PostgreSQL Databases](#postgresql-databases)
 - [CLI](#cli)
   - [Commands](#commands)
   - [Examples](#examples)
@@ -36,6 +37,12 @@ API Dock allows users to quickly build API-s that proxy requests to multiple rem
 
 ```bash
 pip install api_dock
+```
+
+For [PostgreSQL databases](#postgresql-databases), install the `postgres` extra:
+
+```bash
+pip install 'api_dock[postgres]'
 ```
 
 **FROM CONDA**
@@ -360,7 +367,7 @@ queries:     # (optional) named-queries used for complex sql queries for readabi
 routes:      # <list[dict]> maps routes to sql queries
 ```
 
-For now only parquet support is working but we will be adding other Databases in the future.
+Tables are read with DuckDB (Parquet and other files) unless the config sets `backend: postgres`; see [PostgreSQL Databases](#postgresql-databases).
 
 
 ### Database Configuration
@@ -455,7 +462,7 @@ routes:
 
 ### How values reach the database
 
-api_dock does not paste request values into SQL. Each `{{variable}}` in `sql`, `multivalue_sql`, conditional `sql` and `queries:` becomes a placeholder, and its value (from the path, query string, a `default`, or a cookie) is sent to DuckDB separately. DuckDB converts the value to the column's type, so number, date and boolean filters work as written. A value that is not a valid number, date or boolean for its column, such as `?age=25 OR true`, is rejected with an error instead of being run as SQL.
+api_dock does not paste request values into SQL. Each `{{variable}}` in `sql`, `multivalue_sql`, conditional `sql` and `queries:` becomes a placeholder, and its value (from the path, query string, a `default`, or a cookie) is sent to the database separately. The database converts the value to the column's type, so number, date and boolean filters work as written. A value that is not a valid number, date or boolean for its column, such as `?age=25 OR true`, is rejected with an error instead of being run as SQL.
 
 Because the value is sent separately, **do not put quotes around variables**:
 
@@ -820,6 +827,160 @@ sql:
 
 Cookies participate via the `cookies.<name>` key (e.g. `when: cookies.role`, `equals: admin`).
 
+## PostgreSQL Databases
+
+A database config is served by DuckDB unless it sets `backend: postgres`. A PostgreSQL database's routes, `query_params`, `[[table]]` references and bound values work as described above, but its SQL is PostgreSQL's SQL, not DuckDB's. Install the driver with:
+
+```bash
+pip install 'api_dock[postgres]'
+```
+
+This installs `psycopg[binary]` and `psycopg_pool`. The binary package includes the PostgreSQL client library, so no separate libpq or PostgreSQL install is needed.
+
+```yaml
+# api_dock_config/databases/inventory.yaml
+name: inventory
+backend: postgres
+connection:
+  host: db.example.com
+  dbname: inventory
+  user: api_dock_readonly
+  password: env:INVENTORY_DB_PASSWORD
+  sslmode: verify-full
+  sslrootcert: /etc/ssl/certs/provider-ca-bundle.pem   # the database provider's CA bundle
+tables:
+  products: catalog.products
+routes:
+  - route: products/{{id}}
+    sql: SELECT [[products]].* FROM [[products]] WHERE [[products]].id = {{id}}
+  - route: search
+    sql: SELECT [[products]].name FROM [[products]]
+    query_params:
+      - q:
+          sql: "[[products]].name ILIKE '%' || {{q}} || '%'"
+```
+
+### Connection
+
+`connection:` holds [libpq connection fields](https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-PARAMKEYWORDS) such as `host`, `port`, `dbname`, `user`, `password`, `sslmode` and `sslrootcert`. Other keys, including psycopg settings such as `autocommit`, stop api_dock from starting. `options`, `default_transaction_read_only` and `statement_timeout` can't be set, because api_dock sets them (see [Read-only queries](#read-only-queries)).
+
+A value written `env:NAME` is read from the environment variable `NAME` when the server starts. If the variable is not set, api_dock does not start, and the error names the variable.
+
+Invalid `sslmode` or `port` values in `connection:` also stop startup, including values read through `env:`. Ports must be integers from 1 to 65535; comma-separated ports and empty entries for the default port are supported.
+
+For a database reached over a network, use `sslmode: verify-full` with `sslrootcert` set to your provider's CA bundle. libpq's default, `prefer`, falls back to an unencrypted connection if the server doesn't offer TLS, and `require` encrypts without checking the server's certificate or host name. A local test database may use `sslmode: disable`.
+
+### Resource limits
+
+These optional settings have the following defaults:
+
+```yaml
+connection:
+  connect_timeout: 5       # seconds for each connection attempt
+pool:
+  min_size: 1              # connections kept open
+  max_size: 4              # most connections open at once
+  timeout: 5               # seconds a request waits for a free connection
+  max_waiting: 16          # most requests waiting for a connection at once
+  startup_timeout: 3       # seconds the startup check waits for a connection
+statement_timeout_ms: 10000  # milliseconds a query may run
+```
+
+Sizes, `connect_timeout` and `statement_timeout_ms` must be positive integers; `timeout` and `startup_timeout` must be positive numbers. The limits apply to separate steps (connecting, waiting for a connection, running the query), so a request can take longer than any one of them.
+
+Each database version has its own connection pool in each server process, so the most connections api_dock can open is the sum of `max_size` over all PostgreSQL databases and versions, times the number of server processes, times the number of running instances. Keep this below the database's connection limit.
+
+### Read-only queries
+
+Every connection is opened with read-only transactions, the `statement_timeout_ms` limit and the time zone set to UTC. Each query runs in its own transaction, which is rolled back after the rows are read, so a query that changes a setting doesn't affect the next one. Queries are sent as prepared statements, which PostgreSQL limits to one statement, so SQL such as `COMMIT; BEGIN READ WRITE; DELETE ...` fails. A route whose SQL writes, such as `DELETE FROM ...`, returns `500 Database query error` and changes nothing.
+
+These settings guard against mistakes in a config's SQL. They don't stop a single statement with side effects, such as a call to a function that writes. **Connect with a login that can only SELECT from the tables it serves.**
+
+### Tables and SQL
+
+`tables:` values are `schema.table` or `table` names; the `{uri: ...}` form is for DuckDB only. Each part, and each table key, must be lower case and contain only letters, digits and `_`, at most 63 bytes. `[[table]]` is written as quoted names, such as `"catalog"."products" AS "products"` after FROM or JOIN and `"products"` elsewhere, so names that are SQL keywords work. A name without a schema is looked up in the login's search path, so schema-qualified names are recommended.
+
+Write `%` as usual: api_dock doubles it for the driver. `E'...'` strings are recognized when checking for quoted variables.
+
+Values are sent as text and PostgreSQL converts them to the column's type, as DuckDB does. A value that can't be converted, such as `?id=abc` for an integer column, returns `500 Database query error`.
+
+### Responses
+
+Rows are returned as JSON in the same shape as DuckDB rows. For both backends, dates and times become ISO 8601 strings, decimals become numbers (which may lose precision), bytes become base64 text, UUIDs and network addresses become strings, intervals become a number of seconds, and arrays become JSON arrays. PostgreSQL JSON and JSONB values are returned as JSON, not as text. PostgreSQL times with a time zone are returned in UTC; times without one are returned as stored.
+
+### Availability and errors
+
+If api_dock can't reach a PostgreSQL database when the server starts, it logs a warning and starts anyway. The warning looks like this: `Database 'inventory': No connection obtained within 3s; PostgreSQL routes will return 503 until a connection is available`.
+
+Until a connection succeeds, that database's routes return `503 Database unavailable`. Other routes work as usual. The pool keeps trying to connect in the background, so the routes recover without a restart.
+
+The warning doesn't say why the connection failed. To find the reason, read psycopg's log messages for the pool. The pool has the database's name, and the messages don't include the password. If the password is wrong, the routes return 503 until you correct the password and restart the server.
+
+Once running, a request returns 503 when no connection becomes free within `pool.timeout`, when `pool.max_waiting` requests are already waiting, or when the connection is lost. Queries are not retried. Invalid SQL, a value of the wrong type, a permission error and a query over `statement_timeout_ms` return `500 Database query error`. Error responses don't include the database's error message.
+
+A missing `connection:`, an unknown `backend:`, an invalid table name or resource limit, or missing PostgreSQL packages stop api_dock from starting, with the database and the reason in the error.
+
+### Configuration changes need a restart
+
+A database with any PostgreSQL version is read once, when the server starts: its versions, their configs, `/latest`, the `/databases` and `/sources` listings and its `env:` values stay as they were until the server restarts. To rotate a password, update the environment variable (for example, the secret your host loads into it), then restart or redeploy the server. Updating the secret store alone doesn't change the running server's password.
+
+DuckDB-only databases are still read from their files on each request. If such a database's file is changed to `backend: postgres`, or a PostgreSQL version is added, its requests return `500 Database configuration changed; restart required` and listings leave that version out until the server restarts.
+
+### Servers and lifecycle
+
+PostgreSQL databases need FastAPI, the default server (`api-dock start`). The FastAPI app opens connection pools when the server starts and closes them when it stops. Flask still serves DuckDB and remote configs, but `--backbone flask`, or `create_flask_app()`, refuses a config with any PostgreSQL database version.
+
+To use `RouteMapper` directly, start it, send requests and close it on one event loop:
+
+```python
+import asyncio
+
+from api_dock.route_mapper import RouteMapper
+
+
+async def main():
+    mapper = RouteMapper(config_path="api_dock_config/config.yaml")
+    try:
+        await mapper.start()
+        response = await mapper.map_database_route(
+            database_name="inventory",
+            path="products/7",
+        )
+        print(response.status_code, response.content)
+    finally:
+        await mapper.aclose()
+
+asyncio.run(main())
+```
+
+Using a PostgreSQL route before `start()`, after `aclose()` or from another event loop raises `DatabaseLifecycleError`. Calling `asyncio.run()` for each request, as in the [Database Integration](#database-integration) examples, works only for DuckDB and remote configs.
+
+A FastAPI app mounted inside another app doesn't run its own startup and shutdown, so the parent app must start and close its mapper:
+
+```python
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+
+from api_dock.fast_api import create_app
+
+api = create_app("api_dock_config/config.yaml")
+
+
+@asynccontextmanager
+async def lifespan(app):
+    await api.state.route_mapper.start()
+    yield
+    await api.state.route_mapper.aclose()
+
+app = FastAPI(lifespan=lifespan)
+app.mount("/api", api)
+```
+
+Importing api_dock doesn't build an app. Each of these app names builds its app the first time it is read: `api_dock.app`, `api_dock.fastapi_app`, `api_dock.fast_api.app`, `api_dock.flask_app` and `api_dock.flask_api.app`.
+
+If a PostgreSQL database is configured, reading `flask_app` raises the Flask error. `from api_dock import *` raises it too, because it reads every exported name. Import only the names you need, for example `from api_dock.fast_api import create_app`.
+
 ---
 
 # CLI
@@ -851,7 +1012,8 @@ pixi run api-dock
 # Start API server
 # - default configuration (api_dock_config/config.yaml) with FastAPI
 pixi run api-dock start
-# - default configuration with Flask (backbone options: fastapi (default) or flask)
+# - default configuration with Flask (backbone options: fastapi (default) or flask);
+#   Flask does not serve PostgreSQL databases
 pixi run api-dock start --backbone flask
 # - specify with host and/or port
 pixi run api-dock start --host 0.0.0.0 --port 9000
@@ -1110,7 +1272,7 @@ def proxy_handler(remote_name, path, request):
 
 ## Database Integration
 
-The `RouteMapper` also supports SQL database queries through the `map_database_route` method:
+The `RouteMapper` also supports SQL database queries through the `map_database_route` method. The examples below run each request with its own `asyncio.run()`, which works for DuckDB databases and remotes only; for PostgreSQL databases see [Servers and lifecycle](#servers-and-lifecycle).
 
 ```python
 from api_dock.route_mapper import RouteMapper
