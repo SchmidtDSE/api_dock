@@ -26,8 +26,8 @@ import yaml
 
 from api_dock.auth import validate_authentication
 from api_dock.config import DEFAULT_CONFIG_DIR, filter_cookies_by_config, filter_remote_query_params, find_remote_config, find_route_mapping, get_authentication_config, get_database_names, get_remote_names, get_remote_versions, get_settings, is_route_allowed, is_versioned_remote, load_main_config, merge_inherited_config, resolve_latest_version
-from api_dock.database_config import apply_shared_definitions, check_database_config, check_table_definitions, find_database_route, get_database_versions, get_local_table_references, get_schema_sources, is_versioned_database, load_database_config, load_shared_config, merge_query_params, resolve_latest_database_version, SCHEMA_GROUPS_KEY, SHARED_CONFIG_KEY
-from api_dock.database_backends import DUCKDB_SETTINGS_KEY, DuckDBBackend
+from api_dock.database_config import apply_shared_definitions, check_database_config, check_table_definitions, find_database_route, get_database_versions, get_local_table_references, get_schema_sources, is_versioned_database, load_database_config, load_shared_config, merge_query_params, resolve_latest_database_version, SCHEMA_GROUPS_KEY, SHARED_CONFIG_KEY, SHARED_CONNECTIONS_KEY
+from api_dock.database_backends import DatabaseLifecycleError, DatabaseUnavailableError, DUCKDB_SETTINGS_KEY, DuckDBBackend
 from api_dock.listings import build_listing, resolve_listing_specs
 from api_dock.sql_builder import build_sql_query_with_tables, check_table_references, route_engine, extract_path_parameters, process_query_parameters, SOURCE_COLUMNS_KEY, SqlSelectionError
 from api_dock.types import PreparedRequest, ProxyResponse, SqlContext
@@ -194,6 +194,42 @@ class RouteMapper:
             raise ValueError(f"Shared database config (databases/config.yaml): {error}") from error
         for database_name in self.database_names:
             _check_database(database_name, self.config, self.config_dir, shared_file)
+
+        # PostgreSQL connections are fixed at startup; their pools open in start().
+        self.connections: Dict[str, Any] = (
+            shared_file.get(SHARED_CONFIG_KEY, {}).get(SHARED_CONNECTIONS_KEY) or {}
+        )
+        self._postgres: Any = None
+
+    async def start(self) -> None:
+        """Open a connection pool for each PostgreSQL connection.
+
+        Needed only when ``database.connections`` is configured; the FastAPI app
+        calls it (and aclose) in its lifespan. Use the mapper on the event loop
+        that started it.
+
+        Raises:
+            RuntimeError: If the PostgreSQL packages aren't installed.
+            ValueError: If a connection's settings are invalid (e.g. an unset
+                ``env:`` variable).
+        """
+        if not self.connections or self._postgres is not None:
+            return
+        try:
+            from api_dock.postgres_backend import PostgresPools
+        except ImportError as error:
+            raise RuntimeError(
+                "PostgreSQL connections are configured; install them with "
+                "`pip install 'api_dock[postgres]'`"
+            ) from error
+        pools = PostgresPools(self.connections)
+        await pools.start()
+        self._postgres = pools
+
+    async def aclose(self) -> None:
+        """Close the PostgreSQL connection pools (if any). Safe to call more than once."""
+        if self._postgres is not None:
+            await self._postgres.aclose()
 
     def get_config_metadata(self) -> Dict[str, Any]:
         """Get API metadata from configuration.
@@ -581,9 +617,13 @@ class RouteMapper:
                     if route_config.get(SOURCE_COLUMNS_KEY) else {}
                 ),
             )
+            context.connection = route_engine(
+                route_config, database_config, shared_config, context.schema_groups
+            )
+            backend = self._backend(context.connection)
             sql_query, sql_values, table_refs = build_sql_query_with_tables(
                 route_config, database_config, path_params, query_params,
-                filtered_cookies, multi_query_params, shared_config, context
+                filtered_cookies, multi_query_params, shared_config, context, backend.marker
             )
         except SqlSelectionError as e:
             return ProxyResponse(
@@ -592,6 +632,8 @@ class RouteMapper:
                 content_type="application/json",
                 error_message=str(e.response.get("error")) if e.response.get("error") else None,
             )
+        except DatabaseLifecycleError as error:
+            return _error_response(500, str(error))
         except (ValueError, yaml.YAMLError):
             return _error_response(500, "SQL query error")
 
@@ -602,7 +644,9 @@ class RouteMapper:
         auth_tables += [ref for ref in table_refs if ref.sql_name not in local_names]
 
         try:
-            columns, rows = await self.duckdb_backend.execute(sql_query, sql_values, auth_tables)
+            columns, rows = await backend.execute(sql_query, sql_values, auth_tables)
+        except DatabaseUnavailableError:
+            return _error_response(503, "Database unavailable")
         except Exception:
             return _error_response(500, "Database query error")
         return _json_response([
@@ -685,6 +729,29 @@ class RouteMapper:
             return result
         except Exception as e:
             return _error_response(500, f"Sync wrapper error: {str(e)}")
+
+    def _backend(self, connection: Optional[str]) -> Any:
+        """The backend a route runs on: DuckDB, or a PostgreSQL connection's pool.
+
+        Args:
+            connection: PostgreSQL connection name (from route_engine), or None.
+
+        Returns:
+            A DatabaseBackend.
+
+        Raises:
+            DatabaseLifecycleError: For a PostgreSQL connection before start()
+                (or after aclose(), or from another event loop).
+        """
+        # getattr: RouteMappers built without __init__ (e.g. in tests) have neither.
+        if connection is None:
+            return getattr(self, "duckdb_backend", None) or DuckDBBackend()
+        if getattr(self, "_postgres", None) is None:
+            raise DatabaseLifecycleError(
+                "PostgreSQL connections are configured but the route mapper wasn't started; "
+                "call `await mapper.start()` (the FastAPI app does this in its lifespan)"
+            )
+        return self._postgres.backend(connection)
 
     def _is_remote_filename(self, filename: str) -> bool:
         """Check if a filename corresponds to a remote config file.
