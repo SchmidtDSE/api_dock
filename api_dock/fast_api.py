@@ -80,7 +80,6 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     return app
 
 
-
 def __getattr__(name: str) -> Any:
     """Build the default ``app`` on first use instead of at import (PEP 562).
 
@@ -348,7 +347,6 @@ async def _stream_upstream(prepared: PreparedRequest) -> Response:
         headers=headers,
         media_type=upstream.headers.get("content-type", "application/octet-stream"),
     )
-
 
 
 def _default_app() -> Any:
