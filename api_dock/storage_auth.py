@@ -15,6 +15,8 @@ License: BSD 3-Clause
 import re
 from typing import Any, Dict, List, Optional, Set
 
+from api_dock.types import TableReference
+
 
 #
 # CONSTANTS
@@ -31,6 +33,17 @@ BACKEND_GCS = 'gcs'
 BACKEND_AZURE = 'azure'
 BACKEND_HTTP = 'http'
 BACKEND_LOCAL = 'local'
+
+# S3 metadata keys that change how a table's secret is built. A table whose
+# value for any of these differs from the connection default gets its own
+# path-scoped secret.
+S3_SECRET_KEYS: tuple = ('region', 'public')
+
+# Name prefix for per-table, path-scoped S3 secrets.
+S3_SCOPED_SECRET_PREFIX: str = 'api_dock_s3_table'
+
+# Characters that start a glob pattern in a URI; a secret scope stops before them.
+GLOB_CHARACTERS: str = '*?[{'
 
 
 #
@@ -195,10 +208,115 @@ def setup_storage_authentication(conn: Any, backends: Set[str], metadata: Option
     return results
 
 
+def setup_table_storage_authentication(
+        conn: Any,
+        tables: List[TableReference]) -> Dict[str, bool]:
+    """Set up storage authentication for a specific set of tables.
+
+    First configures one default secret per backend from the tables' merged
+    metadata (the same behavior as setup_storage_authentication). Then, for
+    each S3 table whose ``region``/``public`` differs from that default, adds a
+    secret scoped to the table's URI prefix, so tables in different regions or
+    with different access settings can be read in a single query. DuckDB uses
+    the secret with the longest matching scope.
+
+    Args:
+        conn: DuckDB connection object.
+        tables: Tables the query may read, with effective metadata.
+
+    Returns:
+        Dictionary mapping backend names (and scoped secret names) to setup
+        success status.
+    """
+    backends = detect_required_backends([table.uri for table in tables])
+    backend_metadata: Dict[str, Dict[str, Any]] = {}
+    for table in tables:
+        backend_metadata.setdefault(detect_storage_backend(table.uri), {}).update(table.metadata)
+
+    results = setup_storage_authentication(conn, backends, backend_metadata)
+
+    default_s3 = backend_metadata.get(BACKEND_S3, {})
+    scoped_secrets: Dict[str, str] = {}
+    for table in tables:
+        if detect_storage_backend(table.uri) != BACKEND_S3:
+            continue
+        if not _differs_from_default(table.metadata, default_s3):
+            continue
+        scope = _secret_scope(table.uri)
+        if scope in scoped_secrets:
+            continue
+        secret_name = f"{S3_SCOPED_SECRET_PREFIX}_{len(scoped_secrets)}"
+        scoped_secrets[scope] = secret_name
+        results[secret_name] = _setup_s3_auth(
+            conn, table.metadata, secret_name=secret_name, scope=scope
+        )
+
+    return results
+
+
 #
 # INTERNAL
 #
-def _setup_s3_auth(conn: Any, metadata: Optional[Dict[str, Any]] = None) -> bool:
+def _differs_from_default(metadata: Dict[str, Any], default: Dict[str, Any]) -> bool:
+    """Check whether a table's S3 settings differ from the connection default.
+
+    Keys the table does not set are treated as inherited from the default.
+
+    Args:
+        metadata: The table's effective metadata.
+        default: The merged default S3 metadata for the connection.
+
+    Returns:
+        True if any of S3_SECRET_KEYS is set on the table to a different value.
+    """
+    return any(
+        key in metadata and metadata[key] != default.get(key)
+        for key in S3_SECRET_KEYS
+    )
+
+
+def _secret_scope(uri: str) -> str:
+    """Return the path prefix a table's scoped secret should cover.
+
+    A plain file URI is its own scope. A glob URI is cut back to the directory
+    before the first glob character (``s3://b/owl/**/*.parquet`` -> ``s3://b/owl/``).
+
+    Args:
+        uri: The table URI.
+
+    Returns:
+        Scope prefix for a DuckDB secret.
+    """
+    cut = min((uri.find(char) for char in GLOB_CHARACTERS if char in uri), default=-1)
+    if cut < 0:
+        return uri
+    return uri[:uri.rfind('/', 0, cut) + 1]
+
+
+def _s3_secret_sql(options: List[str], secret_name: Optional[str], scope: Optional[str]) -> str:
+    """Build a CREATE OR REPLACE SECRET statement for S3.
+
+    Args:
+        options: Secret options after ``TYPE s3`` (e.g. ``"REGION 'us-west-2'"``).
+        secret_name: Secret name, or None for DuckDB's default unnamed secret.
+        scope: URI prefix the secret applies to, or None for all of S3.
+
+    Returns:
+        SQL statement string.
+    """
+    all_options = ['TYPE s3', *options]
+    if scope:
+        escaped_scope = scope.replace("'", "''")
+        all_options.append(f"SCOPE '{escaped_scope}'")
+    name_part = f" {secret_name}" if secret_name else ""
+    return f"CREATE OR REPLACE SECRET{name_part} ({', '.join(all_options)});"
+
+
+def _setup_s3_auth(
+        conn: Any,
+        metadata: Optional[Dict[str, Any]] = None,
+        secret_name: Optional[str] = None,
+        scope: Optional[str] = None) -> bool:
     """Setup AWS S3 authentication using credential chain.
 
     Attempts to configure S3 access using AWS credential chain which automatically
@@ -212,6 +330,9 @@ def _setup_s3_auth(conn: Any, metadata: Optional[Dict[str, Any]] = None) -> bool
     Args:
         conn: DuckDB connection object.
         metadata: Optional metadata dict that may contain 'region' key and 'public' flag.
+        secret_name: Optional secret name. None replaces DuckDB's default S3 secret;
+            a name adds a separate secret alongside it.
+        scope: Optional URI prefix the secret applies to (None = all of S3).
 
     Returns:
         True if setup succeeded, False if it failed (but query may still work with public files).
@@ -238,26 +359,14 @@ def _setup_s3_auth(conn: Any, metadata: Optional[Dict[str, Any]] = None) -> bool
             os.environ.get('AWS_REGION')
         )
 
+        region_options = [f"REGION '{aws_region}'"] if aws_region else []
+
         # For public buckets, try anonymous access first
         if is_public:
             try:
-                if aws_region:
-                    conn.execute(f"""
-                        CREATE OR REPLACE SECRET (
-                            TYPE s3,
-                            KEY_ID '',
-                            SECRET '',
-                            REGION '{aws_region}'
-                        );
-                    """)
-                else:
-                    conn.execute("""
-                        CREATE OR REPLACE SECRET (
-                            TYPE s3,
-                            KEY_ID '',
-                            SECRET ''
-                        );
-                    """)
+                conn.execute(_s3_secret_sql(
+                    ["KEY_ID ''", "SECRET ''", *region_options], secret_name, scope
+                ))
                 return True
             except Exception:
                 pass  # Fall through to credential chain
@@ -269,25 +378,13 @@ def _setup_s3_auth(conn: Any, metadata: Optional[Dict[str, Any]] = None) -> bool
         # - IAM roles (EC2, ECS, EKS, Lambda)
         # - SSO credentials
         # - Other AWS SDK credential providers
-        if aws_region:
-            # If region is specified, include it in the secret
-            conn.execute(f"""
-                CREATE OR REPLACE SECRET (
-                    TYPE s3,
-                    PROVIDER credential_chain,
-                    REGION '{aws_region}'
-                );
-            """)
-        else:
-            # No region specified, let DuckDB auto-detect
-            # Note: This may cause 301 redirects if bucket is in a different region
-            conn.execute("""
-                CREATE OR REPLACE SECRET (
-                    TYPE s3,
-                    PROVIDER credential_chain
-                );
-            """)
+        # Without a region DuckDB auto-detects it, which may cause 301 redirects
+        # if the bucket is in a different region.
+        conn.execute(_s3_secret_sql(
+            ["PROVIDER credential_chain", *region_options], secret_name, scope
+        ))
         return True
+
     except Exception:
         # Authentication setup failed, but public S3 files may still work
         return False
