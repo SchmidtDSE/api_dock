@@ -14,9 +14,9 @@ License: BSD 3-Clause
 import asyncio
 import warnings
 from flask import Flask, jsonify, request, Response as FlaskResponse
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
-from api_dock.route_mapper import collect_multi_query_params, RouteMapper
+from api_dock.route_mapper import collect_multi_query_params, RouteMapper, strip_base_path
 
 
 #
@@ -52,12 +52,35 @@ def create_app(config_path: Optional[str] = None) -> Flask:
     _add_main_routes(app, route_mapper)
     _add_error_handlers(app)
 
+    if route_mapper.base_path:
+        app.wsgi_app = _strip_base_path(app.wsgi_app, route_mapper.base_path)
+
     return app
 
 
 #
 # INTERNAL
 #
+def _strip_base_path(wsgi_app: Callable, base_path: str) -> Callable:
+    """Wrap a WSGI app so it is also served under ``settings.base_path``.
+
+    Args:
+        wsgi_app: The Flask WSGI app.
+        base_path: Normalized prefix, e.g. "/dock".
+
+    Returns:
+        WSGI app that routes ``/dock/...`` as ``/...`` (other paths unchanged).
+    """
+    def middleware(environ: Dict[str, Any], start_response: Callable) -> Any:
+        """Strip the base path from PATH_INFO, then call the Flask app."""
+        path = environ.get("PATH_INFO", "")
+        stripped = strip_base_path(path, base_path)
+        if stripped != path:
+            environ["PATH_INFO"] = stripped
+        return wsgi_app(environ, start_response)
+    return middleware
+
+
 def _add_main_routes(app: Flask, route_mapper: RouteMapper) -> None:
     """Add main API routes to the Flask app.
 
