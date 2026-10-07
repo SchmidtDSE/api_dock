@@ -22,6 +22,7 @@ from api_dock.database_config import (
     IDENTIFIER_PATTERN,
     resolve_schema_union,
     resolve_table_reference,
+    route_templates,
     SCHEMA_SEPARATOR,
 )
 from api_dock.sql_template_check import QUOTED_VARIABLE_PATTERN
@@ -57,6 +58,16 @@ SOURCE_COLUMN_DEFAULTS: Dict[str, str] = {
     "name": "name",
     "version": "version",
 }
+
+# Route key choosing the query engine, and its values. A route's engine is
+# inferred from its tables (see route_engine); `engine` checks or forces it.
+ENGINE_KEY: str = "engine"
+DUCKDB_ENGINE: str = "duckdb"
+POSTGRES_ENGINE: str = "postgres"
+ENGINES: frozenset = frozenset({DUCKDB_ENGINE, POSTGRES_ENGINE})
+
+# A [[...]] reference in a template; group 1 is the text inside the brackets.
+TABLE_REFERENCE_PATTERN: re.Pattern[str] = re.compile(r'\[\[([^\]]+)\]\]')
 
 # {{self.<fact>}} placeholders for the database/version being queried.
 SELF_PARAM_PREFIX: str = "self."
@@ -296,11 +307,104 @@ def check_table_references(
     stripped = template.strip()
     if _is_named_query_reference(stripped, database_config):
         return
+    collect_table_references(
+        stripped, database_config, shared_config, schema_groups, source_columns
+    )
+
+
+def collect_table_references(
+        template: str,
+        database_config: Dict[str, Any],
+        shared_config: Optional[Dict[str, Any]] = None,
+        schema_groups: Optional[Dict[str, List[str]]] = None,
+        source_columns: Any = None) -> List[TableReference]:
+    """Resolve every ``[[...]]`` reference in a template to its tables.
+
+    A template that is exactly a named query reference is resolved through
+    that query's SQL. Union references contribute every member table.
+
+    Args:
+        template: SQL template.
+        database_config: The version database configuration.
+        shared_config: The shared ``database`` mapping, or None.
+        schema_groups: The shared ``schema_groups`` mapping, or None.
+        source_columns: The route's ``source_columns`` value, or None.
+
+    Returns:
+        The referenced tables, unique by SQL name.
+
+    Raises:
+        ValueError: If a reference doesn't resolve (see check_table_references).
+    """
+    stripped = template.strip()
+    if _is_named_query_reference(stripped, database_config):
+        stripped = _resolve_named_query(stripped, database_config).strip()
+    collected: Dict[str, TableReference] = {}
     _substitute_table_references(
-        stripped, database_config, shared_config, None,
+        stripped, database_config, shared_config, collected,
         SqlContext(schema_groups=schema_groups or {}),
         _normalize_source_columns(source_columns),
     )
+    return list(collected.values())
+
+
+def route_engine(
+        route_config: Dict[str, Any],
+        database_config: Dict[str, Any],
+        shared_config: Optional[Dict[str, Any]] = None,
+        schema_groups: Optional[Dict[str, List[str]]] = None) -> Optional[str]:
+    """Choose the engine a route's queries run on.
+
+    A route runs natively on a PostgreSQL connection when every table its
+    templates can reference (every selector branch and query param) is on that
+    one connection; otherwise it runs on DuckDB, which also reads PostgreSQL
+    tables (mixing them with files, or with tables on other connections).
+    Unions currently always run on DuckDB. A route's ``engine`` setting checks
+    the choice (``postgres``) or forces DuckDB (``duckdb``).
+
+    Args:
+        route_config: Route configuration, merged with top-level query_params.
+        database_config: The version database configuration.
+        shared_config: The shared ``database`` mapping, or None.
+        schema_groups: The shared ``schema_groups`` mapping, or None.
+
+    Returns:
+        The PostgreSQL connection name for a native PostgreSQL route, or None
+        for DuckDB.
+
+    Raises:
+        ValueError: If ``engine`` is unknown, or ``engine: postgres`` is set on
+            a route that can't run natively on one PostgreSQL connection, or a
+            reference doesn't resolve.
+    """
+    engine = route_config.get(ENGINE_KEY)
+    if engine is not None and engine not in ENGINES:
+        raise ValueError(f"{ENGINE_KEY} must be one of {sorted(ENGINES)}, got {engine!r}")
+
+    tables: List[TableReference] = []
+    has_union = False
+    for template in route_templates(route_config):
+        tables.extend(collect_table_references(
+            template, database_config, shared_config, schema_groups,
+            route_config.get(SOURCE_COLUMNS_KEY),
+        ))
+        has_union = has_union or _has_union(template, database_config, shared_config,
+                                            schema_groups)
+
+    connections = {table.connection for table in tables}
+    native = (
+        connections and None not in connections and len(connections) == 1 and not has_union
+    )
+    connection = next(iter(connections)) if native else None
+
+    if engine == DUCKDB_ENGINE:
+        return None
+    if engine == POSTGRES_ENGINE and connection is None:
+        raise ValueError(
+            f"{ENGINE_KEY}: {POSTGRES_ENGINE} needs every table the route uses to be on one "
+            "PostgreSQL connection (and no unions)"
+        )
+    return connection
 
 
 def resolve_route_sql(
@@ -945,6 +1049,29 @@ def _substitute_variables_in_string(template: str, params: Dict[str, str]) -> st
         return str(params[name]) if name in params else match.group(0)
 
     return VARIABLE_PATTERN.sub(replace_variable, template)
+
+
+def _has_union(
+        template: str,
+        database_config: Dict[str, Any],
+        shared_config: Optional[Dict[str, Any]],
+        schema_groups: Optional[Dict[str, List[str]]]) -> bool:
+    """Check whether a template uses a union reference (``*`` or a schema group).
+
+    Args:
+        template: SQL template.
+        database_config: The version database configuration.
+        shared_config: The shared ``database`` mapping, or None.
+        schema_groups: The shared ``schema_groups`` mapping, or None.
+
+    Returns:
+        True if any ``[[...]]`` reference is a union.
+    """
+    context = SqlContext(schema_groups=schema_groups or {})
+    return any(
+        _resolve_union(reference, database_config, shared_config, context) is not None
+        for reference in TABLE_REFERENCE_PATTERN.findall(template)
+    )
 
 
 def _is_named_query_reference(sql_template: str, database_config: Dict[str, Any]) -> bool:
