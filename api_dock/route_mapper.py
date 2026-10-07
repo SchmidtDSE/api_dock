@@ -186,8 +186,6 @@ class RouteMapper:
             self.config, self.config_dir
         )
         self.base_path = normalize_base_path(self.settings.get(BASE_PATH_KEY))
-        self.duckdb_backend = DuckDBBackend(self.settings.get(DUCKDB_SETTINGS_KEY))
-
         try:
             shared_file = load_shared_config(self.config_dir)
         except (ValueError, yaml.YAMLError) as error:
@@ -200,6 +198,9 @@ class RouteMapper:
             shared_file.get(SHARED_CONFIG_KEY, {}).get(SHARED_CONNECTIONS_KEY) or {}
         )
         self._postgres: Any = None
+        self.duckdb_backend = DuckDBBackend(
+            self.settings.get(DUCKDB_SETTINGS_KEY), self.connections
+        )
 
     async def start(self) -> None:
         """Open a connection pool for each PostgreSQL connection.
