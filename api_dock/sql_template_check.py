@@ -27,6 +27,11 @@ from typing import List, Optional, Tuple
 # what sql_builder binds, so a lone '{{' in a string is left alone.
 VARIABLE_TOKEN: re.Pattern[str] = re.compile(r'(\{\{[^{}]+\}\})')
 
+# A string literal that is exactly one placeholder ('{{name}}'), the 0.8.x and
+# earlier way of writing a text value. sql_builder reads it as {{name}}, so it is
+# allowed; any other quoted placeholder is refused.
+QUOTED_VARIABLE_PATTERN: re.Pattern[str] = re.compile(r"'\{\{([^{}]+)\}\}'")
+
 # The opening of a dollar-quoted string: $$ or $tag$. A tag can't start with a
 # digit, so a numbered parameter such as $1 is not matched.
 DOLLAR_QUOTE: re.Pattern[str] = re.compile(r'\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$')
@@ -44,7 +49,8 @@ COMMENT: str = "comment"
 def check_quoted_variables(template: str) -> None:
     """Raise if a {{variable}} appears inside a quoted string or identifier.
 
-    Single-quoted strings (with '' as an escaped quote), dollar-quoted strings
+    A string that is exactly one variable (``'{{name}}'``) is allowed: it is
+    read as ``{{name}}`` (see QUOTED_VARIABLE_PATTERN). Single-quoted strings (with '' as an escaped quote), dollar-quoted strings
     ($$...$$ and $tag$...$tag$), double-quoted identifiers, -- line comments
     and nested /* */ block comments are recognized. Variables inside comments
     are left to check_commented_variables. The template is not changed.
@@ -135,9 +141,11 @@ def _is_quoted_variable(kind: str, text: str) -> bool:
         text: Segment text.
 
     Returns:
-        True if the segment is a string with a {{variable}} in it.
+        True if the segment is a string with a {{variable}} in it, other than
+        a string that is exactly one variable.
     """
-    return kind == STRING and VARIABLE_TOKEN.search(text) is not None
+    return (kind == STRING and VARIABLE_TOKEN.search(text) is not None
+            and QUOTED_VARIABLE_PATTERN.fullmatch(text) is None)
 
 
 def _split_sql(template: str) -> List[Tuple[str, str]]:

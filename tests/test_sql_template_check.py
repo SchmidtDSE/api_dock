@@ -33,12 +33,12 @@ class TestQuotedVariablesRejected:
     """A {{var}} inside quotes is an error that shows the fixed template."""
 
     @pytest.mark.parametrize("template, fixed", [
-        ("UPPER(name) = UPPER('{{name}}')", "UPPER(name) = UPPER({{name}})"),
-        ("category = '{{category}}'", "category = {{category}}"),
+        ("UPPER(name) = UPPER('%{{name}}%')", "UPPER(name) = UPPER('%' || {{name}} || '%')"),
+        ("category = 'x{{category}}'", "category = 'x' || {{category}}"),
         ("name ILIKE '%{{q}}%'", "name ILIKE '%' || {{q}} || '%'"),
         ("code = 'a{{x}}b{{y}}'", "code = 'a' || {{x}} || 'b' || {{y}}"),
         ("note = 'it''s {{x}}'", "note = 'it''s ' || {{x}}"),
-        ("a = '{{x}}' AND b = '{{y}}'", "a = {{x}} AND b = {{y}}"),
+        ("a = 'a{{x}}' AND b = '{{y}}b'", "a = 'a' || {{x}} AND b = {{y}} || 'b'"),
     ])
     def test_single_quoted_variable(self, template: str, fixed: str) -> None:
         """The error contains the template with each quoted variable unquoted."""
@@ -64,10 +64,19 @@ class TestQuotedVariablesRejected:
 
     def test_comment_apostrophe_does_not_hide_later_quote(self) -> None:
         """An apostrophe in a comment doesn't hide a quoted variable after it."""
-        template = "-- don't match subspecies\nWHERE name = '{{name}}'"
+        template = "-- don't match subspecies\nWHERE name LIKE '{{name}}%'"
         with pytest.raises(ValueError) as error:
             check_quoted_variables(template)
-        assert "WHERE name = {{name}}" in str(error.value)
+        assert "WHERE name LIKE {{name}} || '%'" in str(error.value)
+
+    @pytest.mark.parametrize("template", [
+        "name = '{{name}}'",
+        "UPPER(name) = UPPER('{{name}}') AND id = {{id}}",
+        "a = '{{x}}' AND b = '{{y}}'",
+    ])
+    def test_whole_string_variable_is_allowed(self, template: str) -> None:
+        """A string that is exactly one variable is read as that variable, so it passes."""
+        check_quoted_variables(template)
 
 
 class TestCommentedVariablesRejected:

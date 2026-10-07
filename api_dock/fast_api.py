@@ -16,9 +16,14 @@ import warnings
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
-from api_dock.route_mapper import collect_multi_query_params, HOP_BY_HOP_HEADERS, RouteMapper
+from api_dock.route_mapper import (
+    collect_multi_query_params,
+    HOP_BY_HOP_HEADERS,
+    RouteMapper,
+    strip_base_path,
+)
 from api_dock.types import PreparedRequest, ProxyResponse
 
 
@@ -66,12 +71,36 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     _add_remote_routes(app, route_mapper)
     _add_error_handlers(app)
 
+    if route_mapper.base_path:
+        app.add_middleware(_StripBasePath, base_path=route_mapper.base_path)
+
     return app
 
 
 #
 # INTERNAL
 #
+class _StripBasePath:
+    """ASGI middleware serving the app under ``settings.base_path`` as well.
+
+    Requests whose path starts with the base path (e.g. ``/dock/birdnet/...``)
+    are routed as if it weren't there; other paths pass through unchanged.
+    """
+
+    def __init__(self, app: Callable, base_path: str) -> None:
+        self.app = app
+        self.base_path = base_path
+
+    async def __call__(self, scope: Dict[str, Any], receive: Callable, send: Callable) -> None:
+        """Rewrite the request path, then call the wrapped app."""
+        if scope.get("type") in ("http", "websocket"):
+            path = strip_base_path(scope.get("path", ""), self.base_path)
+            if path != scope.get("path"):
+                scope = {**scope, "path": path, "raw_path": path.encode()}
+        await self.app(scope, receive, send)
+
+
+
 def _add_main_routes(app: FastAPI, route_mapper: RouteMapper) -> None:
     """Add main API routes to the FastAPI app.
 

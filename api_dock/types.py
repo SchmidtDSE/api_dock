@@ -2,7 +2,7 @@
 
 Types Module for API Dock
 
-Shared type definitions used across the proxy response pipeline.
+Shared type definitions used across the proxy response and database pipelines.
 
 License: BSD 3-Clause
 
@@ -12,7 +12,7 @@ License: BSD 3-Clause
 # IMPORTS
 #
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 
 #
@@ -111,3 +111,59 @@ class ListingSpec:
     route: str
     as_dict: bool
     include: Any = True
+
+
+@dataclass
+class TableReference:
+    """A resolved ``[[table]]`` reference used by a database route's SQL.
+
+    Produced by ``database_config.resolve_table_reference()``. Tables can come
+    from the version config's ``tables``, a schema in the shared
+    ``databases/config.yaml``, or that file's global tables.
+
+    Attributes:
+        name: Table name (e.g. "detections").
+        uri: File path/URI the table reads from.
+        metadata: Effective storage metadata (region, public, ...) with the
+            shared ``meta`` defaults applied and the table's own keys winning.
+        schema: Shared-config schema the table belongs to, if any.
+        qualified: True when referenced as ``[[schema.table]]``. Qualified
+            tables are exposed as DuckDB views (``schema.table``) rather than
+            inlined as ``'<uri>' AS table``.
+    """
+
+    name: str
+    uri: str
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    schema: Optional[str] = None
+    qualified: bool = False
+
+    @property
+    def sql_name(self) -> str:
+        """Name the table is addressed by in SQL (``schema.table`` if qualified)."""
+        if self.qualified and self.schema:
+            return f"{self.schema}.{self.name}"
+        return self.name
+
+
+@dataclass
+class SqlContext:
+    """Request context for building a database route's SQL.
+
+    Supplies what ``[[*.table]]`` / ``[[group.table]]`` unions, the route's
+    ``source_columns``, and ``{{self.*}}`` placeholders need beyond the version
+    config itself.
+
+    Attributes:
+        name: Database slug being queried (e.g. "birdnet"); ``{{self.name}}``.
+        version: Resolved version, or None if unversioned; ``{{self.version}}``.
+        schema_groups: Shared ``schema_groups`` mapping (group -> schema names).
+        schema_sources: Schema name -> (name, version) of the single
+            database/version that uses it. Schemas used by none or several are
+            absent, so their ``name``/``version`` source columns are NULL.
+    """
+
+    name: Optional[str] = None
+    version: Optional[str] = None
+    schema_groups: Dict[str, List[str]] = field(default_factory=dict)
+    schema_sources: Dict[str, Tuple[str, Optional[str]]] = field(default_factory=dict)

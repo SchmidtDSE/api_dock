@@ -12,6 +12,7 @@ License: BSD 3-Clause
 # IMPORTS
 #
 import os
+import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -22,12 +23,64 @@ from api_dock.sql_template_check import (
     check_commented_variables,
     check_quoted_variables,
 )
+from api_dock.types import TableReference
 
 
 #
 # CONSTANTS
 #
 DATABASES_DIR: str = "databases"
+
+# Shared database config: databases/config.yaml. Its top-level ``database`` key
+# holds global tables, shared ``meta`` defaults, and named ``schema`` groups.
+SHARED_CONFIG_FILE: str = "config.yaml"
+SHARED_CONFIG_KEY: str = "database"
+SHARED_META_KEY: str = "meta"
+SHARED_SCHEMA_KEY: str = "schema"
+
+# Shared routes/query_params added to every database/version config, plus
+# top-level lists that restrict all of them to (inclusions) or opt
+# databases/versions out of all of them (exclusions).
+SHARED_ROUTES_KEY: str = "routes"
+SHARED_QUERY_PARAMS_KEY: str = "query_params"
+ROUTE_INCLUSIONS_KEY: str = "route_inclusions"
+QUERY_INCLUSIONS_KEY: str = "query_inclusions"
+ROUTE_EXCLUSIONS_KEY: str = "route_exclusions"
+QUERY_EXCLUSIONS_KEY: str = "query_exclusions"
+
+# Per-route / per-query-param inclusion and exclusion list keys in the shared
+# config. They are removed from the item before it is merged.
+INCLUDE_KEY: str = "include"
+EXCLUDE_KEY: str = "exclude"
+SELECTION_KEYS: frozenset = frozenset({INCLUDE_KEY, EXCLUDE_KEY})
+
+# Database/version configs defined inline in the shared config (instead of as
+# files): a list of {name, version | versions: [{version, ...}], ...} entries.
+SLUGS_KEY: str = "slugs"
+SLUG_NAME_KEY: str = "name"
+SLUG_VERSION_KEY: str = "version"
+SLUG_VERSIONS_KEY: str = "versions"
+
+# Named groups of shared schemas: {group: [schema, ...]}, referenced in SQL as
+# [[group.table]]. Group names may not collide with schema names.
+SCHEMA_GROUPS_KEY: str = "schema_groups"
+
+# Union selectors: [[*.table]] = every shared schema with that table; a trailing
+# "!" ([[*!.table]], [[group!.table]]) drops the current version's schema.
+ALL_SCHEMAS: str = "*"
+EXCLUDE_SELF_SUFFIX: str = "!"
+
+# Exclusion version wildcard: matches every version (and unversioned databases).
+ALL_VERSIONS: str = "*"
+
+# Key in a version config naming the shared schema it uses for table lookups.
+DATABASE_SCHEMA_KEY: str = "schema"
+
+# Separator for qualified table references: [[schema.table]].
+SCHEMA_SEPARATOR: str = "."
+
+# Schema and table names exposed as DuckDB identifiers must be plain identifiers.
+IDENTIFIER_PATTERN: re.Pattern = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # Keys a query_params entry may have; at least one must be present.
 QUERY_PARAM_KEYS: frozenset = frozenset({
@@ -53,6 +106,10 @@ APPEND_TEMPLATE_CHECKS: Tuple[Callable[[str], None], ...] = (check_comment_at_en
 def load_database_config(database_filename: str, config_dir: Optional[str] = None, version: Optional[str] = None) -> Dict[str, Any]:
     """Load a database configuration file.
 
+    A database/version may be defined by a file (``databases/<name>.yaml`` or
+    ``databases/<name>/<version>.yaml``) or by an entry in the shared config's
+    ``slugs`` list. When both define the same database/version, the file wins.
+
     Args:
         database_filename: Name of the database config file (without .yaml extension).
         config_dir: Base config directory. If None, uses default.
@@ -62,8 +119,9 @@ def load_database_config(database_filename: str, config_dir: Optional[str] = Non
         Dictionary containing database configuration data.
 
     Raises:
-        FileNotFoundError: If database config file doesn't exist.
+        FileNotFoundError: If neither a config file nor a slug entry exists.
         yaml.YAMLError: If config file is invalid YAML.
+        ValueError: If the shared config's ``slugs`` section is malformed.
     """
     if config_dir is None:
         from api_dock.config import DEFAULT_CONFIG_DIR
@@ -79,6 +137,12 @@ def load_database_config(database_filename: str, config_dir: Optional[str] = Non
     else:
         # Non-versioned database
         database_config_path = os.path.join(config_dir, DATABASES_DIR, f"{database_filename}.yaml")
+
+    if not os.path.isfile(database_config_path):
+        slug_versions = get_slug_configs(config_dir).get(database_filename, {})
+        version_key = None if version is None else str(version)
+        if version_key in slug_versions:
+            return slug_versions[version_key]
 
     return _load_yaml_file(database_config_path)
 
@@ -155,6 +219,345 @@ def get_table_metadata(table_name: str, database_config: Dict[str, Any]) -> Dict
         return {}
 
 
+def load_shared_database_config(config_dir: Optional[str] = None) -> Dict[str, Any]:
+    """Load the shared database config (``databases/config.yaml``).
+
+    The file is optional. Its ``database`` mapping holds global tables, a
+    ``meta`` mapping of default table metadata, and a ``schema`` mapping of
+    named table groups that any database route can reference.
+
+    Args:
+        config_dir: Base config directory. If None, uses default.
+
+    Returns:
+        The ``database`` mapping, or an empty dict if the file or key is missing.
+
+    Raises:
+        yaml.YAMLError: If the file exists but is invalid YAML.
+        ValueError: If the ``database`` key is present but not a mapping.
+    """
+    return load_shared_config(config_dir).get(SHARED_CONFIG_KEY, {})
+
+
+def load_shared_config(config_dir: Optional[str] = None) -> Dict[str, Any]:
+    """Load the whole shared database config file (``databases/config.yaml``).
+
+    Top-level keys: ``database`` (tables, ``meta``, ``schema``), ``slugs``
+    (inline database/version configs), ``schema_groups``, ``routes`` and
+    ``query_params`` (added to every database/version), and the
+    ``route_inclusions`` / ``query_inclusions`` and ``route_exclusions`` /
+    ``query_exclusions`` lists.
+
+    Args:
+        config_dir: Base config directory. If None, uses default.
+
+    Returns:
+        The file's contents with every known key normalized to its type (empty
+        mapping/list when missing), or an empty dict if the file doesn't exist.
+
+    Raises:
+        yaml.YAMLError: If the file exists but is invalid YAML.
+        ValueError: If the file or one of its known keys has the wrong type.
+    """
+    if config_dir is None:
+        from api_dock.config import DEFAULT_CONFIG_DIR
+        config_dir = DEFAULT_CONFIG_DIR
+
+    shared_path = os.path.join(config_dir, DATABASES_DIR, SHARED_CONFIG_FILE)
+    if not os.path.isfile(shared_path):
+        return {}
+
+    contents = _load_yaml_file(shared_path)
+    if not isinstance(contents, dict):
+        raise ValueError(f"{shared_path} must contain a mapping")
+
+    normalized = dict(contents)
+    expected_types = {
+        SHARED_CONFIG_KEY: dict,
+        SHARED_ROUTES_KEY: list,
+        SHARED_QUERY_PARAMS_KEY: list,
+        ROUTE_INCLUSIONS_KEY: list,
+        QUERY_INCLUSIONS_KEY: list,
+        ROUTE_EXCLUSIONS_KEY: list,
+        QUERY_EXCLUSIONS_KEY: list,
+        SLUGS_KEY: list,
+        SCHEMA_GROUPS_KEY: dict,
+    }
+    for key, expected in expected_types.items():
+        value = contents.get(key) or expected()
+        if not isinstance(value, expected):
+            raise ValueError(f"'{key}' in {shared_path} must be a {expected.__name__}")
+        normalized[key] = value
+
+    _validate_schema_groups(normalized, shared_path)
+    return normalized
+
+
+def apply_shared_definitions(
+        database_config: Dict[str, Any],
+        shared_file: Dict[str, Any],
+        database_name: str,
+        version: Optional[str] = None) -> Dict[str, Any]:
+    """Merge the shared config's ``routes`` and ``query_params`` into a database config.
+
+    Shared routes and query params apply to every database/version unless
+    restricted. A non-empty inclusion list (top-level ``route_inclusions`` /
+    ``query_inclusions`` or an item's own ``include``) limits them to the
+    listed databases/versions; an exclusion list (``route_exclusions`` /
+    ``query_exclusions`` or ``exclude``) removes the listed ones. An item is
+    added only if it passes both the top-level and its own lists. Entries are
+    ``"<slug>/<version>"`` strings (``"<slug>"`` or ``"<slug>/*"`` for all
+    versions) or ``{slug: <slug>, version: <version or "*">}`` mappings.
+
+    The version config always wins: its routes come first (so they take
+    precedence when matching) and replace any shared route with the same shape
+    (same segments, ``{{param}}`` names ignored); its top-level query params
+    replace shared ones with the same name. Among shared items, the first one
+    selected for a given route shape / param name is used, so the same route
+    can be defined several times with different ``include``/``exclude`` lists.
+
+    Args:
+        database_config: The version database configuration.
+        shared_file: The whole shared config (see load_shared_config).
+        database_name: Database slug from the URL (e.g. "birdnet").
+        version: Resolved version (e.g. "2.4"), or None if unversioned.
+
+    Returns:
+        A new database config with merged ``routes`` and ``query_params``
+        (``include``/``exclude`` keys removed from shared items). Returns the original
+        config if there is nothing to merge.
+
+    Raises:
+        ValueError: If an include/exclude entry is malformed.
+    """
+    shared_routes = shared_file.get(SHARED_ROUTES_KEY) or []
+    shared_params = shared_file.get(SHARED_QUERY_PARAMS_KEY) or []
+    if not shared_routes and not shared_params:
+        return database_config
+
+    merged = dict(database_config)
+
+    if shared_routes and _is_selected(
+            shared_file.get(ROUTE_INCLUSIONS_KEY), shared_file.get(ROUTE_EXCLUSIONS_KEY),
+            database_name, version):
+        own_routes = list(database_config.get("routes") or [])
+        taken_shapes = {
+            _route_shape(route.get("route", ""))
+            for route in own_routes if isinstance(route, dict)
+        }
+        for route in shared_routes:
+            if not isinstance(route, dict):
+                continue
+            shape = _route_shape(route.get("route", ""))
+            if shape in taken_shapes:
+                continue
+            if not _is_selected(
+                    route.get(INCLUDE_KEY), route.get(EXCLUDE_KEY), database_name, version):
+                continue
+            own_routes.append({k: v for k, v in route.items() if k not in SELECTION_KEYS})
+            taken_shapes.add(shape)
+        merged["routes"] = own_routes
+
+    if shared_params and _is_selected(
+            shared_file.get(QUERY_INCLUSIONS_KEY), shared_file.get(QUERY_EXCLUSIONS_KEY),
+            database_name, version):
+        own_params = list(database_config.get("query_params") or [])
+        taken_names = {
+            next(iter(item)) for item in own_params
+            if isinstance(item, dict) and len(item) == 1
+        }
+        for item in shared_params:
+            if not isinstance(item, dict) or len(item) != 1:
+                continue
+            name, param_config = next(iter(item.items()))
+            if name in taken_names:
+                continue
+            if isinstance(param_config, dict):
+                if not _is_selected(
+                        param_config.get(INCLUDE_KEY), param_config.get(EXCLUDE_KEY),
+                        database_name, version):
+                    continue
+                param_config = {
+                    k: v for k, v in param_config.items() if k not in SELECTION_KEYS
+                }
+            own_params.append({name: param_config})
+            taken_names.add(name)
+        merged["query_params"] = own_params
+
+    return merged
+
+
+def resolve_table_reference(
+        table_name: str,
+        database_config: Dict[str, Any],
+        shared_config: Optional[Dict[str, Any]] = None) -> Optional[TableReference]:
+    """Resolve a ``[[table]]`` reference to its URI and effective metadata.
+
+    A qualified name (``schema.table``) is looked up in the shared config's
+    ``schema`` section. An unqualified name is looked up, first match wins, in:
+
+      1. the version config's ``tables``
+      2. the shared schema named by the version config's ``schema`` key
+      3. the shared config's global tables
+
+    Shared ``meta`` applies to every table; a table's own keys override it.
+
+    Args:
+        table_name: Name inside the brackets (e.g. "detections" or
+            "birdnet_2p4.detections").
+        database_config: The version database configuration.
+        shared_config: The shared ``database`` mapping (see
+            load_shared_database_config), or None if there is none.
+
+    Returns:
+        A TableReference, or None if the table is not defined anywhere.
+
+    Raises:
+        ValueError: If a qualified reference uses a schema or table name that is
+            not a plain SQL identifier.
+    """
+    shared = shared_config or {}
+    defaults = shared.get(SHARED_META_KEY) or {}
+    schemas = shared.get(SHARED_SCHEMA_KEY) or {}
+
+    if SCHEMA_SEPARATOR in table_name:
+        schema_name, name = table_name.split(SCHEMA_SEPARATOR, 1)
+        for identifier in (schema_name, name):
+            if not IDENTIFIER_PATTERN.match(identifier):
+                raise ValueError(f"Invalid identifier '{identifier}' in table '{table_name}'")
+        entry = _table_entry((schemas.get(schema_name) or {}).get(name), defaults)
+        if entry is None:
+            return None
+        return TableReference(
+            name=name, uri=entry[0], metadata=entry[1], schema=schema_name, qualified=True
+        )
+
+    entry = _table_entry((database_config.get("tables") or {}).get(table_name), defaults)
+    if entry is not None:
+        return TableReference(name=table_name, uri=entry[0], metadata=entry[1])
+
+    schema_name = database_config.get(DATABASE_SCHEMA_KEY)
+    if schema_name:
+        entry = _table_entry((schemas.get(schema_name) or {}).get(table_name), defaults)
+        if entry is not None:
+            return TableReference(
+                name=table_name, uri=entry[0], metadata=entry[1], schema=schema_name
+            )
+
+    if table_name not in (SHARED_META_KEY, SHARED_SCHEMA_KEY):
+        entry = _table_entry(shared.get(table_name), defaults)
+        if entry is not None:
+            return TableReference(name=table_name, uri=entry[0], metadata=entry[1])
+
+    return None
+
+
+def resolve_schema_union(
+        selector: str,
+        table_name: str,
+        shared_config: Optional[Dict[str, Any]] = None,
+        schema_groups: Optional[Dict[str, List[str]]] = None) -> Optional[List[TableReference]]:
+    """Resolve a union selector (``*`` or a schema group) to its member tables.
+
+    Args:
+        selector: ``*`` for every shared schema, or a ``schema_groups`` name
+            (without any trailing ``!``).
+        table_name: Table to read from each member schema.
+        shared_config: The shared ``database`` mapping, or None.
+        schema_groups: The shared ``schema_groups`` mapping, or None.
+
+    Returns:
+        Qualified TableReferences in schema/group order, or None if the
+        selector is neither ``*`` nor a group (i.e. it names a single schema).
+
+    Raises:
+        ValueError: If no schema has the table (``*``), or a group member is
+            not a schema or lacks the table.
+    """
+    schemas = (shared_config or {}).get(SHARED_SCHEMA_KEY) or {}
+    groups = schema_groups or {}
+
+    if selector == ALL_SCHEMAS:
+        members = [name for name, tables in schemas.items() if table_name in (tables or {})]
+        if not members:
+            raise ValueError(f"No shared schema has a table named '{table_name}'")
+    elif selector in groups:
+        members = list(groups[selector])
+        for schema_name in members:
+            if table_name not in (schemas.get(schema_name) or {}):
+                raise ValueError(
+                    f"Schema '{schema_name}' in group '{selector}' has no table '{table_name}'"
+                )
+    else:
+        return None
+
+    references = []
+    for schema_name in members:
+        reference = resolve_table_reference(
+            f"{schema_name}{SCHEMA_SEPARATOR}{table_name}", {}, shared_config
+        )
+        if reference is None:
+            raise ValueError(f"Table '{schema_name}.{table_name}' not found")
+        references.append(reference)
+    return references
+
+
+def get_schema_sources(
+        database_names: List[str],
+        config_dir: Optional[str] = None) -> Dict[str, Tuple[str, Optional[str]]]:
+    """Map each shared schema to the database/version that uses it.
+
+    Args:
+        database_names: Served database names (from the main config).
+        config_dir: Base config directory. If None, uses default.
+
+    Returns:
+        Schema name -> (database name, version or None). Schemas used by more
+        than one database/version are left out (their source is ambiguous).
+    """
+    sources: Dict[str, Tuple[str, Optional[str]]] = {}
+    ambiguous = set()
+
+    for database_name in database_names:
+        if is_versioned_database(database_name, config_dir):
+            versions: List[Optional[str]] = list(get_database_versions(database_name, config_dir))
+        else:
+            versions = [None]
+        for version in versions:
+            try:
+                config = load_database_config(database_name, config_dir, version)
+            except FileNotFoundError:
+                continue
+            schema_name = config.get(DATABASE_SCHEMA_KEY) if isinstance(config, dict) else None
+            if not schema_name:
+                continue
+            if schema_name in sources:
+                ambiguous.add(schema_name)
+            sources[schema_name] = (database_name, version)
+
+    return {k: v for k, v in sources.items() if k not in ambiguous}
+
+
+def get_local_table_references(
+        database_config: Dict[str, Any],
+        shared_config: Optional[Dict[str, Any]] = None) -> List[TableReference]:
+    """Resolve every table in the version config's ``tables`` section.
+
+    Args:
+        database_config: The version database configuration.
+        shared_config: The shared ``database`` mapping, or None.
+
+    Returns:
+        TableReferences (with shared ``meta`` applied) in config order.
+    """
+    references = []
+    for table_name in database_config.get("tables") or {}:
+        reference = resolve_table_reference(str(table_name), database_config, shared_config)
+        if reference is not None:
+            references.append(reference)
+    return references
+
+
 def merge_query_params(route_config: Dict[str, Any], database_config: Dict[str, Any]) -> Dict[str, Any]:
     """Merge top-level query_params into route config.
 
@@ -216,14 +619,20 @@ def is_versioned_database(database_name: str, config_dir: Optional[str] = None) 
         config_dir: Base config directory. If None, uses default.
 
     Returns:
-        True if database has versioned configs (is a directory), False otherwise.
+        True if the database has a config directory or versioned entries in
+        the shared config's ``slugs``, False otherwise.
+
+    Raises:
+        ValueError: If the shared config's ``slugs`` section is malformed.
     """
     if config_dir is None:
         from api_dock.config import DEFAULT_CONFIG_DIR
         config_dir = DEFAULT_CONFIG_DIR
 
     database_dir = os.path.join(config_dir, DATABASES_DIR, database_name)
-    return os.path.isdir(database_dir)
+    if os.path.isdir(database_dir):
+        return True
+    return any(v is not None for v in get_slug_configs(config_dir).get(database_name, {}))
 
 
 def get_database_versions(database_name: str, config_dir: Optional[str] = None) -> List[str]:
@@ -234,8 +643,12 @@ def get_database_versions(database_name: str, config_dir: Optional[str] = None) 
         config_dir: Base config directory. If None, uses default.
 
     Returns:
-        List of version strings (e.g., ["0.1", "0.2", "1.2"]).
+        List of version strings (e.g., ["0.1", "0.2", "1.2"]) from version
+        files and the shared config's ``slugs``, without duplicates.
         Returns empty list if database is not versioned.
+
+    Raises:
+        ValueError: If the shared config's ``slugs`` section is malformed.
     """
     if config_dir is None:
         from api_dock.config import DEFAULT_CONFIG_DIR
@@ -245,14 +658,83 @@ def get_database_versions(database_name: str, config_dir: Optional[str] = None) 
         return []
 
     database_dir = os.path.join(config_dir, DATABASES_DIR, database_name)
-    versions = []
+    versions = set()
 
-    for filename in os.listdir(database_dir):
-        if filename.endswith('.yaml'):
-            version = filename[:-5]  # Remove .yaml extension
-            versions.append(version)
+    if os.path.isdir(database_dir):
+        for filename in os.listdir(database_dir):
+            if filename.endswith('.yaml'):
+                versions.add(filename[:-5])  # Remove .yaml extension
+
+    slug_versions = get_slug_configs(config_dir).get(database_name, {})
+    versions.update(v for v in slug_versions if v is not None)
 
     return sorted(versions)
+
+
+def get_slug_configs(config_dir: Optional[str] = None) -> Dict[str, Dict[Optional[str], Dict[str, Any]]]:
+    """Build database configs from the shared config's ``slugs`` list.
+
+    Each entry has a ``name`` and one of:
+      - ``version: <v>`` — one versioned config;
+      - ``versions: [{version: <v>, ...}, ...]`` — several versions, where the
+        entry's other keys are defaults each version's keys override;
+      - neither — an unversioned database.
+    Every other key (description, authors, schema, tables, routes,
+    query_params, ...) is used exactly as in a database config file.
+
+    Args:
+        config_dir: Base config directory. If None, uses default.
+
+    Returns:
+        Mapping of database name -> {version string (None if unversioned) ->
+        database config dict}. Versions are strings (YAML ``5.0`` -> "5.0").
+
+    Raises:
+        ValueError: If an entry is malformed, uses both ``version`` and
+            ``versions``, mixes versioned and unversioned definitions of a
+            name, or defines the same name/version twice.
+    """
+    slugs = load_shared_config(config_dir).get(SLUGS_KEY) or []
+    configs: Dict[str, Dict[Optional[str], Dict[str, Any]]] = {}
+
+    for entry in slugs:
+        if not isinstance(entry, dict) or not entry.get(SLUG_NAME_KEY):
+            raise ValueError(f"slugs: each entry needs a '{SLUG_NAME_KEY}': {entry!r}")
+        name = str(entry[SLUG_NAME_KEY])
+        if SLUG_VERSION_KEY in entry and SLUG_VERSIONS_KEY in entry:
+            raise ValueError(
+                f"slugs: '{name}' uses both '{SLUG_VERSION_KEY}' and '{SLUG_VERSIONS_KEY}'"
+            )
+
+        defaults = {
+            k: v for k, v in entry.items()
+            if k not in (SLUG_NAME_KEY, SLUG_VERSION_KEY, SLUG_VERSIONS_KEY)
+        }
+        if SLUG_VERSIONS_KEY in entry:
+            version_entries = entry[SLUG_VERSIONS_KEY]
+            if not isinstance(version_entries, list) or not version_entries:
+                raise ValueError(f"slugs: '{name}' '{SLUG_VERSIONS_KEY}' must be a non-empty list")
+        else:
+            version_entries = [{SLUG_VERSION_KEY: entry.get(SLUG_VERSION_KEY)}]
+
+        for version_entry in version_entries:
+            if not isinstance(version_entry, dict):
+                raise ValueError(f"slugs: '{name}' has an invalid version entry: {version_entry!r}")
+            raw_version = version_entry.get(SLUG_VERSION_KEY)
+            if SLUG_VERSIONS_KEY in entry and raw_version is None:
+                raise ValueError(f"slugs: '{name}' has a version entry without a version")
+            version = None if raw_version is None else str(raw_version).strip()
+
+            versions = configs.setdefault(name, {})
+            if version in versions:
+                raise ValueError(f"slugs: '{name}' version {version} is defined twice")
+            if versions and (version is None) != (None in versions):
+                raise ValueError(f"slugs: '{name}' mixes versioned and unversioned entries")
+
+            own = {k: v for k, v in version_entry.items() if k != SLUG_VERSION_KEY}
+            versions[version] = {SLUG_NAME_KEY: name, **defaults, **own}
+
+    return configs
 
 
 def resolve_latest_database_version(versions: List[str]) -> Optional[str]:
@@ -325,7 +807,9 @@ def validate_route_config(route_config: Dict[str, Any]) -> None:
         _validate_query_param(param_item)
 
 
-def check_database_config(database_config: Dict[str, Any]) -> None:
+def check_database_config(
+        database_config: Dict[str, Any],
+        template_check: Optional[Callable[[str, Dict[str, Any]], None]] = None) -> None:
     """Check every named query and route of a loaded database config.
 
     Each route is merged with top-level query_params, as a request would be,
@@ -335,14 +819,27 @@ def check_database_config(database_config: Dict[str, Any]) -> None:
     template may end inside a comment.
 
     Args:
-        database_config: Database configuration, already merged with the main config.
+        database_config: Database configuration, already merged with the main
+            config (and with the shared config's routes/query_params).
+        template_check: Optional extra check run on every query and route
+            template, called as ``template_check(template, route_config)``
+            (``route_config`` is ``{}`` for named queries); it raises
+            ValueError for a bad template (e.g. an unknown ``[[table]]``).
 
     Raises:
         ValueError: If a query or route fails a check. The message names the
             route (or query) and the template's location.
     """
+    def extra_checks(route_config: Dict[str, Any]) -> Tuple[Callable[[str], None], ...]:
+        """The template_check bound to one route, as a single-argument check."""
+        if template_check is None:
+            return ()
+        return (lambda template: template_check(template, route_config),)
+
     for query_name, query in database_config.get('queries', {}).items():
-        _check_template(f"queries.{query_name}", query, BOUND_TEMPLATE_CHECKS)
+        _check_template(
+            f"queries.{query_name}", query, BOUND_TEMPLATE_CHECKS + extra_checks({})
+        )
 
     for index, route_config in enumerate(database_config.get('routes', [])):
         try:
@@ -350,9 +847,13 @@ def check_database_config(database_config: Dict[str, Any]) -> None:
             merged = merge_query_params(route_config, database_config)
             validate_route_config(merged)
             for location, template in _bound_templates(merged):
-                _check_template(location, template, BOUND_TEMPLATE_CHECKS)
+                _check_template(
+                    location, template, BOUND_TEMPLATE_CHECKS + extra_checks(merged)
+                )
             for location, template in _append_templates(merged):
-                _check_template(location, template, APPEND_TEMPLATE_CHECKS)
+                _check_template(
+                    location, template, APPEND_TEMPLATE_CHECKS + extra_checks(merged)
+                )
         except ValueError as error:
             raise ValueError(f"route '{_route_label(route_config, index)}': {error}") from error
 
@@ -586,6 +1087,183 @@ def _load_yaml_file(file_path: str) -> Dict[str, Any]:
         raise FileNotFoundError(f"Database configuration file not found: {file_path}")
     except yaml.YAMLError as e:
         raise yaml.YAMLError(f"Invalid YAML in {file_path}: {e}")
+
+
+def _validate_schema_groups(shared_file: Dict[str, Any], shared_path: str) -> None:
+    """Validate the shared ``schema_groups`` mapping.
+
+    Args:
+        shared_file: The normalized shared config.
+        shared_path: Path of the shared config (for error messages).
+
+    Raises:
+        ValueError: If a group name isn't a plain identifier or collides with a
+            schema name, or a group isn't a non-empty list of known schemas.
+    """
+    schemas = (shared_file.get(SHARED_CONFIG_KEY) or {}).get(SHARED_SCHEMA_KEY) or {}
+    for group, members in (shared_file.get(SCHEMA_GROUPS_KEY) or {}).items():
+        if not IDENTIFIER_PATTERN.match(str(group)):
+            raise ValueError(f"{SCHEMA_GROUPS_KEY}: invalid group name '{group}' in {shared_path}")
+        if group in schemas:
+            raise ValueError(
+                f"{SCHEMA_GROUPS_KEY}: '{group}' is also a schema name in {shared_path}"
+            )
+        if not isinstance(members, list) or not members:
+            raise ValueError(
+                f"{SCHEMA_GROUPS_KEY}: '{group}' must be a non-empty list in {shared_path}"
+            )
+        for member in members:
+            if member not in schemas:
+                raise ValueError(
+                    f"{SCHEMA_GROUPS_KEY}: '{group}' names unknown schema '{member}' "
+                    f"in {shared_path}"
+                )
+
+
+def _is_selected(
+        inclusions: Any,
+        exclusions: Any,
+        database_name: str,
+        version: Optional[str]) -> bool:
+    """Check whether a database/version passes an inclusion and exclusion list.
+
+    Args:
+        inclusions: Inclusion list; if non-empty, the database/version must
+            match one of its entries. None/empty means no restriction.
+        exclusions: Exclusion list; the database/version must match none of
+            its entries. None/empty excludes nothing.
+        database_name: Database slug from the URL.
+        version: Resolved version, or None if unversioned.
+
+    Returns:
+        True if the database/version is included and not excluded.
+
+    Raises:
+        ValueError: If a list or one of its entries is malformed.
+    """
+    if inclusions and not _matches_any(inclusions, database_name, version):
+        return False
+    return not _matches_any(exclusions, database_name, version)
+
+
+def _matches_any(entries: Any, database_name: str, version: Optional[str]) -> bool:
+    """Check whether a database/version matches any entry of an include/exclude list.
+
+    Args:
+        entries: List of ``"<slug>[/<version>]"`` strings or
+            ``{slug, version}`` mappings, or None.
+        database_name: Database slug from the URL.
+        version: Resolved version, or None if unversioned.
+
+    Returns:
+        True if any entry matches.
+
+    Raises:
+        ValueError: If the list or one of its entries is malformed.
+    """
+    if not entries:
+        return False
+    if not isinstance(entries, list):
+        raise ValueError(f"Include/exclude list must be a list, got {type(entries).__name__}")
+
+    for entry in entries:
+        slug, entry_version = _parse_selection_entry(entry)
+        if slug != database_name:
+            continue
+        if entry_version == ALL_VERSIONS:
+            return True
+        if version is not None and _versions_equal(version, entry_version):
+            return True
+    return False
+
+
+def _parse_selection_entry(entry: Any) -> Tuple[str, str]:
+    """Parse one include/exclude entry into (slug, version spec).
+
+    Args:
+        entry: ``"<slug>"``, ``"<slug>/<version>"``, or ``{slug, version}``.
+            A missing version means all versions.
+
+    Returns:
+        Tuple of (slug, version) where version may be ALL_VERSIONS.
+
+    Raises:
+        ValueError: If the entry has no slug or an unsupported type.
+    """
+    if isinstance(entry, str):
+        slug, _, entry_version = entry.strip().strip("/").partition("/")
+    elif isinstance(entry, dict):
+        slug = str(entry.get("slug") or "")
+        raw_version = entry.get("version")
+        entry_version = ALL_VERSIONS if raw_version is None else str(raw_version)
+    else:
+        raise ValueError(f"Invalid include/exclude entry: {entry!r}")
+
+    if not slug:
+        raise ValueError(f"Include/exclude entry has no slug: {entry!r}")
+    return (slug, entry_version.strip() or ALL_VERSIONS)
+
+
+def _versions_equal(version: str, spec: str) -> bool:
+    """Compare a version stem to an include/exclude version, tolerating float forms.
+
+    So "3.0" matches a YAML ``3.0`` or ``3`` as well as ``"3.0"``.
+
+    Args:
+        version: The resolved version stem.
+        spec: The configured include/exclude version.
+
+    Returns:
+        True if they represent the same version.
+    """
+    if str(version).strip() == str(spec).strip():
+        return True
+    try:
+        return float(version) == float(spec)
+    except ValueError:
+        return False
+
+
+def _route_shape(pattern: Any) -> str:
+    """Normalize a route pattern so equivalent routes compare equal.
+
+    Strips surrounding slashes and replaces every ``{{param}}`` segment with
+    ``{{}}``, so ``/detections/{{id}}`` and ``detections/{{detection_id}}/``
+    have the same shape.
+
+    Args:
+        pattern: Route pattern string.
+
+    Returns:
+        Normalized shape string.
+    """
+    parts = str(pattern).strip("/").split("/")
+    return "/".join(
+        "{{}}" if part.startswith("{{") and part.endswith("}}") else part for part in parts
+    )
+
+
+def _table_entry(
+        table_def: Any,
+        defaults: Dict[str, Any]) -> Optional[Tuple[str, Dict[str, Any]]]:
+    """Split a table definition into its URI and effective metadata.
+
+    Args:
+        table_def: A URI string or a dict with ``uri``/``path`` plus metadata.
+        defaults: Shared ``meta`` defaults; the table's own keys override them.
+
+    Returns:
+        Tuple of (uri, metadata), or None if the definition has no URI.
+    """
+    if isinstance(table_def, str):
+        return (table_def, dict(defaults))
+    if isinstance(table_def, dict):
+        uri = table_def.get("uri") or table_def.get("path")
+        if not uri:
+            return None
+        own = {k: v for k, v in table_def.items() if k not in ("uri", "path")}
+        return (str(uri), {**defaults, **own})
+    return None
 
 
 def _route_matches_pattern(path: str, pattern: str) -> bool:

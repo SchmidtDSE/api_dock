@@ -71,23 +71,23 @@ class TestStartupQuoteCheck:
     def test_error_names_database_route_location_and_fix(self, tmp_path: Path) -> None:
         """The error has the database, version, route, location and fixed template."""
         route = _route(query_params=[
-            {"name": {"sql": "UPPER([[items]].name) = UPPER('{{name}}')"}},
+            {"name": {"sql": "UPPER([[items]].name) LIKE UPPER('%{{name}}%')"}},
         ])
         config_path = _write_config(tmp_path, {"catalog": {"1.0": _database([route])}})
         with pytest.raises(ValueError) as error:
             RouteMapper(config_path)
         message = str(error.value)
         for expected in ["catalog", "1.0", "items", "query_params.name.sql",
-                         "UPPER([[items]].name) = UPPER({{name}})"]:
+                         "UPPER([[items]].name) LIKE UPPER('%' || {{name}} || '%')"]:
             assert expected in message
 
     @pytest.mark.parametrize("route_kwargs, location", [
-        ({"sql": "SELECT * FROM [[items]] WHERE a = '{{a}}'"}, "sql"),
+        ({"sql": "SELECT * FROM [[items]] WHERE a LIKE '{{a}}%'"}, "sql"),
         ({"query_params": [{"id": {
-            "sql": "id = {{id}}", "multivalue_sql": "id IN '{{id}}'",
+            "sql": "id = {{id}}", "multivalue_sql": "id IN 'x{{id}}'",
         }}]}, "query_params.id.multivalue_sql"),
         ({"query_params": [{"mode": {"conditional": {
-            "on": {"sql": "flag = '{{mode}}'"},
+            "on": {"sql": "flag = '{{mode}}!'"},
         }}}]}, "query_params.mode.conditional.on.sql"),
     ])
     def test_each_template_location_is_checked(
@@ -100,18 +100,18 @@ class TestStartupQuoteCheck:
     def test_selector_branch_sql_is_checked(self, tmp_path: Path) -> None:
         """A conditional-selection branch's sql is checked."""
         route = _route(sql=[
-            {"when": "a", "then": {"sql": "SELECT * FROM [[items]] WHERE a = '{{a}}'"}},
+            {"when": "a", "then": {"sql": "SELECT * FROM [[items]] WHERE a LIKE '{{a}}%'"}},
             {"else": "SELECT * FROM [[items]]"},
         ])
         config_path = _write_config(tmp_path, {"catalog": _database([route])})
         with pytest.raises(ValueError) as error:
             RouteMapper(config_path)
-        assert "WHERE a = {{a}}" in str(error.value)
+        assert "WHERE a LIKE {{a}} || '%'" in str(error.value)
 
     def test_named_query_is_checked(self, tmp_path: Path) -> None:
         """A queries: entry is checked."""
         database = _database([_route(sql="[[by_a]]")])
-        database["queries"] = {"by_a": "SELECT * FROM [[items]] WHERE a = '{{a}}'"}
+        database["queries"] = {"by_a": "SELECT * FROM [[items]] WHERE a LIKE '%{{a}}'"}
         config_path = _write_config(tmp_path, {"catalog": database})
         with pytest.raises(ValueError, match=r"queries\.by_a"):
             RouteMapper(config_path)
@@ -119,16 +119,16 @@ class TestStartupQuoteCheck:
     def test_top_level_query_param_names_route(self, tmp_path: Path) -> None:
         """A quoted top-level query_params entry is reported for a route it merges into."""
         database = _database([_route()])
-        database["query_params"] = [{"name": {"sql": "name = '{{name}}'"}}]
+        database["query_params"] = [{"name": {"sql": "name LIKE '%{{name}}%'"}}]
         config_path = _write_config(tmp_path, {"catalog": database})
         with pytest.raises(ValueError) as error:
             RouteMapper(config_path)
         assert "items" in str(error.value)
-        assert "name = {{name}}" in str(error.value)
+        assert "name LIKE '%' || {{name}} || '%'" in str(error.value)
 
     def test_every_version_is_checked(self, tmp_path: Path) -> None:
         """An older version with a quoted variable stops startup."""
-        bad = _route(sql="SELECT * FROM [[items]] WHERE a = '{{a}}'")
+        bad = _route(sql="SELECT * FROM [[items]] WHERE a LIKE '%{{a}}%'")
         config_path = _write_config(tmp_path, {"catalog": {
             "1.0": _database([bad]), "2.0": _database([_route()]),
         }})
@@ -286,6 +286,83 @@ class TestConfigDirectory:
         result = await route_mapper.map_database_route("example_db", "", {}, {})
         assert result.status_code == 200
         assert "items" in json.loads(result.content)["routes"]
+
+
+class TestStartupSharedConfig:
+    """Versions are checked as requests see them: with shared routes and schemas."""
+
+    SHARED: Dict[str, Any] = {
+        "database": {"schema": {
+            "a_1p0": {"items": "data/a.parquet", "revisions": "data/rev.parquet"},
+            "b_1p0": {"items": "data/b.parquet"},
+        }},
+        "schema_groups": {"ab": ["a_1p0", "b_1p0"]},
+        "slugs": [
+            {"name": "a", "version": "1.0", "schema": "a_1p0"},
+            {"name": "b", "version": "1.0", "schema": "b_1p0"},
+        ],
+    }
+
+    def _start(self, tmp_path: Path, shared: Dict[str, Any]) -> RouteMapper:
+        """Write a config whose databases all come from the shared file, then start."""
+        config_path = _write_config(tmp_path, {}, listed=["a", "b"])
+        _write_yaml(Path(config_path).parent / "databases" / "config.yaml", shared)
+        return RouteMapper(config_path)
+
+    def test_valid_shared_setup_starts(self, tmp_path: Path) -> None:
+        """Schemas, unions, groups, source_columns and {{self.*}} pass the check."""
+        self._start(tmp_path, {**self.SHARED, "routes": [
+            {"route": "items/{{id}}", "sql": "SELECT * FROM [[items]] WHERE id = '{{id}}'"},
+            {"route": "items/{{id}}/others", "source_columns": ["schema", "name"],
+             "sql": "SELECT i.* FROM [[*.items]] i "
+                    "WHERE NOT (i.schema_name = {{self.schema}} AND i.id = {{id}})"},
+            {"route": "group", "sql": "SELECT * FROM [[ab!.items]] g"},
+        ]})
+
+    def test_shared_route_is_checked_for_each_version(self, tmp_path: Path) -> None:
+        """A bad template in a shared route stops startup, naming database and version."""
+        with pytest.raises(ValueError) as error:
+            self._start(tmp_path, {**self.SHARED, "routes": [
+                {"route": "items", "sql": "SELECT * FROM [[items]] WHERE name LIKE '%{{q}}%'"},
+            ]})
+        for expected in ["Database 'a'", "version '1.0'", "items", "'%' || {{q}} || '%'"]:
+            assert expected in str(error.value)
+
+    def test_unknown_table_stops_startup(self, tmp_path: Path) -> None:
+        """A [[table]] that resolves for no source is reported at startup."""
+        with pytest.raises(ValueError, match="Table 'nope' not found"):
+            self._start(tmp_path, {**self.SHARED, "routes": [
+                {"route": "x", "sql": "SELECT * FROM [[nope]]"},
+            ]})
+
+    def test_table_only_required_where_route_is_included(self, tmp_path: Path) -> None:
+        """A route using a table only one version has is fine when included only there."""
+        route = {"route": "revisions", "sql": "SELECT * FROM [[revisions]]"}
+        self._start(tmp_path, {**self.SHARED, "routes": [{**route, "include": ["a/1.0"]}]})
+        with pytest.raises(ValueError, match="Database 'b'.*revisions"):
+            self._start(tmp_path / "again", {**self.SHARED, "routes": [route]})
+
+    @pytest.mark.parametrize("sql, message", [
+        ("SELECT [[*.items]].id FROM [[*.items]] i", "only be used after FROM/JOIN"),
+        ("SELECT * FROM [[a_1p0!.items]] i", "only applies to"),
+        ("SELECT * FROM [[nogroup.items]] i", "not found"),
+    ])
+    def test_bad_union_stops_startup(self, tmp_path: Path, sql: str, message: str) -> None:
+        """Misused unions and unknown schema groups are reported at startup."""
+        with pytest.raises(ValueError, match=message):
+            self._start(tmp_path, {**self.SHARED, "routes": [{"route": "u", "sql": sql}]})
+
+    def test_bad_source_columns_stops_startup(self, tmp_path: Path) -> None:
+        """An unknown source_columns fact is reported at startup."""
+        with pytest.raises(ValueError, match="unknown fact 'bogus'"):
+            self._start(tmp_path, {**self.SHARED, "routes": [
+                {"route": "u", "source_columns": ["bogus"], "sql": "SELECT * FROM [[*.items]] i"},
+            ]})
+
+    def test_bad_shared_file_stops_startup(self, tmp_path: Path) -> None:
+        """An invalid shared config (here a group naming an unknown schema) stops startup."""
+        with pytest.raises(ValueError, match="Shared database config"):
+            self._start(tmp_path, {**self.SHARED, "schema_groups": {"g": ["missing"]}})
 
 
 #

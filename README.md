@@ -56,6 +56,7 @@ Here is an example:
 api_dock_config
 ├── config.yaml               # The default main-config file
 ├── databases
+│    ├── config.yaml          # (optional) shared tables/schemas for all databases
 │    ├── unversioned_db.yaml  # Database config without versioning
 │    └── versioned_db         # Folder containing database configs for different versions
 │        ├── 0.1.yaml
@@ -179,18 +180,32 @@ remotes:
 settings:
   add_trailing_slash: true              # Auto-add trailing slash to paths (default: true)
   follow_protocol_downgrades: false     # Allow HTTPS->HTTP redirects (default: false)
+  follow_redirects: true                # Follow remote redirects (default: true)
   timeout: 10                           # Upstream request timeout in seconds (default: 10)
+  base_path: /dock                      # Also serve the API under this prefix (default: none)
+  duckdb:                               # Options for database queries (default: none)
+    memory_limit: 700MB
+    threads: 2
+    max_concurrent_queries: 2
 ```
 
-### HTTP behavior Settings
+### Settings
 
-The optional `settings` section controls HTTP behavior:
+The optional `settings` section controls HTTP and query behavior:
 
 - **`add_trailing_slash`** (default: `true`): Automatically append a trailing slash to all proxied paths. This prevents 307/301 redirects from remote APIs that require trailing slashes (e.g., `/projects` → `/projects/`). Set to `false` to disable this behavior.
 
 - **`follow_protocol_downgrades`** (default: `false`): Control how HTTP redirects are handled. When `false` (recommended), HTTPS→HTTP redirects are blocked for security. When `true`, allows following redirects that downgrade from HTTPS to HTTP (not recommended for production).
 
+- **`follow_redirects`** (default: `true`): Whether redirects from a remote are followed by API Dock (`true`) or passed through to the client with their `Location` header (`false`). Set it to `false` when a remote answers with redirects the client should follow itself, such as presigned S3 URLs for large files.
+
 - **`timeout`** (default: `10`): Upstream request timeout in seconds, applied to both the streaming and buffered proxy paths. Raise it for slow upstreams (e.g. large aggregation queries) that would otherwise return a 502 on timeout. Set to `null` or `false` to disable the timeout entirely (not recommended — a stalled upstream can hold the connection open indefinitely).
+
+- **`base_path`** (default: none): An extra URL prefix the API is also served under, e.g. `/dock`. Use it when a proxy or CDN forwards a path on another domain without stripping it (say CloudFront routes `https://app.example.org/dock/*` to API Dock): `/dock/birdnet/latest/detections/` is then handled as `/birdnet/latest/detections/`. Paths without the prefix keep working, so direct calls and health checks are unaffected.
+
+- **`duckdb`** (default: none): Options for the DuckDB connection each database query runs on. Every key except `max_concurrent_queries` is applied as `SET <key> = <value>`, so any [DuckDB setting](https://duckdb.org/docs/configuration/overview) works; the useful ones on small servers are `memory_limit` (DuckDB spills to disk or fails the query instead of exceeding it), `threads`, and `temp_directory`. `max_concurrent_queries` caps how many database queries run at once in the process; further queries wait their turn. Memory limits apply per query, so on a small instance set `memory_limit × max_concurrent_queries` below the instance's memory.
+
+Database queries run in worker threads, so a slow query doesn't hold up other requests (including health checks on `/`).
 
 ### Catalog Endpoints (`expose`)
 
@@ -369,6 +384,7 @@ Database configurations are stored in `api_dock_config/databases/` directory. Ea
 - **tables**: Mapping of table names to file paths (supports S3, GCS, HTTPS, local paths)
 - **queries**: Named SQL queries for reuse
 - **routes**: REST endpoints mapped to SQL queries
+- **schema** (optional): the shared schema (from `databases/config.yaml`) this config's `[[table]]` references fall back to. See [Shared Tables and Schemas](#shared-tables-and-schemas-databasesconfigyaml)
 
 ### Syntax
 
@@ -446,6 +462,225 @@ routes:
     sql: "[[get_permissions]]"
 ```
 
+### Shared Tables and Schemas (`databases/config.yaml`)
+
+When several databases or versions read the same tables, define them once in the optional `api_dock_config/databases/config.yaml`. Everything lives under a `database` key: `meta` holds default table metadata, `schema` holds named groups of tables, and every other key is a global table.
+
+```yaml
+# api_dock_config/databases/config.yaml
+database:
+  # global tables, available as [[table1]] in any database config
+  table1:
+    uri: s3://your-bucket/table1.parquet
+  table3:
+    uri: s3://your-other-bucket/table3.parquet
+    region: us-west-1        # a table's own keys override `meta`
+    public: false
+
+  # defaults applied to every table (shared tables and the tables in each version config)
+  meta:
+    region: us-west-2
+    public: true
+
+  # schemas, available as [[birdnet_2p4.detections]] in any route
+  schema:
+    birdnet_2p4:
+      detections:
+        uri: s3://your-bucket/birdnet/2.4/detections.parquet
+    birdnet_3p0:
+      detections:
+        uri: s3://your-bucket/birdnet/3.0/detections.parquet
+        public: false
+```
+
+A version config can name the schema it uses with `schema:`. An unqualified `[[name]]` is then looked up in order, first match wins:
+
+1. the version config's own `tables`
+2. its `schema:` in the shared config
+3. the shared config's global tables
+
+```yaml
+# api_dock_config/databases/birdnet/2.4.yaml
+name: birdnet
+schema: birdnet_2p4
+tables:
+  revisions: s3://your-bucket/birdnet/2.4/revisions.parquet   # local to this version
+
+routes:
+  # [[detections]] isn't in `tables`, so it comes from the birdnet_2p4 schema
+  - route: recordings/{{recording_id}}/detections
+    sql: SELECT [[detections]].* FROM [[detections]] WHERE [[detections]].recording_id = {{recording_id}}
+```
+
+Any route can reference any schema directly as `[[schema.table]]`, so a different database (e.g. `owl/5.0`) can query `[[birdnet_2p4.detections]]`. To keep a table private to one database/version, define it in that version's `tables` instead. Qualified references are exposed to DuckDB as real views, so you can also use the full name or your own alias in plain SQL:
+
+```yaml
+  - route: detections/
+    sql: >
+      SELECT detections.common_name, COUNT(revisions.id) AS revcount
+      FROM [[birdnet_2p4.detections]]
+      LEFT JOIN [[revisions]] ON revisions.observation_id = birdnet_2p4.detections.id
+      GROUP BY birdnet_2p4.detections.common_name
+```
+
+expands to
+
+```sql
+SELECT detections.common_name, COUNT(revisions.id) AS revcount
+FROM birdnet_2p4.detections
+LEFT JOIN 's3://your-bucket/birdnet/2.4/revisions.parquet' AS revisions ON revisions.observation_id = birdnet_2p4.detections.id
+GROUP BY birdnet_2p4.detections.common_name
+```
+
+Notes:
+- After `FROM`/`JOIN`, `[[schema.table]]` becomes `schema.table` with no alias, so `FROM [[birdnet_2p4.detections]] o` works. Elsewhere it becomes the bare table name (`detections`), because DuckDB doesn't accept `schema.table.*`.
+- Schema and table names used as `[[schema.table]]` must be plain identifiers (letters, digits, underscores).
+- Storage credentials are set per table. Tables whose `region`/`public` differ from the rest get their own S3 secret scoped to their path, so one query can mix regions and public/private buckets.
+- Views are created only for the `[[schema.table]]` tables a query actually references.
+
+#### Querying across schemas (`[[*.table]]`, schema groups)
+
+Union references read the same table from several schemas at once:
+
+| Reference | Reads |
+|---|---|
+| `[[*.detections]]` | every shared schema that has a `detections` table, including the current one |
+| `[[*!.detections]]` | the same, minus the current database/version's `schema:` |
+| `[[group1.detections]]` | the schemas listed in `schema_groups.group1` |
+| `[[group1!.detections]]` | that group, minus the current schema |
+
+```yaml
+# api_dock_config/databases/config.yaml
+schema_groups:          # named lists of shared schemas
+  birdnet_models:
+    - birdnet_2p4
+    - birdnet_bullfrog_2p4v0p5
+```
+
+- A union expands, after `FROM`/`JOIN` only, to a parenthesized `UNION ALL BY NAME` over the member schemas, so give it an alias: `FROM [[*.detections]] detections`. Columns missing from some members come back as `NULL`.
+- `*` skips schemas without the table. A group whose member lacks the table, a group naming an unknown schema, and a group sharing a name with a schema are all errors. `!` applies only to `*` and groups; with no `schema:`, it removes nothing.
+- Every member gets its own S3 credentials (see above), so a union can mix regions and public/private buckets.
+
+**Source columns.** Union rows carry only the tables' real columns unless the route asks for more with `source_columns`. The available facts are `schema` (the member schema), and `name` and `version` (the database/version whose `schema:` is that schema, or `NULL` if none or several use it):
+
+```yaml
+source_columns: [schema, name, version]      # adds schema_name, name, version
+source_columns: {schema: _schema, name: model}   # pick a subset and rename
+```
+
+A source column that clashes with a real column raises an error. To use one for filtering without returning it, use DuckDB's `EXCLUDE`: `SELECT detections.* EXCLUDE (schema_name) ...`.
+
+**`{{self.*}}` placeholders.** `{{self.schema}}`, `{{self.name}}` and `{{self.version}}` are the current database/version's schema, name and version, as SQL literals (`NULL` when unknown).
+
+Together they make an "overlaps" route that every database/version can share. It returns every detection overlapping the given one, across all schemas, except that detection itself; other overlapping rows in the same schema are kept:
+
+```yaml
+routes:
+  - route: detections/{{id}}/overlaps
+    source_columns: [schema, name, version]
+    sql: |
+      WITH src AS (
+        SELECT recording_id, start_time, end_time FROM [[detections]] WHERE id = {{id}}
+      )
+      SELECT detections.*
+      FROM [[*.detections]] detections
+      JOIN src ON detections.recording_id = src.recording_id
+              AND detections.start_time < src.end_time
+              AND detections.end_time   > src.start_time
+      WHERE NOT (detections.schema_name = {{self.schema}} AND detections.id = {{id}})
+```
+
+Aliasing the union as `detections` also lets shared filters such as `[[detections]].confidence >= {{confidence}}` apply to the overlapping rows.
+
+#### Inline database configs (`slugs`)
+
+Simple database/version configs (often just a description and a `schema`) can live in the shared file instead of in their own files. Config files keep working, and the two can be mixed, even for the same database:
+
+```yaml
+# api_dock_config/databases/config.yaml
+slugs:
+  - name: birdnet-bullfrog         # the database slug in the URL
+    version: "2.5"                 # one version...
+    description: American Bullfrog Classifier from Birdnet 2.4
+    schema: birdnet_bullfrog_2p5v0p5
+  - name: birdnet-apple
+    authors: [API Team]            # ...or several; keys here are defaults for each version
+    versions:
+      - version: "1.0"
+        description: Apple Classifier 1.0
+        schema: birdnet_apple_1p0
+      - version: "12.0"
+        description: Apple Classifier 12.0
+        schema: birdnet_apple_12p0
+  - name: notes                    # no version/versions = an unversioned database
+    tables:
+      notes: s3://your-bucket/notes.parquet
+```
+
+- Each entry (or each `versions` item) takes the same keys as a database config file: `description`, `authors`, `schema`, `tables`, `routes`, `query_params`, and so on. Shared `routes`/`query_params` (below), including `include`/`exclude`, apply to them like any other database/version.
+- Like file-based databases, a slug is only served if it's listed under `databases:` in the main `config.yaml`.
+- A database's versions are the union of its version files and its `slugs` versions, so `latest`, the `/{database}` versions listing, and the `expose` catalog endpoints all see both. If a file and a slug define the same database/version, the file wins.
+- Quote versions (`version: "2.10"`). Unquoted YAML numbers are floats, so `2.10` would become `"2.1"`.
+- A malformed `slugs` section (missing `name`, both `version` and `versions`, a duplicate version, or a mix of versioned and unversioned entries for one name) returns a 500 "Shared database configuration error".
+
+#### Shared routes and query params
+
+The shared file can also define top-level `routes` and `query_params`. These are added to **every** database/version, which is handy when each model/version serves the same endpoints over its own `schema`:
+
+```yaml
+# api_dock_config/databases/config.yaml
+database:
+  ...
+
+routes:
+  - route: recordings/{{recording_id}}/detections/
+    sql: SELECT [[detections]].* FROM [[detections]] WHERE [[detections]].recording_id = {{recording_id}}
+  - route: detections/{{id}}
+    sql: SELECT [[detections]].* FROM [[detections]] WHERE [[detections]].id = {{id}}
+  - route: not_for_everyone/{{id}}
+    sql: SELECT [[other]].* FROM [[other]] WHERE [[other]].id = {{id}}
+    exclude:                       # don't add this route to these slug/versions
+      - 'slug1/3.0'
+      - slug: slug2
+        version: 2.3
+      - slug: slug3
+        version: '*'               # '*' = every version
+
+  # the same route defined twice: one for everything except birdnet/2.4, one only for it
+  - route: detections/
+    exclude: ['birdnet/2.4']
+    sql: SELECT [[detections]].* FROM [[detections]]
+  - route: detections/
+    include: ['birdnet/2.4']       # ONLY add this route to these slug/versions
+    sql: SELECT [[detections]].*, [[revisions]].id AS revision_id FROM [[detections]] LEFT JOIN [[revisions]] ON [[revisions]].observation_id = [[detections]].id
+
+query_params:
+  - confidence:
+      sql: "[[detections]].confidence >= {{confidence}}"
+  - start_time:
+      sql: "[[detections]].start_time >= {{start_time}}"
+      exclude: ['slug1/3.9']
+  - limit:
+      sql_append: LIMIT {{limit}}
+
+# limit ALL shared routes / query params to these slug/versions
+route_inclusions: ['birdnet', 'owl/5.0']
+query_inclusions: []                 # empty or missing = no restriction
+
+# opt slug/versions out of ALL shared routes / query params
+route_exclusions: ['legacy_db']
+query_exclusions:
+  - slug: slug4
+    version: 1.0
+```
+
+Rules:
+- **The version config wins.** Its own routes come first and replace any shared route with the same shape. Shape means the same path segments; `{{param}}` names and leading/trailing slashes are ignored, so `detections/{{id}}` and `/detections/{{detection_id}}/` are the same route. Routes the version config adds on top are kept.
+- Shared `query_params` behave like a version config's top-level `query_params`. They apply to every route, and a param with the same name in the version config (or on a route) overrides the shared one.
+- `include` and `route_inclusions`/`query_inclusions` are the opposite of `exclude` and `route_exclusions`/`query_exclusions`. When given (non-empty), the route or query param is added **only** to the listed slug/versions. A shared item is added only if it passes both the top-level lists and its own `include`/`exclude`.
+- The same route (by shape) or query param (by name) can appear more than once in the shared file. Each database/version gets the first one whose `include`/`exclude` select it, so complementary `include`/`exclude` lists give different databases different versions of an endpoint.
+- `include`, `exclude` and the four top-level lists take a list of `'<slug>/<version>'` strings or `{slug: <slug>, version: <version>}` mappings. `'<slug>'`, `'<slug>/*'` or a missing/`'*'` version match every version, including unversioned databases. Versions compare numerically when possible (`2.3`, `"2.3"`), and `latest` is resolved before matching.
+
 **For more details**, see the [SQL Database Support Wiki](https://github.com/SchmidtDSE/api_dock/wiki/SQL-Database-Support).
 
 ---
@@ -457,7 +692,7 @@ routes:
 
 api_dock does not paste request values into SQL. Each `{{variable}}` in `sql`, `multivalue_sql`, conditional `sql` and `queries:` becomes a placeholder, and its value (from the path, query string, a `default`, or a cookie) is sent to DuckDB separately. DuckDB converts the value to the column's type, so number, date and boolean filters work as written. A value that is not a valid number, date or boolean for its column, such as `?age=25 OR true`, is rejected with an error instead of being run as SQL.
 
-Because the value is sent separately, **do not put quotes around variables**:
+Because the value is sent separately, **write variables without quotes**:
 
 | Write | Not |
 |---|---|
@@ -465,7 +700,7 @@ Because the value is sent separately, **do not put quotes around variables**:
 | `UPPER(name) = UPPER({{name}})` | `UPPER(name) = UPPER('{{name}}')` |
 | `name ILIKE '%' \|\| {{name}} \|\| '%'` | `name ILIKE '%{{name}}%'` |
 
-A quoted variable would be read as literal text, so api_dock refuses to start and prints the route with the fixed form. A variable can't be used as a column name in double quotes (`"{{column}}"`) either. A variable inside a SQL comment (`-- {{x}}` or `/* {{x}} */`) would be sent with nothing in the query to use it, so api_dock refuses to start and asks you to remove it. A template also can't end inside a comment, because api_dock adds WHERE conditions and `sql_append` clauses after it on the same line: put the comment on its own line or use `/* */`.
+For compatibility with 0.8.x and earlier configs, a string that is exactly one variable (`'{{department}}'`) is read as `{{department}}`. Any other quoted variable, like `'%{{name}}%'`, would be read as literal text, so api_dock refuses to start and prints the route with the fixed form (rewrite it with `||` as in the last row above). A variable can't be used as a column name in double quotes (`"{{column}}"`) either. A variable inside a SQL comment (`-- {{x}}` or `/* {{x}} */`) would be sent with nothing in the query to use it, so api_dock refuses to start and asks you to remove it. A template also can't end inside a comment, because api_dock adds WHERE conditions and `sql_append` clauses after it on the same line: put the comment on its own line or use `/* */`.
 
 `sql_append` works differently. Its values are column names, `ASC`/`DESC` or numbers, which a database can't accept as separate values, so they are written into the SQL text. Each one must contain only letters, digits, spaces and `_ . , ( ) -`, and must not contain `--`. The same applies to the `sql_append` of a [conditional SQL selection](#conditional-sql-selection) branch.
 
@@ -1355,47 +1590,52 @@ pixi run python scripts/hello_world.py
 
 ## Publishing a Release
 
+Publishing a GitHub Release is what publishes to PyPI: `.github/workflows/publish_to_pypi.yml` runs on `release: published`, builds the sdist and wheel with `uv build`, and uploads them using PyPI trusted publishing (OIDC). There's no local build, no API token, and no `twine`. conda-forge follows automatically: its bot opens a version PR on [conda-forge/api_dock-feedstock](https://github.com/conda-forge/api_dock-feedstock), which a maintainer merges.
+
 ```bash
-# 0. Make sure you are on `main` and merged with any changes
+# 0. Start from a clean, up-to-date main
+export VERSION=0.8.2          # the NEW version, no leading "v"
+git checkout main
+git pull origin main
+git status
 
-# 1. Bump version in pyproject.toml
+# 1. Set `version` in pyproject.toml to $VERSION
 
-# 2. Commit everything
+# 2. Run the tests
+pixi run -e dev pytest -q
+
+# 3. Commit, tag, push (the commit command adds the "v$VERSION: " prefix)
+export COMMIT_MESSAGE='query worker threads, duckdb settings, base_path, proxy host fix'
 git add -A
-git commit -m "v0.6.1: stream proxy responses (fix large-response 502 + content-encoding)"
+git commit -m "v$VERSION: $COMMIT_MESSAGE"
+git tag "v$VERSION"
+git push origin main "v$VERSION"
 
-# 3. Tag and push
-git tag v0.6.1
-git push origin main v0.6.1
-
-# 4. Build the wheel (requires the `dev` pixi environment)
-rm -rf dist/
-find . -name "__pycache__" -type d -exec rm -rf {} +
-find . -name "*.pyc" -delete
-pixi run -e dev python -m build --wheel
-ls dist/*.whl
-
-# 5. Create GitHub release with the wheel attached
-gh release create v0.6.1 dist/api_dock-0.6.1-py3-none-any.whl \
-    --title "v0.6.1" --notes "$(cat <<'EOF'
+# 4. Publish the GitHub Release; this triggers the PyPI upload.
+#    Don't use --draft (the workflow only runs on a published release); no wheel needs attaching.
+gh release create "v$VERSION" \
+  --title "v$VERSION" \
+  --notes "$(cat <<'EOF'
 * new features
-    - Remote proxy responses are now streamed (FastAPI) — upstream bytes are piped to the client as they arrive instead of being buffered fully in memory
-    - New `timeout` setting (default 10s) for the upstream request; set to `null`/`false` to disable
+    - `settings.duckdb`: DuckDB options applied to every database query (`memory_limit`, `threads`, `temp_directory`, or any other DuckDB setting), plus `max_concurrent_queries` to cap how many queries run at once
+    - `settings.base_path`: also serve the API under a URL prefix (e.g. `/dock`), for a CDN/proxy path such as CloudFront routing `https://app.example.org/dock/*` to API Dock; unprefixed paths keep working
 * bug fixes
-    - Large upstream responses no longer return 502 — streamed via `StreamingResponse` instead of reading the whole body into memory
-    - `Content-Encoding` (gzip/br/deflate) is now preserved on compressed responses — raw bytes are streamed via `aiter_raw()` so the header stays valid and the client can decompress
-    - Slow upstreams (e.g. large aggregation queries) no longer 502 at httpx's hardcoded 5s default — the timeout is now configurable via the `timeout` setting
+    - Database queries now run in worker threads, so one slow query no longer stalls every other request (including health checks on `/`)
+    - Remote proxying no longer forwards the client's `Host` (or hop-by-hop) headers upstream; upstream redirects (e.g. trailing-slash 307s) no longer point back at the proxy with the wrong host and path
 * cleanup / other improvements
-    - Added `PreparedRequest` dataclass and split route validation/resolution into `RouteMapper.prepare_remote_request()`; the FastAPI adapter issues the streaming HTTP call
-    - `map_route()` (buffered) retained for the Flask/sync path
-    - Added streaming test coverage (`TestStreamUpstream`, plus `prepare_remote_request` and streaming-header tests) — 53 tests total
+    - README: document `base_path`, `duckdb`, and the previously undocumented `follow_redirects` setting
+    - Test suite grew from 227 to 253 tests (`test_runtime_settings.py`)
 EOF
 )"
 
-# 6. Publish to PyPI
-pixi run -e dev python -m twine upload dist/*.whl
-```
+# 5. Watch the publish workflow, then confirm PyPI has the new version
+gh run watch "$(gh run list --workflow=publish_to_pypi.yml -L1 --json databaseId -q '.[0].databaseId')" --repo SchmidtDSE/api_dock
+curl -s https://pypi.org/pypi/api-dock/json | python3 -c "import sys,json; print('PyPI latest:', json.load(sys.stdin)['info']['version'])"
 
+# 6. conda-forge: once the bot opens the v$VERSION PR (usually within hours), check that the recipe's
+#    run requirements match pyproject.toml dependencies (the bot only bumps version + sha256), then merge it
+gh pr list --repo conda-forge/api_dock-feedstock --state open
+```
 
 ---
 

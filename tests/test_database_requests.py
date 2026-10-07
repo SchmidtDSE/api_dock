@@ -71,6 +71,10 @@ CATALOG_CONFIG: Dict[str, Any] = {
     }, {
         "route": "missing",
         "sql": "SELECT * FROM [[items]] WHERE id = {{nope}}",
+    }, {
+        # 0.7.x style: a string literal that is exactly one variable is accepted.
+        "route": "quoted",
+        "sql": "SELECT * FROM [[items]] WHERE name = '{{name}}'",
     }],
 }
 
@@ -217,6 +221,19 @@ class TestFilterValues:
         result = await route_mapper.map_database_route("catalog", "latest/missing", {}, {})
         assert result.status_code == 500
         assert json.loads(result.content) == {"error": "SQL query error"}
+
+    @pytest.mark.anyio
+    async def test_quoted_variable_is_bound(self, route_mapper: RouteMapper) -> None:
+        """A 0.7.x-style '{{var}}' is read as {{var}}, bound, and matches exactly."""
+        result = await route_mapper.map_database_route(
+            "catalog", "latest/quoted", {"name": "Alpha"}, {}
+        )
+        assert result.status_code == 200
+        assert [row["name"] for row in json.loads(result.content)] == ["Alpha"]
+        result = await route_mapper.map_database_route(
+            "catalog", "latest/quoted", {"name": "x' OR '1'='1"}, {}
+        )
+        assert json.loads(result.content) == []
 
 
 class TestCookieValues:
