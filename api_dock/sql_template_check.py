@@ -50,7 +50,8 @@ def check_quoted_variables(template: str) -> None:
     """Raise if a {{variable}} appears inside a quoted string or identifier.
 
     A string that is exactly one variable (``'{{name}}'``) is allowed: it is
-    read as ``{{name}}`` (see QUOTED_VARIABLE_PATTERN). Single-quoted strings (with '' as an escaped quote), dollar-quoted strings
+    read as ``{{name}}`` (see QUOTED_VARIABLE_PATTERN). Single-quoted strings
+    (with '' as an escaped quote), dollar-quoted strings
     ($$...$$ and $tag$...$tag$), double-quoted identifiers, -- line comments
     and nested /* */ block comments are recognized. Variables inside comments
     are left to check_commented_variables. The template is not changed.
