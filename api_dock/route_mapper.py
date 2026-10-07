@@ -11,7 +11,10 @@ License: BSD 3-Clause
 #
 # IMPORTS
 #
+import asyncio
 import json
+import re
+import threading
 import httpx
 import yaml
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
@@ -54,9 +57,77 @@ HOP_BY_HOP_HEADERS: frozenset = frozenset({
 })
 
 
+# Request headers never forwarded to an upstream remote. Host must be the
+# upstream's own (httpx sets it): forwarding the client's Host makes the upstream
+# build redirects and absolute URLs that point back at the proxy. The rest are
+# hop-by-hop headers, or (content-length) recomputed by httpx from the body.
+EXCLUDED_REQUEST_HEADERS: frozenset = frozenset({
+    "connection",
+    "content-length",
+    "host",
+    "keep-alive",
+    "proxy-authorization",
+    "te",
+    "trailers",
+    "transfer-encoding",
+    "upgrade",
+})
+
+# `settings.duckdb` options. Every key is applied to each query's DuckDB
+# connection as `SET <key> = <value>` (memory_limit, threads, temp_directory,
+# ...), except max_concurrent_queries, which caps how many database queries run
+# at once in this process (others wait their turn).
+DUCKDB_SETTINGS_KEY: str = "duckdb"
+MAX_CONCURRENT_QUERIES_KEY: str = "max_concurrent_queries"
+
+# `settings.base_path`: an optional URL prefix (e.g. "/dock") the API is also
+# served under, for when a proxy/CDN forwards a path prefix unchanged.
+BASE_PATH_KEY: str = "base_path"
+
+DUCKDB_OPTION_PATTERN: re.Pattern = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
 #
 # PUBLIC
 #
+def normalize_base_path(base_path: Any) -> Optional[str]:
+    """Normalize a ``base_path`` setting to ``/prefix`` form.
+
+    Args:
+        base_path: Configured value (e.g. "dock", "/dock/"), or None/empty.
+
+    Returns:
+        "/prefix" without a trailing slash, or None if no prefix is set.
+    """
+    if not base_path:
+        return None
+    stripped = str(base_path).strip().strip("/")
+    return f"/{stripped}" if stripped else None
+
+
+def strip_base_path(path: str, base_path: Optional[str]) -> str:
+    """Remove a base path prefix from a request path, if present.
+
+    Paths without the prefix are returned unchanged, so the API answers both
+    with and without it (e.g. direct calls and health checks still work).
+
+    Args:
+        path: Request path, e.g. "/dock/birdnet/latest/detections/".
+        base_path: Normalized prefix (see normalize_base_path), or None.
+
+    Returns:
+        The path without the prefix ("/birdnet/latest/detections/"), "/" for
+        the prefix itself, or the original path.
+    """
+    if not base_path:
+        return path
+    if path == base_path or path == f"{base_path}/":
+        return "/"
+    if path.startswith(f"{base_path}/"):
+        return path[len(base_path):]
+    return path
+
+
 def collect_multi_query_params(items: Iterable[Tuple[str, str]]) -> Dict[str, List[str]]:
     """Group repeated query string pairs into a name-to-value-list mapping.
 
@@ -100,6 +171,11 @@ class RouteMapper:
         self.database_names = get_database_names(self.config)
         self.settings = get_settings(self.config)
         self.listing_specs, self.listing_warnings = resolve_listing_specs(self.config)
+        self.base_path = normalize_base_path(self.settings.get(BASE_PATH_KEY))
+        self.duckdb_statements, max_queries = _duckdb_settings(
+            self.settings.get(DUCKDB_SETTINGS_KEY)
+        )
+        self._query_slots = threading.BoundedSemaphore(max_queries) if max_queries else None
 
     def get_config_metadata(self) -> Dict[str, Any]:
         """Get API metadata from configuration.
@@ -251,7 +327,7 @@ class RouteMapper:
         return PreparedRequest(
             url=full_url,
             method=method,
-            headers=headers or {},
+            headers=_filter_request_headers(headers or {}),
             params=filtered_query_params,
             cookies=filtered_cookies,
             body=body,
@@ -492,35 +568,22 @@ class RouteMapper:
         except (ValueError, yaml.YAMLError):
             return _error_response(500, "SQL query error")
 
+        # Authenticate every local table plus any shared tables the query
+        # references, then expose [[schema.table]] refs as views.
+        auth_tables = get_local_table_references(database_config, shared_config)
+        local_names = {table.sql_name for table in auth_tables}
+        auth_tables += [ref for ref in table_refs if ref.sql_name not in local_names]
+
         try:
-            import duckdb
-
-            conn = duckdb.connect(database=':memory:')
-
-            # Authenticate every local table (as before) plus any shared tables
-            # the query references, then expose [[schema.table]] refs as views.
-            auth_tables = get_local_table_references(database_config, shared_config)
-            local_names = {table.sql_name for table in auth_tables}
-            auth_tables += [ref for ref in table_refs if ref.sql_name not in local_names]
-            setup_table_storage_authentication(conn, auth_tables)
-            for statement in build_schema_view_statements(table_refs):
-                conn.execute(statement)
-
-            result = conn.execute(sql_query).fetchall()
-            columns = [desc[0] for desc in conn.description] if conn.description else []
-            conn.close()
-
-            response_data = []
-            for row in result:
-                row_dict = {}
-                for col, val in zip(columns, row):
-                    row_dict[col] = _make_json_safe(val)
-                response_data.append(row_dict)
-
-            return _json_response(response_data)
-
+            # DuckDB calls block; run them in a worker thread so one slow query
+            # doesn't stall every other request (and health checks) meanwhile.
+            response_data = await asyncio.to_thread(
+                self._run_query, sql_query, auth_tables,
+                build_schema_view_statements(table_refs),
+            )
         except Exception:
             return _error_response(500, "Database query error")
+        return _json_response(response_data)
 
     def is_remote_name(self, name: str) -> bool:
         """Check if a given name is a configured remote name.
@@ -598,6 +661,51 @@ class RouteMapper:
         except Exception as e:
             return _error_response(500, f"Sync wrapper error: {str(e)}")
 
+    def _run_query(
+            self,
+            sql_query: str,
+            auth_tables: List[Any],
+            view_statements: List[str]) -> List[Dict[str, Any]]:
+        """Execute a database query on a fresh DuckDB connection (blocking).
+
+        Applies the ``settings.duckdb`` options, storage authentication and
+        schema views, then runs the query. Honors max_concurrent_queries.
+
+        Args:
+            sql_query: The SQL to run.
+            auth_tables: TableReferences to set up storage authentication for.
+            view_statements: CREATE SCHEMA/VIEW statements to run first.
+
+        Returns:
+            Result rows as JSON-safe dicts.
+        """
+        import duckdb
+
+        # getattr: RouteMappers built without __init__ (e.g. in tests) have neither.
+        slots = getattr(self, '_query_slots', None)
+        if slots is not None:
+            slots.acquire()
+        try:
+            conn = duckdb.connect(database=':memory:')
+            try:
+                for statement in getattr(self, 'duckdb_statements', []):
+                    conn.execute(statement)
+                setup_table_storage_authentication(conn, auth_tables)
+                for statement in view_statements:
+                    conn.execute(statement)
+                result = conn.execute(sql_query).fetchall()
+                columns = [desc[0] for desc in conn.description] if conn.description else []
+            finally:
+                conn.close()
+        finally:
+            if slots is not None:
+                slots.release()
+
+        return [
+            {column: _make_json_safe(value) for column, value in zip(columns, row)}
+            for row in result
+        ]
+
     def _is_remote_filename(self, filename: str) -> bool:
         """Check if a filename corresponds to a remote config file.
 
@@ -634,6 +742,62 @@ class RouteMapper:
 #
 # INTERNAL
 #
+def _duckdb_settings(options: Any) -> Tuple[List[str], Optional[int]]:
+    """Turn ``settings.duckdb`` into SET statements and a concurrency cap.
+
+    Args:
+        options: Mapping of DuckDB option -> value, plus optional
+            max_concurrent_queries; or None.
+
+    Returns:
+        Tuple of (SET statements, max concurrent queries or None).
+
+    Raises:
+        ValueError: If options isn't a mapping, an option name isn't a plain
+            identifier, or max_concurrent_queries isn't a positive integer.
+    """
+    if not options:
+        return ([], None)
+    if not isinstance(options, dict):
+        raise ValueError(f"settings.{DUCKDB_SETTINGS_KEY} must be a mapping")
+
+    max_queries = options.get(MAX_CONCURRENT_QUERIES_KEY)
+    if max_queries is not None and (not isinstance(max_queries, int) or max_queries < 1):
+        raise ValueError(f"settings.{DUCKDB_SETTINGS_KEY}.{MAX_CONCURRENT_QUERIES_KEY} "
+                         "must be a positive integer")
+
+    statements = []
+    for name, value in options.items():
+        if name == MAX_CONCURRENT_QUERIES_KEY:
+            continue
+        if not DUCKDB_OPTION_PATTERN.match(str(name)):
+            raise ValueError(f"settings.{DUCKDB_SETTINGS_KEY}: invalid option name '{name}'")
+        if isinstance(value, bool):
+            literal = "true" if value else "false"
+        elif isinstance(value, (int, float)):
+            literal = str(value)
+        else:
+            literal = "'" + str(value).replace("'", "''") + "'"
+        statements.append(f"SET {name} = {literal}")
+    return (statements, max_queries)
+
+
+def _filter_request_headers(headers: Dict[str, str]) -> Dict[str, str]:
+    """Drop request headers that must not be forwarded upstream.
+
+    Args:
+        headers: Incoming client request headers.
+
+    Returns:
+        Headers safe to forward (see EXCLUDED_REQUEST_HEADERS).
+    """
+    return {
+        key: value
+        for key, value in headers.items()
+        if key.lower() not in EXCLUDED_REQUEST_HEADERS
+    }
+
+
 def _resolve_timeout(value: Any) -> Optional[float]:
     """Resolve the configured timeout to seconds, or None to disable it.
 
