@@ -13,6 +13,7 @@ License: BSD 3-Clause
 #
 import json
 import httpx
+import yaml
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 from api_dock.auth import validate_authentication
@@ -371,7 +372,13 @@ class RouteMapper:
         if database_name not in self.database_names:
             return _error_response(404, f"Database '{database_name}' not found")
 
-        is_versioned = is_versioned_database(database_name)
+        # Versions come from version files and the shared config's `slugs`, so
+        # a malformed shared config surfaces here.
+        try:
+            is_versioned = is_versioned_database(database_name)
+            available_versions = get_database_versions(database_name) if is_versioned else []
+        except (ValueError, yaml.YAMLError):
+            return _error_response(500, "Shared database configuration error")
 
         path_parts = path.split("/") if path else []
         version = None
@@ -379,7 +386,6 @@ class RouteMapper:
 
         if is_versioned and path_parts:
             potential_version = path_parts[0]
-            available_versions = get_database_versions(database_name)
 
             if potential_version == "latest":
                 version = resolve_latest_database_version(available_versions)
@@ -394,13 +400,14 @@ class RouteMapper:
             else:
                 return _error_response(404, f"Configuration for database '{database_name}' not found")
         elif is_versioned and not path:
-            available_versions = get_database_versions(database_name)
             return _json_response({"versions": available_versions})
 
         try:
             database_config = load_database_config(database_name, version=version)
         except FileNotFoundError:
             return _error_response(404, f"Configuration for database '{database_name}' not found")
+        except (ValueError, yaml.YAMLError):
+            return _error_response(500, "Shared database configuration error")
 
         database_config = merge_inherited_config(database_config, self.config)
 
