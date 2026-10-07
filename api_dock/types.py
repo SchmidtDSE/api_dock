@@ -12,7 +12,7 @@ License: BSD 3-Clause
 # IMPORTS
 #
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 
 #
@@ -144,3 +144,26 @@ class TableReference:
         if self.qualified and self.schema:
             return f"{self.schema}.{self.name}"
         return self.name
+
+
+@dataclass
+class SqlContext:
+    """Request context for building a database route's SQL.
+
+    Supplies what ``[[*.table]]`` / ``[[group.table]]`` unions, the route's
+    ``source_columns``, and ``{{self.*}}`` placeholders need beyond the version
+    config itself.
+
+    Attributes:
+        name: Database slug being queried (e.g. "birdnet"); ``{{self.name}}``.
+        version: Resolved version, or None if unversioned; ``{{self.version}}``.
+        schema_groups: Shared ``schema_groups`` mapping (group -> schema names).
+        schema_sources: Schema name -> (name, version) of the single
+            database/version that uses it. Schemas used by none or several are
+            absent, so their ``name``/``version`` source columns are NULL.
+    """
+
+    name: Optional[str] = None
+    version: Optional[str] = None
+    schema_groups: Dict[str, List[str]] = field(default_factory=dict)
+    schema_sources: Dict[str, Tuple[str, Optional[str]]] = field(default_factory=dict)
