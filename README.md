@@ -56,6 +56,7 @@ Here is an example:
 api_dock_config
 ├── config.yaml               # The default main-config file
 ├── databases
+│    ├── config.yaml          # (optional) shared tables/schemas for all databases
 │    ├── unversioned_db.yaml  # Database config without versioning
 │    └── versioned_db         # Folder containing database configs for different versions
 │        ├── 0.1.yaml
@@ -369,6 +370,7 @@ Database configurations are stored in `api_dock_config/databases/` directory. Ea
 - **tables**: Mapping of table names to file paths (supports S3, GCS, HTTPS, local paths)
 - **queries**: Named SQL queries for reuse
 - **routes**: REST endpoints mapped to SQL queries
+- **schema** (optional): the shared schema (from `databases/config.yaml`) this config's `[[table]]` references fall back to. See [Shared Tables and Schemas](#shared-tables-and-schemas-databasesconfigyaml)
 
 ### Syntax
 
@@ -445,6 +447,126 @@ routes:
   - route: users/{{user_id}}/permissions
     sql: "[[get_permissions]]"
 ```
+
+### Shared Tables and Schemas (`databases/config.yaml`)
+
+When several databases or versions read the same tables, define them once in the optional `api_dock_config/databases/config.yaml`. Everything lives under a `database` key: `meta` holds default table metadata, `schema` holds named groups of tables, and every other key is a global table.
+
+```yaml
+# api_dock_config/databases/config.yaml
+database:
+  # global tables, available as [[table1]] in any database config
+  table1:
+    uri: s3://your-bucket/table1.parquet
+  table3:
+    uri: s3://your-other-bucket/table3.parquet
+    region: us-west-1        # a table's own keys override `meta`
+    public: false
+
+  # defaults applied to every table (shared tables and the tables in each version config)
+  meta:
+    region: us-west-2
+    public: true
+
+  # schemas, available as [[birdnet_2p4.detections]] in any route
+  schema:
+    birdnet_2p4:
+      detections:
+        uri: s3://your-bucket/birdnet/2.4/detections.parquet
+    birdnet_3p0:
+      detections:
+        uri: s3://your-bucket/birdnet/3.0/detections.parquet
+        public: false
+```
+
+A version config can name the schema it uses with `schema:`. An unqualified `[[name]]` is then looked up in order, first match wins:
+
+1. the version config's own `tables`
+2. its `schema:` in the shared config
+3. the shared config's global tables
+
+```yaml
+# api_dock_config/databases/birdnet/2.4.yaml
+name: birdnet
+schema: birdnet_2p4
+tables:
+  revisions: s3://your-bucket/birdnet/2.4/revisions.parquet   # local to this version
+
+routes:
+  # [[detections]] isn't in `tables`, so it comes from the birdnet_2p4 schema
+  - route: recordings/{{recording_id}}/detections
+    sql: SELECT [[detections]].* FROM [[detections]] WHERE [[detections]].recording_id = {{recording_id}}
+```
+
+Any route can reference any schema directly as `[[schema.table]]`, so a different database (e.g. `owl/5.0`) can query `[[birdnet_2p4.detections]]`. To keep a table private to one database/version, define it in that version's `tables` instead. Qualified references are exposed to DuckDB as real views, so you can also use the full name or your own alias in plain SQL:
+
+```yaml
+  - route: detections/
+    sql: >
+      SELECT detections.common_name, COUNT(revisions.id) AS revcount
+      FROM [[birdnet_2p4.detections]]
+      LEFT JOIN [[revisions]] ON revisions.observation_id = birdnet_2p4.detections.id
+      GROUP BY birdnet_2p4.detections.common_name
+```
+
+expands to
+
+```sql
+SELECT detections.common_name, COUNT(revisions.id) AS revcount
+FROM birdnet_2p4.detections
+LEFT JOIN 's3://your-bucket/birdnet/2.4/revisions.parquet' AS revisions ON revisions.observation_id = birdnet_2p4.detections.id
+GROUP BY birdnet_2p4.detections.common_name
+```
+
+Notes:
+- After `FROM`/`JOIN`, `[[schema.table]]` becomes `schema.table` with no alias, so `FROM [[birdnet_2p4.detections]] o` works. Elsewhere it becomes the bare table name (`detections`), because DuckDB doesn't accept `schema.table.*`.
+- Schema and table names used as `[[schema.table]]` must be plain identifiers (letters, digits, underscores).
+- Storage credentials are set per table. Tables whose `region`/`public` differ from the rest get their own S3 secret scoped to their path, so one query can mix regions and public/private buckets.
+- Views are created only for the `[[schema.table]]` tables a query actually references.
+
+#### Shared routes and query params
+
+The shared file can also define top-level `routes` and `query_params`. These are added to **every** database/version, which is handy when each model/version serves the same endpoints over its own `schema`:
+
+```yaml
+# api_dock_config/databases/config.yaml
+database:
+  ...
+
+routes:
+  - route: recordings/{{recording_id}}/detections/
+    sql: SELECT [[detections]].* FROM [[detections]] WHERE [[detections]].recording_id = {{recording_id}}
+  - route: detections/{{id}}
+    sql: SELECT [[detections]].* FROM [[detections]] WHERE [[detections]].id = {{id}}
+  - route: not_for_everyone/{{id}}
+    sql: SELECT [[other]].* FROM [[other]] WHERE [[other]].id = {{id}}
+    exclude:                       # don't add this route to these slug/versions
+      - 'slug1/3.0'
+      - slug: slug2
+        version: 2.3
+      - slug: slug3
+        version: '*'               # '*' = every version
+
+query_params:
+  - confidence:
+      sql: "[[detections]].confidence >= {{confidence}}"
+  - start_time:
+      sql: "[[detections]].start_time >= {{start_time}}"
+      exclude: ['slug1/3.9']
+  - limit:
+      sql_append: LIMIT {{limit}}
+
+# opt slug/versions out of ALL shared routes / query params
+route_exclusions: ['legacy_db']
+query_exclusions:
+  - slug: slug4
+    version: 1.0
+```
+
+Rules:
+- **The version config wins.** Its own routes come first and replace any shared route with the same shape. Shape means the same path segments; `{{param}}` names and leading/trailing slashes are ignored, so `detections/{{id}}` and `/detections/{{detection_id}}/` are the same route. Routes the version config adds on top are kept.
+- Shared `query_params` behave like a version config's top-level `query_params`. They apply to every route, and a param with the same name in the version config (or on a route) overrides the shared one.
+- `exclude`, `route_exclusions` and `query_exclusions` take a list of `'<slug>/<version>'` strings or `{slug: <slug>, version: <version>}` mappings. `'<slug>'`, `'<slug>/*'` or a missing/`'*'` version match every version, including unversioned databases. Versions compare numerically when possible (`2.3`, `"2.3"`), and `latest` is resolved before matching.
 
 **For more details**, see the [SQL Database Support Wiki](https://github.com/SchmidtDSE/api_dock/wiki/SQL-Database-Support).
 
