@@ -34,14 +34,27 @@ SHARED_META_KEY: str = "meta"
 SHARED_SCHEMA_KEY: str = "schema"
 
 # Shared routes/query_params added to every database/version config, plus
-# top-level exclusion lists that opt databases/versions out of all of them.
+# top-level lists that restrict all of them to (inclusions) or opt
+# databases/versions out of all of them (exclusions).
 SHARED_ROUTES_KEY: str = "routes"
 SHARED_QUERY_PARAMS_KEY: str = "query_params"
+ROUTE_INCLUSIONS_KEY: str = "route_inclusions"
+QUERY_INCLUSIONS_KEY: str = "query_inclusions"
 ROUTE_EXCLUSIONS_KEY: str = "route_exclusions"
 QUERY_EXCLUSIONS_KEY: str = "query_exclusions"
 
-# Per-route / per-query-param exclusion list key in the shared config.
+# Per-route / per-query-param inclusion and exclusion list keys in the shared
+# config. They are removed from the item before it is merged.
+INCLUDE_KEY: str = "include"
 EXCLUDE_KEY: str = "exclude"
+SELECTION_KEYS: frozenset = frozenset({INCLUDE_KEY, EXCLUDE_KEY})
+
+# Database/version configs defined inline in the shared config (instead of as
+# files): a list of {name, version | versions: [{version, ...}], ...} entries.
+SLUGS_KEY: str = "slugs"
+SLUG_NAME_KEY: str = "name"
+SLUG_VERSION_KEY: str = "version"
+SLUG_VERSIONS_KEY: str = "versions"
 
 # Exclusion version wildcard: matches every version (and unversioned databases).
 ALL_VERSIONS: str = "*"
@@ -62,6 +75,10 @@ IDENTIFIER_PATTERN: re.Pattern = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 def load_database_config(database_filename: str, config_dir: Optional[str] = None, version: Optional[str] = None) -> Dict[str, Any]:
     """Load a database configuration file.
 
+    A database/version may be defined by a file (``databases/<name>.yaml`` or
+    ``databases/<name>/<version>.yaml``) or by an entry in the shared config's
+    ``slugs`` list. When both define the same database/version, the file wins.
+
     Args:
         database_filename: Name of the database config file (without .yaml extension).
         config_dir: Base config directory. If None, uses default.
@@ -71,8 +88,9 @@ def load_database_config(database_filename: str, config_dir: Optional[str] = Non
         Dictionary containing database configuration data.
 
     Raises:
-        FileNotFoundError: If database config file doesn't exist.
+        FileNotFoundError: If neither a config file nor a slug entry exists.
         yaml.YAMLError: If config file is invalid YAML.
+        ValueError: If the shared config's ``slugs`` section is malformed.
     """
     if config_dir is None:
         from api_dock.config import DEFAULT_CONFIG_DIR
@@ -88,6 +106,12 @@ def load_database_config(database_filename: str, config_dir: Optional[str] = Non
     else:
         # Non-versioned database
         database_config_path = os.path.join(config_dir, DATABASES_DIR, f"{database_filename}.yaml")
+
+    if not os.path.isfile(database_config_path):
+        slug_versions = get_slug_configs(config_dir).get(database_filename, {})
+        version_key = None if version is None else str(version)
+        if version_key in slug_versions:
+            return slug_versions[version_key]
 
     return _load_yaml_file(database_config_path)
 
@@ -187,9 +211,11 @@ def load_shared_database_config(config_dir: Optional[str] = None) -> Dict[str, A
 def load_shared_config(config_dir: Optional[str] = None) -> Dict[str, Any]:
     """Load the whole shared database config file (``databases/config.yaml``).
 
-    Top-level keys: ``database`` (tables, ``meta``, ``schema``), ``routes`` and
+    Top-level keys: ``database`` (tables, ``meta``, ``schema``), ``slugs``
+    (inline database/version configs), ``routes`` and
     ``query_params`` (added to every database/version), and the
-    ``route_exclusions`` / ``query_exclusions`` lists.
+    ``route_inclusions`` / ``query_inclusions`` and ``route_exclusions`` /
+    ``query_exclusions`` lists.
 
     Args:
         config_dir: Base config directory. If None, uses default.
@@ -219,8 +245,11 @@ def load_shared_config(config_dir: Optional[str] = None) -> Dict[str, Any]:
         SHARED_CONFIG_KEY: dict,
         SHARED_ROUTES_KEY: list,
         SHARED_QUERY_PARAMS_KEY: list,
+        ROUTE_INCLUSIONS_KEY: list,
+        QUERY_INCLUSIONS_KEY: list,
         ROUTE_EXCLUSIONS_KEY: list,
         QUERY_EXCLUSIONS_KEY: list,
+        SLUGS_KEY: list,
     }
     for key, expected in expected_types.items():
         value = contents.get(key) or expected()
@@ -238,15 +267,20 @@ def apply_shared_definitions(
     """Merge the shared config's ``routes`` and ``query_params`` into a database config.
 
     Shared routes and query params apply to every database/version unless
-    excluded, either by the top-level ``route_exclusions`` / ``query_exclusions``
-    or by an item's own ``exclude`` list. Exclusion entries are
+    restricted. A non-empty inclusion list (top-level ``route_inclusions`` /
+    ``query_inclusions`` or an item's own ``include``) limits them to the
+    listed databases/versions; an exclusion list (``route_exclusions`` /
+    ``query_exclusions`` or ``exclude``) removes the listed ones. An item is
+    added only if it passes both the top-level and its own lists. Entries are
     ``"<slug>/<version>"`` strings (``"<slug>"`` or ``"<slug>/*"`` for all
     versions) or ``{slug: <slug>, version: <version or "*">}`` mappings.
 
     The version config always wins: its routes come first (so they take
     precedence when matching) and replace any shared route with the same shape
     (same segments, ``{{param}}`` names ignored); its top-level query params
-    replace shared ones with the same name.
+    replace shared ones with the same name. Among shared items, the first one
+    selected for a given route shape / param name is used, so the same route
+    can be defined several times with different ``include``/``exclude`` lists.
 
     Args:
         database_config: The version database configuration.
@@ -256,11 +290,11 @@ def apply_shared_definitions(
 
     Returns:
         A new database config with merged ``routes`` and ``query_params``
-        (``exclude`` keys removed from shared items). Returns the original
+        (``include``/``exclude`` keys removed from shared items). Returns the original
         config if there is nothing to merge.
 
     Raises:
-        ValueError: If an exclusion entry is malformed.
+        ValueError: If an include/exclude entry is malformed.
     """
     shared_routes = shared_file.get(SHARED_ROUTES_KEY) or []
     shared_params = shared_file.get(SHARED_QUERY_PARAMS_KEY) or []
@@ -269,27 +303,32 @@ def apply_shared_definitions(
 
     merged = dict(database_config)
 
-    if shared_routes and not _is_excluded(
-            shared_file.get(ROUTE_EXCLUSIONS_KEY), database_name, version):
+    if shared_routes and _is_selected(
+            shared_file.get(ROUTE_INCLUSIONS_KEY), shared_file.get(ROUTE_EXCLUSIONS_KEY),
+            database_name, version):
         own_routes = list(database_config.get("routes") or [])
-        own_shapes = {
+        taken_shapes = {
             _route_shape(route.get("route", ""))
             for route in own_routes if isinstance(route, dict)
         }
         for route in shared_routes:
             if not isinstance(route, dict):
                 continue
-            if _route_shape(route.get("route", "")) in own_shapes:
+            shape = _route_shape(route.get("route", ""))
+            if shape in taken_shapes:
                 continue
-            if _is_excluded(route.get(EXCLUDE_KEY), database_name, version):
+            if not _is_selected(
+                    route.get(INCLUDE_KEY), route.get(EXCLUDE_KEY), database_name, version):
                 continue
-            own_routes.append({k: v for k, v in route.items() if k != EXCLUDE_KEY})
+            own_routes.append({k: v for k, v in route.items() if k not in SELECTION_KEYS})
+            taken_shapes.add(shape)
         merged["routes"] = own_routes
 
-    if shared_params and not _is_excluded(
-            shared_file.get(QUERY_EXCLUSIONS_KEY), database_name, version):
+    if shared_params and _is_selected(
+            shared_file.get(QUERY_INCLUSIONS_KEY), shared_file.get(QUERY_EXCLUSIONS_KEY),
+            database_name, version):
         own_params = list(database_config.get("query_params") or [])
-        own_names = {
+        taken_names = {
             next(iter(item)) for item in own_params
             if isinstance(item, dict) and len(item) == 1
         }
@@ -297,13 +336,18 @@ def apply_shared_definitions(
             if not isinstance(item, dict) or len(item) != 1:
                 continue
             name, param_config = next(iter(item.items()))
-            if name in own_names:
+            if name in taken_names:
                 continue
             if isinstance(param_config, dict):
-                if _is_excluded(param_config.get(EXCLUDE_KEY), database_name, version):
+                if not _is_selected(
+                        param_config.get(INCLUDE_KEY), param_config.get(EXCLUDE_KEY),
+                        database_name, version):
                     continue
-                param_config = {k: v for k, v in param_config.items() if k != EXCLUDE_KEY}
+                param_config = {
+                    k: v for k, v in param_config.items() if k not in SELECTION_KEYS
+                }
             own_params.append({name: param_config})
+            taken_names.add(name)
         merged["query_params"] = own_params
 
     return merged
@@ -455,14 +499,20 @@ def is_versioned_database(database_name: str, config_dir: Optional[str] = None) 
         config_dir: Base config directory. If None, uses default.
 
     Returns:
-        True if database has versioned configs (is a directory), False otherwise.
+        True if the database has a config directory or versioned entries in
+        the shared config's ``slugs``, False otherwise.
+
+    Raises:
+        ValueError: If the shared config's ``slugs`` section is malformed.
     """
     if config_dir is None:
         from api_dock.config import DEFAULT_CONFIG_DIR
         config_dir = DEFAULT_CONFIG_DIR
 
     database_dir = os.path.join(config_dir, DATABASES_DIR, database_name)
-    return os.path.isdir(database_dir)
+    if os.path.isdir(database_dir):
+        return True
+    return any(v is not None for v in get_slug_configs(config_dir).get(database_name, {}))
 
 
 def get_database_versions(database_name: str, config_dir: Optional[str] = None) -> List[str]:
@@ -473,8 +523,12 @@ def get_database_versions(database_name: str, config_dir: Optional[str] = None) 
         config_dir: Base config directory. If None, uses default.
 
     Returns:
-        List of version strings (e.g., ["0.1", "0.2", "1.2"]).
+        List of version strings (e.g., ["0.1", "0.2", "1.2"]) from version
+        files and the shared config's ``slugs``, without duplicates.
         Returns empty list if database is not versioned.
+
+    Raises:
+        ValueError: If the shared config's ``slugs`` section is malformed.
     """
     if config_dir is None:
         from api_dock.config import DEFAULT_CONFIG_DIR
@@ -484,14 +538,83 @@ def get_database_versions(database_name: str, config_dir: Optional[str] = None) 
         return []
 
     database_dir = os.path.join(config_dir, DATABASES_DIR, database_name)
-    versions = []
+    versions = set()
 
-    for filename in os.listdir(database_dir):
-        if filename.endswith('.yaml'):
-            version = filename[:-5]  # Remove .yaml extension
-            versions.append(version)
+    if os.path.isdir(database_dir):
+        for filename in os.listdir(database_dir):
+            if filename.endswith('.yaml'):
+                versions.add(filename[:-5])  # Remove .yaml extension
+
+    slug_versions = get_slug_configs(config_dir).get(database_name, {})
+    versions.update(v for v in slug_versions if v is not None)
 
     return sorted(versions)
+
+
+def get_slug_configs(config_dir: Optional[str] = None) -> Dict[str, Dict[Optional[str], Dict[str, Any]]]:
+    """Build database configs from the shared config's ``slugs`` list.
+
+    Each entry has a ``name`` and one of:
+      - ``version: <v>`` — one versioned config;
+      - ``versions: [{version: <v>, ...}, ...]`` — several versions, where the
+        entry's other keys are defaults each version's keys override;
+      - neither — an unversioned database.
+    Every other key (description, authors, schema, tables, routes,
+    query_params, ...) is used exactly as in a database config file.
+
+    Args:
+        config_dir: Base config directory. If None, uses default.
+
+    Returns:
+        Mapping of database name -> {version string (None if unversioned) ->
+        database config dict}. Versions are strings (YAML ``5.0`` -> "5.0").
+
+    Raises:
+        ValueError: If an entry is malformed, uses both ``version`` and
+            ``versions``, mixes versioned and unversioned definitions of a
+            name, or defines the same name/version twice.
+    """
+    slugs = load_shared_config(config_dir).get(SLUGS_KEY) or []
+    configs: Dict[str, Dict[Optional[str], Dict[str, Any]]] = {}
+
+    for entry in slugs:
+        if not isinstance(entry, dict) or not entry.get(SLUG_NAME_KEY):
+            raise ValueError(f"slugs: each entry needs a '{SLUG_NAME_KEY}': {entry!r}")
+        name = str(entry[SLUG_NAME_KEY])
+        if SLUG_VERSION_KEY in entry and SLUG_VERSIONS_KEY in entry:
+            raise ValueError(
+                f"slugs: '{name}' uses both '{SLUG_VERSION_KEY}' and '{SLUG_VERSIONS_KEY}'"
+            )
+
+        defaults = {
+            k: v for k, v in entry.items()
+            if k not in (SLUG_NAME_KEY, SLUG_VERSION_KEY, SLUG_VERSIONS_KEY)
+        }
+        if SLUG_VERSIONS_KEY in entry:
+            version_entries = entry[SLUG_VERSIONS_KEY]
+            if not isinstance(version_entries, list) or not version_entries:
+                raise ValueError(f"slugs: '{name}' '{SLUG_VERSIONS_KEY}' must be a non-empty list")
+        else:
+            version_entries = [{SLUG_VERSION_KEY: entry.get(SLUG_VERSION_KEY)}]
+
+        for version_entry in version_entries:
+            if not isinstance(version_entry, dict):
+                raise ValueError(f"slugs: '{name}' has an invalid version entry: {version_entry!r}")
+            raw_version = version_entry.get(SLUG_VERSION_KEY)
+            if SLUG_VERSIONS_KEY in entry and raw_version is None:
+                raise ValueError(f"slugs: '{name}' has a version entry without a version")
+            version = None if raw_version is None else str(raw_version).strip()
+
+            versions = configs.setdefault(name, {})
+            if version in versions:
+                raise ValueError(f"slugs: '{name}' version {version} is defined twice")
+            if versions and (version is None) != (None in versions):
+                raise ValueError(f"slugs: '{name}' mixes versioned and unversioned entries")
+
+            own = {k: v for k, v in version_entry.items() if k != SLUG_VERSION_KEY}
+            versions[version] = {SLUG_NAME_KEY: name, **defaults, **own}
+
+    return configs
 
 
 def resolve_latest_database_version(versions: List[str]) -> Optional[str]:
@@ -666,11 +789,37 @@ def _load_yaml_file(file_path: str) -> Dict[str, Any]:
         raise yaml.YAMLError(f"Invalid YAML in {file_path}: {e}")
 
 
-def _is_excluded(exclusions: Any, database_name: str, version: Optional[str]) -> bool:
-    """Check whether a database/version matches any entry of an exclusion list.
+def _is_selected(
+        inclusions: Any,
+        exclusions: Any,
+        database_name: str,
+        version: Optional[str]) -> bool:
+    """Check whether a database/version passes an inclusion and exclusion list.
 
     Args:
-        exclusions: List of ``"<slug>[/<version>]"`` strings or
+        inclusions: Inclusion list; if non-empty, the database/version must
+            match one of its entries. None/empty means no restriction.
+        exclusions: Exclusion list; the database/version must match none of
+            its entries. None/empty excludes nothing.
+        database_name: Database slug from the URL.
+        version: Resolved version, or None if unversioned.
+
+    Returns:
+        True if the database/version is included and not excluded.
+
+    Raises:
+        ValueError: If a list or one of its entries is malformed.
+    """
+    if inclusions and not _matches_any(inclusions, database_name, version):
+        return False
+    return not _matches_any(exclusions, database_name, version)
+
+
+def _matches_any(entries: Any, database_name: str, version: Optional[str]) -> bool:
+    """Check whether a database/version matches any entry of an include/exclude list.
+
+    Args:
+        entries: List of ``"<slug>[/<version>]"`` strings or
             ``{slug, version}`` mappings, or None.
         database_name: Database slug from the URL.
         version: Resolved version, or None if unversioned.
@@ -681,24 +830,24 @@ def _is_excluded(exclusions: Any, database_name: str, version: Optional[str]) ->
     Raises:
         ValueError: If the list or one of its entries is malformed.
     """
-    if not exclusions:
+    if not entries:
         return False
-    if not isinstance(exclusions, list):
-        raise ValueError(f"Exclusion list must be a list, got {type(exclusions).__name__}")
+    if not isinstance(entries, list):
+        raise ValueError(f"Include/exclude list must be a list, got {type(entries).__name__}")
 
-    for entry in exclusions:
-        slug, excluded_version = _parse_exclusion(entry)
+    for entry in entries:
+        slug, entry_version = _parse_selection_entry(entry)
         if slug != database_name:
             continue
-        if excluded_version == ALL_VERSIONS:
+        if entry_version == ALL_VERSIONS:
             return True
-        if version is not None and _versions_equal(version, excluded_version):
+        if version is not None and _versions_equal(version, entry_version):
             return True
     return False
 
 
-def _parse_exclusion(entry: Any) -> Tuple[str, str]:
-    """Parse one exclusion entry into (slug, version spec).
+def _parse_selection_entry(entry: Any) -> Tuple[str, str]:
+    """Parse one include/exclude entry into (slug, version spec).
 
     Args:
         entry: ``"<slug>"``, ``"<slug>/<version>"``, or ``{slug, version}``.
@@ -711,27 +860,27 @@ def _parse_exclusion(entry: Any) -> Tuple[str, str]:
         ValueError: If the entry has no slug or an unsupported type.
     """
     if isinstance(entry, str):
-        slug, _, excluded_version = entry.strip().strip("/").partition("/")
+        slug, _, entry_version = entry.strip().strip("/").partition("/")
     elif isinstance(entry, dict):
         slug = str(entry.get("slug") or "")
         raw_version = entry.get("version")
-        excluded_version = ALL_VERSIONS if raw_version is None else str(raw_version)
+        entry_version = ALL_VERSIONS if raw_version is None else str(raw_version)
     else:
-        raise ValueError(f"Invalid exclusion entry: {entry!r}")
+        raise ValueError(f"Invalid include/exclude entry: {entry!r}")
 
     if not slug:
-        raise ValueError(f"Exclusion entry has no slug: {entry!r}")
-    return (slug, excluded_version.strip() or ALL_VERSIONS)
+        raise ValueError(f"Include/exclude entry has no slug: {entry!r}")
+    return (slug, entry_version.strip() or ALL_VERSIONS)
 
 
 def _versions_equal(version: str, spec: str) -> bool:
-    """Compare a version stem to an exclusion version, tolerating float forms.
+    """Compare a version stem to an include/exclude version, tolerating float forms.
 
     So "3.0" matches a YAML ``3.0`` or ``3`` as well as ``"3.0"``.
 
     Args:
         version: The resolved version stem.
-        spec: The configured exclusion version.
+        spec: The configured include/exclude version.
 
     Returns:
         True if they represent the same version.
