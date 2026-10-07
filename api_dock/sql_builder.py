@@ -47,6 +47,10 @@ SQL_MARKER: str = "?"
 # A {{variable}} placeholder; group 1 is the variable name.
 VARIABLE_PATTERN: re.Pattern[str] = re.compile(r'\{\{([^{}]+)\}\}')
 
+# A string literal that is exactly one placeholder ('{{name}}'), the 0.7.x way of
+# writing a text value. It is read as {{name}}, so those configs keep working.
+QUOTED_VARIABLE_PATTERN: re.Pattern[str] = re.compile(r"'\{\{([^{}]+)\}\}'")
+
 # Route key selecting which source facts to add as columns to [[*.table]] /
 # [[group.table]] union rows, and each fact's default column name.
 SOURCE_COLUMNS_KEY: str = "source_columns"
@@ -1015,7 +1019,9 @@ def _bind_variables(
     """Replace each {{variable}} in an SQL template with a marker and collect its value.
 
     The template is read in one pass, so a value is never scanned for further
-    {{variables}}.
+    {{variables}}. A string literal that is exactly one placeholder
+    (``'{{name}}'``) is read as ``{{name}}``; any other quoted placeholder
+    (e.g. ``'%{{name}}%'``) is left as text and fails when the query runs.
 
     Args:
         template: SQL template with {{variable}} placeholders.
@@ -1032,6 +1038,7 @@ def _bind_variables(
     if list_params is None:
         list_params = {}
     values: List[Optional[str]] = []
+    template = QUOTED_VARIABLE_PATTERN.sub(r'{{\1}}', template)
 
     def replace_variable(match: re.Match[str]) -> str:
         """Return the marker(s) for one placeholder and record its value(s)."""
