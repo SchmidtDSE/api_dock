@@ -15,6 +15,11 @@ settings:
   add_trailing_slash: false   # Set true to auto-append trailing slash to proxied paths
   follow_redirects: true      # Set false to pass 3xx redirects through to the client
   timeout: 10                 # Upstream request timeout (seconds); null/false to disable
+  # base_path: /dock          # Also serve the API under this prefix (e.g. behind a CDN path)
+  # duckdb:                   # Database query options (DuckDB SET options + a concurrency cap)
+  #   memory_limit: 700MB
+  #   threads: 2
+  #   max_concurrent_queries: 2
 
 # Global route restrictions — applied to all remotes unless overridden per-remote.
 # Uncomment to block DELETE on every remote:
