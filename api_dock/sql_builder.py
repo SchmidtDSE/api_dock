@@ -243,7 +243,7 @@ def build_sql_query_with_tables(
     sql_query, values = _add_where_fragments(sql_query, values, where_fragments, expand_tables)
 
     post_where = _post_where_clauses(
-        route_config, branch_appends, query_params, path_params, params, expand_tables
+        route_config, branch_appends, query_params, path_params, params, expand_tables, marker
     )
     if post_where:
         sql_query += ' ' + ' '.join(post_where)
@@ -853,6 +853,8 @@ def _substitute_table_references(
         if collected is not None:
             collected.setdefault(reference.sql_name, reference)
 
+        if context is not None and context.connection is not None:
+            return _postgres_table_sql(reference, in_from_clause)
         if in_from_clause:
             # Full reference for FROM/JOIN clauses
             if reference.qualified:
@@ -864,6 +866,29 @@ def _substitute_table_references(
 
     result_sql = re.sub(table_pattern, replace_table_reference, sql)
     return result_sql
+
+
+def _postgres_table_sql(reference: TableReference, in_from_clause: bool) -> str:
+    """Write a table reference for a query running natively on PostgreSQL.
+
+    After FROM/JOIN an unqualified ``[[table]]`` becomes the quoted PostgreSQL
+    name with its alias (``"public"."recordings" AS "recordings"``) and the
+    quoted alias elsewhere. A qualified ``[[schema.table]]`` gets no alias, so
+    an alias written after it works, and elsewhere becomes the quoted
+    PostgreSQL table name, by which PostgreSQL also knows it.
+
+    Args:
+        reference: The resolved PostgreSQL table.
+        in_from_clause: Whether the reference follows FROM/JOIN.
+
+    Returns:
+        SQL text for the reference.
+    """
+    parts = reference.uri.split('.')
+    if in_from_clause:
+        source = '.'.join(f'"{part}"' for part in parts)
+        return source if reference.qualified else f'{source} AS "{reference.name}"'
+    return f'"{parts[-1]}"' if reference.qualified else f'"{reference.name}"'
 
 
 def _resolve_union(
@@ -1168,7 +1193,8 @@ def _post_where_clauses(
         query_params: Dict[str, str],
         path_params: Dict[str, str],
         params: Dict[str, Optional[str]],
-        expand_tables: Callable[[str], str]) -> List[str]:
+        expand_tables: Callable[[str], str],
+        marker: str = SQL_MARKER) -> List[str]:
     """Build the clauses that follow WHERE, in the order they are written.
 
     Branch appends from the sql selector come before route-level sql_append
@@ -1182,6 +1208,7 @@ def _post_where_clauses(
         path_params: Dictionary of path parameters.
         params: All substitution values (see _substitution_params).
         expand_tables: Expands [[table]] references (see build_sql_query_with_tables).
+        marker: The backend's marker (literal ``%`` is doubled for ``%s``).
 
     Returns:
         SQL clauses to append after the WHERE clause.
@@ -1197,7 +1224,9 @@ def _post_where_clauses(
         expand_tables(clause)
         for clause in build_append_clause_from_params(route_config, query_params, path_params)
     ]
-    return branch + route
+    # Values here passed the allowed-character check (no %), so only config text
+    # has literal % to double.
+    return [_escape_percent(clause, marker) for clause in branch + route]
 
 
 def _bind_variables(
@@ -1228,7 +1257,7 @@ def _bind_variables(
     if list_params is None:
         list_params = {}
     values: List[Optional[str]] = []
-    template = QUOTED_VARIABLE_PATTERN.sub(r'{{\1}}', template)
+    template = _escape_percent(QUOTED_VARIABLE_PATTERN.sub(r'{{\1}}', template), marker)
 
     def replace_variable(match: re.Match[str]) -> str:
         """Return the marker(s) for one placeholder and record its value(s)."""
@@ -1244,6 +1273,21 @@ def _bind_variables(
 
     sql = VARIABLE_PATTERN.sub(replace_variable, template)
     return sql, values
+
+
+def _escape_percent(template: str, marker: str) -> str:
+    """Double each literal ``%`` for drivers whose marker uses ``%`` (psycopg's ``%s``).
+
+    Apply once per config template, before markers are written.
+
+    Args:
+        template: SQL template text.
+        marker: The backend's marker.
+
+    Returns:
+        The template, with ``%`` doubled if the marker contains ``%``.
+    """
+    return template.replace('%', '%%') if '%' in marker else template
 
 
 def _append_bound_fragment(
