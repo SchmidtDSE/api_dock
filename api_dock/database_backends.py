@@ -43,6 +43,14 @@ QueryResult = Tuple[List[str], List[Tuple[Any, ...]]]
 #
 # PUBLIC
 #
+class DatabaseUnavailableError(Exception):
+    """The database can't be reached right now (respond 503, not 500)."""
+
+
+class DatabaseLifecycleError(Exception):
+    """A backend was used before it was started, after it closed, or on the wrong loop."""
+
+
 class DatabaseBackend(ABC):
     """Runs SQL with bound values and returns every row.
 
