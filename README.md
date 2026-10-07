@@ -13,6 +13,7 @@ API Dock allows users to quickly build API-s that proxy requests to multiple rem
   - [SQL Database Support](#sql-database-support)
   - [URL Query Parameters](#url-query-parameters)
   - [PostgreSQL Databases](#postgresql-databases)
+  - [Route Chaining](#route-chaining)
 - [CLI](#cli)
   - [Commands](#commands)
   - [Examples](#examples)
@@ -980,6 +981,187 @@ app.mount("/api", api)
 Importing api_dock doesn't build an app. Each of these app names builds its app the first time it is read: `api_dock.app`, `api_dock.fastapi_app`, `api_dock.fast_api.app`, `api_dock.flask_app` and `api_dock.flask_api.app`.
 
 If a PostgreSQL database is configured, reading `flask_app` raises the Flask error. `from api_dock import *` raises it too, because it reads every exported name. Import only the names you need, for example `from api_dock.fast_api import create_app`.
+
+## Route Chaining
+
+A database route can get values from a route of another database before it runs. The other route is called a resolver. It must return exactly one row. The route can use the row's values in its SQL, in the URI of a table and in its response headers.
+
+A typical use: a catalog database names the current release of a dataset, and a second database reads that release's Parquet files.
+
+### Internal databases
+
+The resolver's target is a database with `internal: true`:
+
+```yaml
+# api_dock_config/databases/catalog/1.0.yaml
+name: catalog
+backend: postgres            # DuckDB works too
+internal: true
+connection:
+  host: catalog.example.internal
+  dbname: catalog
+  user: api_dock_readonly
+  password: env:CATALOG_DB_PASSWORD
+  sslmode: verify-full
+tables:
+  current_release: releases.current_release
+routes:
+  - route: releases/current
+    sql: >
+      SELECT release_id, data_uri, schema_version,
+             revision || ':' || checksum AS validator
+      FROM [[current_release]]
+      WHERE project = {{project}} AND dataset = {{dataset}}
+```
+
+HTTP requests can't reach an internal database. Every request to `/catalog/...`, including `/catalog`, `/catalog/1.0` and `/catalog/latest/...`, returns `404` with the same body as for a name that does not exist. `RouteMapper.map_database_route()` also returns 404 for it. The root metadata and the `expose` listings leave it out.
+
+`internal:` must be `true` or `false`; an omitted setting means `false`. All versions of a database must have the same setting. `internal:` is read from the database's own file, not from the main config.
+
+### Resolvers
+
+A database names its resolvers in `resolvers:`. A route lists the resolvers it uses in `resolve:`:
+
+```yaml
+# api_dock_config/databases/observations/2.0.yaml
+name: observations
+resolvers:
+  current_release:
+    via: catalog/1.0/releases/current
+    params:
+      project: "project:{{project_id}}"
+      dataset: "{{dataset}}"
+    bind: [release_id, data_uri, schema_version, validator]
+
+tables:
+  readings:
+    uri: "{{current_release.data_uri}}"
+    format: parquet
+    files: "**/*.parquet"
+    allow: ["s3://example-releases/"]
+    region: us-west-2
+
+routes:
+  - route: projects/{{project_id}}/sites/{{site_id}}/readings
+    resolve: [current_release]
+    sql: >
+      SELECT [[readings]].* FROM [[readings]]
+      WHERE [[readings]].site_id = {{site_id}}
+    headers:
+      ETag: '"{{current_release.validator}}"'
+      X-Release-Id: "{{current_release.release_id}}"
+    query_params:
+      - dataset: { default: hourly }
+      - min_value:
+          sql: "[[readings]].value >= {{min_value}}"
+```
+
+`GET /observations/2.0/projects/7/sites/42/readings` calls `catalog/1.0/releases/current` with `project=project:7` and `dataset=hourly`. It gets one row, reads the Parquet files under that row's `data_uri`, and returns the rows for site 42 with an `ETag` and an `X-Release-Id` header. `?dataset=daily` changes the value that the resolver sends.
+
+A resolver has these keys:
+
+- `via` (required): `<database>/<version>/<route path>`, or `<database>/<route path>` for a database without versions. The version must be explicit: `latest` is not allowed, so a new target version can't change this config without an edit. The path has no `{{variables}}`.
+- `params` (optional): query params to send to the target. Each value is a text template that can use the route's path variables and query params, with their defaults. A template can't use cookies or the values of another resolver. If a template's variable has no value, that param is not sent.
+- `bind` (required): the columns of the target's row that the route can use. To rename a column, use `AS` in the target's `SELECT`.
+
+A resolver's name must be letters, digits and `_`, and can't be `cookies`. A route uses a value as `{{<resolver>.<column>}}`. In `sql:`, query-param `sql:` and `multivalue_sql:` fragments and selector branches, the value is bound like any other value. It can't be used in `sql_append`, because those values are written into the SQL text.
+
+A resolver value always comes from the resolver. A path value, query value or default with the same dotted name can't replace it.
+
+Resolvers run after authentication and after any early response (`response:`, `conditional:` or a missing `required` param), so a request that returns early makes no resolver call. Several resolvers run one after another, in `resolve:` order.
+
+The call to the target is made by the server. It skips the target's authentication, whether the target sets it or inherits it from the main config. It sends none of the caller's cookies or query params, only `params:`. Cookies that the target injects with `{key: ..., value: "env:..."}` still apply; if the environment variable is not set, a query that uses the cookie fails.
+
+Each request runs its resolvers again. There is no cache, so a new release is used at once.
+
+### Values
+
+api_dock turns each `bind:` value into text before it uses it:
+
+- text stays as it is;
+- integers and finite decimal and floating-point numbers are written as Python's `str()` writes them;
+- booleans become `true` or `false`;
+- dates and timestamps become ISO 8601;
+- UUIDs become their text form;
+- NULL stays NULL.
+
+NaN, infinity and other types (lists, objects, bytes) give `500 Resolver error`.
+
+In SQL, a NULL value is bound as NULL. Note that `x = NULL` matches no row in SQL; use `IS NULL` or `IS NOT DISTINCT FROM` to compare with a value that can be NULL. A NULL table URI gives `500 Resolver error`. A NULL value in a header leaves that header out.
+
+### Templated tables
+
+A DuckDB table whose `uri:` contains `{{` is templated. Its `uri:` must be exactly one `{{<resolver>.<column>}}`. It also needs:
+
+- `format:`: `parquet`, `csv` or `json`. The format, not the file name, selects the reader: `read_parquet`, `read_csv` or `read_json`. `json` reads a JSON array and newline-delimited JSON. DuckDB detects reader options such as the CSV delimiter.
+- `allow:`: a list of URI prefixes that the resolved URI must match.
+
+It can also have `files:`, a pattern such as `"**/*.parquet"`, and the usual storage keys such as `region:`. It can't have `path:`. Only templated tables can have `format:`, `files:` and `allow:`. PostgreSQL databases can't have templated tables.
+
+After `FROM` or `JOIN`, `[[readings]]` is written as `read_parquet(?) AS readings`, and the URI is a bound value. It is never written into the SQL text. Elsewhere `[[readings]]` is the alias, as for any table. A table can appear in separate subqueries. For a self-join, define two table names with the same `uri:` and use each one once.
+
+Before the URI is used, api_dock checks it. It refuses a URI that:
+
+- contains a `..` path segment, as written or after percent-decoding;
+- contains `*`, `?` or `[`;
+- matches no `allow:` prefix.
+
+A URI matches a prefix if it equals the prefix, or starts with the prefix and the prefix ends with `/`, or starts with the prefix and the next character is `/`. So `s3://bucket/pub` matches `s3://bucket/pub/x`, but not `s3://bucket/pub-secret/x`.
+
+After the checks, `files:` is added to the end of the URI. If the URI does not end with `/`, api_dock adds one first. Without `files:`, the URI is read as one file. A hive-partitioned folder, read with `files: "**/*.parquet"`, returns its partition columns.
+
+Storage access (S3, GCS, Azure or HTTP) is set up from the `allow:` prefixes, so all prefixes of one table must use the same storage type.
+
+`allow:` can hold local folders. DuckDB follows symbolic links, so make sure that no link in an allowed folder points outside it.
+
+### Response headers
+
+A database route can set response headers with `headers:`. Each value is a text template that can use the route's path variables and the values of the resolvers in its `resolve:`. It can't use query params or cookies. The headers are added to a successful response only.
+
+api_dock doesn't add quotes or change the value. Write the quotes that `ETag` needs in the config: `ETag: '"{{current_release.validator}}"'`. api_dock doesn't handle `If-None-Match` and never returns `304`.
+
+A header name must be a valid HTTP header name. A route can't set hop-by-hop headers, `Content-Type`, `Content-Length` or `Set-Cookie`. If a filled value has a control character (such as a line feed) or a non-ASCII character, the request returns `500 Resolver error` and no header is sent.
+
+### Errors
+
+The caller gets one of these responses. The body never includes a message from the target or the database driver. The server log names the database, the route, the resolver, the target and the reason.
+
+| What happened | Response |
+|---|---|
+| The target returned no rows | `404 Not found` |
+| The target returned more than one row | `500 Resolver error` |
+| The target is unavailable (`503`) | `503 Database unavailable` |
+| The target returned another error, for example `400` for a missing param | `500 Resolver error` |
+| The row has no column that `bind:` lists | `500 Resolver error` |
+| A value can't be converted, a table URI fails a check, or a header value can't be sent | `500 Resolver error` |
+
+If a route lists two resolvers and the second one fails, the caller gets the second one's error.
+
+### Startup checks
+
+These problems stop api_dock from starting. The error names the database, the version, and the route, resolver or table:
+
+- a `via` to a database, version or route that does not exist, to a remote, or to a database that is not internal;
+- a `via` that uses `latest` or contains `{{`;
+- a target that has `resolvers:` itself (resolvers can't form chains);
+- a malformed resolver, an unknown resolver key, or a resolver named `cookies`;
+- a `params:` template that uses a cookie or a resolver value, or a variable that is not a path variable or declared query param of every route that lists the resolver;
+- a `{{variable}}` in the target route's SQL with no value: it must be a key of `params:`, a target query-param default or a target path variable in the `via` path. A `{{cookies.name}}` there must be a cookie that the target injects;
+- a `resolve:` entry that is not defined or is listed twice;
+- a route that uses `{{<resolver>.<column>}}`, directly or through a templated table, without listing the resolver in `resolve:`, or with a column that is not in `bind:`;
+- a resolver value or a templated table in `sql_append`;
+- a templated table without `format:` or `allow:`, with an invalid `files:` or `allow:` entry, with prefixes of more than one storage type, or on a PostgreSQL database;
+- a header name that is invalid or reserved, or a header template that uses another name.
+
+api_dock can't check at startup that the target's `SELECT` returns the columns in `bind:`. A missing column gives `500 Resolver error` at request time. A resolver that no route lists is logged as a warning.
+
+### Configuration changes need a restart
+
+If any version of a database uses `internal:`, `resolvers:`, route `resolve:` or `headers:`, or a templated table, all its versions are read once, when the server starts, as for PostgreSQL databases. This includes `internal: false`. File edits, deleted routes and new version files take effect only after a restart, when the startup checks run again. This also applies to public visibility: setting `internal:` in a file doesn't hide or show the database until the server restarts.
+
+DuckDB databases without these settings are still read from their files on each request. If such a file starts to use one of these settings, or a table gets `format:`, `files:` or `allow:`, its requests return `500 Database configuration changed; restart required` until the server restarts.
+
+Resolvers work on Flask wherever their target works. Flask refuses PostgreSQL configs, so on Flask a resolver's target must be an internal DuckDB database.
 
 ---
 

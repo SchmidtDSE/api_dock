@@ -32,6 +32,10 @@ BACKEND_AZURE = 'azure'
 BACKEND_HTTP = 'http'
 BACKEND_LOCAL = 'local'
 
+# Table keys that are not storage settings. format:, files: and allow: belong
+# to templated tables, whose uri: is a {{<resolver>.<column>}} template.
+TABLE_KEYS: frozenset = frozenset({'uri', 'path', 'format', 'files', 'allow'})
+
 
 #
 # PUBLIC
@@ -77,9 +81,7 @@ def extract_table_uris(database_config: Dict[str, Any]) -> List[str]:
         if isinstance(table_def, str):
             uris.append(table_def)
         elif isinstance(table_def, dict):
-            uri = table_def.get('uri') or table_def.get('path')
-            if uri:
-                uris.append(uri)
+            uris.extend(_storage_uris(table_def))
 
     return uris
 
@@ -103,8 +105,9 @@ def extract_table_metadata_by_backend(database_config: Dict[str, Any]) -> Dict[s
             uri = table_def
             metadata = {}
         elif isinstance(table_def, dict):
-            uri = table_def.get('uri') or table_def.get('path')
-            metadata = {k: v for k, v in table_def.items() if k not in ['uri', 'path']}
+            storage_uris = _storage_uris(table_def)
+            uri = storage_uris[0] if storage_uris else None
+            metadata = {k: v for k, v in table_def.items() if k not in TABLE_KEYS}
         else:
             continue
 
@@ -198,6 +201,26 @@ def setup_storage_authentication(conn: Any, backends: Set[str], metadata: Option
 #
 # INTERNAL
 #
+def _storage_uris(table_def: Dict[str, Any]) -> List[str]:
+    """Return the URIs that storage setup uses for one table definition.
+
+    A templated table's URI is known only at request time, so its allow:
+    prefixes stand in for it. The startup check makes sure that they all use
+    the same storage type.
+
+    Args:
+        table_def: A table definition in dict form.
+
+    Returns:
+        The table's URI or path, or its allow: prefixes; empty if it has none.
+    """
+    uri = table_def.get('uri') or table_def.get('path')
+    if isinstance(uri, str) and '{{' in uri:
+        allow = table_def.get('allow')
+        return [prefix for prefix in allow if prefix] if isinstance(allow, list) else []
+    return [uri] if uri else []
+
+
 def _setup_s3_auth(conn: Any, metadata: Optional[Dict[str, Any]] = None) -> bool:
     """Setup AWS S3 authentication using credential chain.
 

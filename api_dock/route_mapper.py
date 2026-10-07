@@ -16,6 +16,7 @@ import ipaddress
 import json
 import logging
 import os
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
@@ -48,8 +49,27 @@ from api_dock.database_config import (
 )
 from api_dock.listings import build_listing, resolve_listing_specs
 from api_dock.postgres_pools import DatabaseKey, PostgresPools, database_label
+from api_dock.resolver_targets import check_resolver_targets
+from api_dock.resolvers import (
+    BIND_KEY,
+    PARAMS_KEY,
+    RESOLVE_KEY,
+    VIA_KEY,
+    ResolverError,
+    fill_params,
+    get_resolvers,
+    select_row,
+    unset_injected_cookies,
+)
 from api_dock.route_headers import HEADERS_KEY, HeaderValueError, fill_route_headers
-from api_dock.sql_builder import build_sql_query, extract_path_parameters, process_query_parameters, SqlSelectionError
+from api_dock.sql_builder import (
+    SqlSelectionError,
+    build_sql_query,
+    extract_path_parameters,
+    process_query_parameters,
+    request_values,
+)
+from api_dock.templated_tables import TableUriError, table_value_name
 from api_dock.types import PreparedRequest, ProxyResponse
 #
 # CONSTANTS
@@ -62,8 +82,21 @@ logger: logging.Logger = logging.getLogger(__name__)
 # PostgreSQL config, which needs a pool that only a new mapper can open.
 RESTART_REQUIRED_MESSAGE: str = "Database configuration changed; restart required"
 
-# Returned when a route's headers: can't be filled. The details are logged.
+# Returned when a resolver, a templated table URI or a route's headers: fail.
+# The details are logged.
 RESOLVER_ERROR_MESSAGE: str = "Resolver error"
+
+# Returned when a resolver's target returns no row.
+NOT_FOUND_MESSAGE: str = "Not found"
+
+DATABASE_UNAVAILABLE_MESSAGE: str = "Database unavailable"
+
+# Response messages for a failed resolver, by status code.
+RESOLVER_FAILURE_MESSAGES: Dict[int, str] = {
+    404: NOT_FOUND_MESSAGE,
+    500: RESOLVER_ERROR_MESSAGE,
+    503: DATABASE_UNAVAILABLE_MESSAGE,
+}
 
 # Network address types that are written to JSON as their string form.
 IP_ADDRESS_TYPES: Tuple[type, ...] = (
@@ -132,19 +165,22 @@ class RouteMapper:
 
         Remote and database config files are read from the directory holding
         the main config file. Every listed database config is checked here, so
-        a bad config stops startup instead of failing on a live request. A
-        database with any PostgreSQL version, or any version that uses
-        internal: or route headers:, is kept as loaded here, with all its
-        versions, until a new mapper is created. Internal databases are left
-        out of database_names, which the adapters use for dispatch. No
-        connection is opened until start().
+        a bad config stops startup instead of failing on a live request.
+        Resolvers are checked against their targets once every database is
+        loaded. A database with any PostgreSQL version, or any version that
+        uses internal:, resolvers:, route resolve: or headers:, or a templated
+        table, is kept as loaded here, with all its versions, until a new
+        mapper is created. Internal databases are left out of database_names,
+        which the adapters use for dispatch. No connection is opened until
+        start().
 
         Args:
             config_path: Path to main config file. If None, uses default.
 
         Raises:
             ValueError: If a listed database config is missing or fails a check,
-                or the versions of a database differ in internal:.
+                the versions of a database differ in internal:, or a resolver's
+                target fails a check.
         """
         try:
             self.config = load_main_config(config_path)
@@ -156,13 +192,16 @@ class RouteMapper:
         self.settings = get_settings(self.config)
 
         self._snapshots: Dict[str, Dict[Optional[str], Dict[str, Any]]] = {}
+        databases: Dict[str, Dict[Optional[str], Dict[str, Any]]] = {}
         internal_names = set()
         for database_name in get_database_names(self.config):
             configs = _load_checked_database(database_name, self.config, self.config_dir)
+            databases[database_name] = configs
             if _internal_setting(database_name, configs):
                 internal_names.add(database_name)
             if _needs_snapshot(configs):
                 self._snapshots[database_name] = configs
+        _check_all_resolver_targets(databases, internal_names, self.remote_names)
         self.database_names = [
             name for name in get_database_names(self.config) if name not in internal_names
         ]
@@ -456,9 +495,10 @@ class RouteMapper:
             multi_query_params: Optional[Dict[str, List[str]]] = None) -> ProxyResponse:
         """Execute a SQL query for a database route and return results as JSON.
 
-        A route's headers: are filled from its path values and added to a
-        successful response only. A filled value that can't be sent gives
-        500 Resolver error.
+        The route's resolvers run first, after any early response. A route's
+        headers: are filled from its path values and resolver values, and
+        added to a successful response only. A filled value that can't be
+        sent gives 500 Resolver error.
 
         Args:
             database_name: Name of the database.
@@ -484,48 +524,14 @@ class RouteMapper:
         if database_name not in self.database_names:
             return _error_response(404, f"Database '{database_name}' not found")
 
-        located = self._locate_database_request(database_name, path)
-        if isinstance(located, ProxyResponse):
-            return located
-        version, actual_path, database_config = located
-
-        filtered_cookies = filter_cookies_by_config(cookies, database_config)
-        auth_error = _check_database_auth(filtered_cookies, database_config)
-        if auth_error is not None:
-            return auth_error
-
-        if not actual_path:
-            routes = database_config.get("routes", [])
-            route_list = [r.get("route", "") for r in routes if isinstance(r, dict)]
-            return _json_response({"routes": route_list})
-
-        route_config = find_database_route(actual_path, database_config)
-        if route_config is None:
-            return _error_response(
-                404, f"Route '{actual_path}' not found in database '{database_name}'"
-            )
-        route_config = merge_query_params(route_config, database_config)
-        path_params = extract_path_parameters(actual_path, route_config.get("route", ""))
-
-        early_response = _early_query_response(route_config, query_params, path_params, cookies)
-        if early_response is not None:
-            return early_response
-
-        headers = _route_headers(route_config, path_params, (database_name, version))
-        if isinstance(headers, ProxyResponse):
-            return headers
-
-        backend = self._select_backend(database_name, version, database_config)
-        query = _build_query(
-            route_config, database_config, path_params, query_params,
-            filtered_cookies, multi_query_params, backend.marker
+        query = await self._prepare_database_query(
+            database_name, path, query_params, cookies, multi_query_params
         )
         if isinstance(query, ProxyResponse):
             return query
-        sql, values = query
-        response = await _run_query(backend, sql, values, (database_name, version))
+        response = await _run_query(query)
         if response.error_message is None:
-            response.headers.update(headers)
+            response.headers.update(query.headers)
         return response
 
     def is_remote_name(self, name: str) -> bool:
@@ -603,6 +609,122 @@ class RouteMapper:
             return result
         except Exception as e:
             return _error_response(500, f"Sync wrapper error: {str(e)}")
+
+    async def _prepare_database_query(
+            self,
+            database_name: str,
+            path: str,
+            query_params: Dict[str, str],
+            cookies: Dict[str, str],
+            multi_query_params: Dict[str, List[str]],
+            internal_call: bool = False) -> Union[ProxyResponse, "_DatabaseQuery"]:
+        """Run every step of a database request up to the query itself.
+
+        The steps are: find the config and route, check authentication,
+        return an early response, run the route's resolvers, fill its headers
+        and build its SQL. A resolver's call to its target is an internal
+        call: it accepts an internal database and skips authentication.
+
+        Args:
+            database_name: Name of the database; the caller checks visibility.
+            path: Path after the database name.
+            query_params: Query parameters, one value per key.
+            cookies: Request cookies; empty for an internal call.
+            multi_query_params: Query parameters with every repeated value.
+            internal_call: Whether a resolver makes the call.
+
+        Returns:
+            The query to run, or a listing or error response.
+        """
+        located = self._locate_database_request(database_name, path)
+        if isinstance(located, ProxyResponse):
+            return located
+        version, actual_path, database_config = located
+        key = (database_name, version)
+
+        call_cookies = _call_cookies(cookies, database_config, internal_call)
+        if isinstance(call_cookies, ProxyResponse):
+            return call_cookies
+
+        if not actual_path:
+            routes = database_config.get("routes", [])
+            route_list = [r.get("route", "") for r in routes if isinstance(r, dict)]
+            return _json_response({"routes": route_list})
+
+        matched = _match_route(database_name, actual_path, database_config)
+        if isinstance(matched, ProxyResponse):
+            return matched
+        route_config, path_params = matched
+
+        early_response = _early_query_response(route_config, query_params, path_params, cookies)
+        if early_response is not None:
+            return early_response
+
+        resolved = await self._run_resolvers(route_config, database_config, path_params,
+                                             query_params, key)
+        if isinstance(resolved, ProxyResponse):
+            return resolved
+
+        headers = _route_headers(route_config, {**path_params, **resolved}, key)
+        if isinstance(headers, ProxyResponse):
+            return headers
+
+        backend = self._select_backend(database_name, version, database_config)
+        built = _build_query(
+            route_config, database_config, path_params, query_params,
+            call_cookies, multi_query_params, backend.marker, resolved, key
+        )
+        if isinstance(built, ProxyResponse):
+            return built
+        return _DatabaseQuery(key, backend, built[0], built[1], headers)
+
+    async def _run_resolvers(
+            self,
+            route_config: Dict[str, Any],
+            database_config: Dict[str, Any],
+            path_params: Dict[str, str],
+            query_params: Dict[str, str],
+            key: DatabaseKey) -> Union[ProxyResponse, Dict[str, Optional[str]]]:
+        """Run the route's resolvers in resolve: order; the first failure stops the request.
+
+        Returns:
+            Resolver values by ``<resolver>.<column>`` name, or the error
+            response of the first resolver that failed.
+        """
+        resolvers = get_resolvers(database_config)
+        values = request_values(route_config, path_params, query_params)
+        resolved: Dict[str, Optional[str]] = {}
+        for name in route_config.get(RESOLVE_KEY, []):
+            resolver = resolvers[name]
+            try:
+                row = await self._resolve(resolver, values)
+            except ResolverError as error:
+                _log_resolver_failure(key, route_config, name, resolver, error.reason)
+                return _error_response(error.status_code,
+                                       RESOLVER_FAILURE_MESSAGES[error.status_code])
+            resolved.update({f"{name}.{column}": value for column, value in row.items()})
+        return resolved
+
+    async def _resolve(
+            self, resolver: Dict[str, Any],
+            values: Dict[str, str]) -> Dict[str, Optional[str]]:
+        """Call a resolver's target and return its row's bound columns as text.
+
+        Raises:
+            ResolverError: If the target fails or its result is not one usable row.
+        """
+        target_name, _, target_path = resolver[VIA_KEY].partition("/")
+        params = fill_params(resolver.get(PARAMS_KEY, {}), values)
+        query = await self._prepare_database_query(
+            target_name, target_path, params, {}, {}, internal_call=True
+        )
+        if isinstance(query, ProxyResponse):
+            raise _target_failure(query)
+        fetched = await _fetch_rows(query)
+        if isinstance(fetched, ProxyResponse):
+            raise _target_failure(fetched)
+        columns, rows = fetched
+        return select_row(columns, rows, resolver[BIND_KEY])
 
     def _postgres_configs(self) -> Dict[DatabaseKey, Dict[str, Any]]:
         """Collect PostgreSQL configs by (database name, version)."""
@@ -762,6 +884,89 @@ class RouteMapper:
 #
 # INTERNAL
 #
+@dataclass
+class _DatabaseQuery:
+    """A database query that is ready to run.
+
+    Attributes:
+        key: The database and version.
+        backend: The backend that runs the query.
+        sql: SQL text with markers.
+        values: Values for the markers.
+        headers: Route headers for a successful response.
+    """
+
+    key: DatabaseKey
+    backend: DatabaseBackend
+    sql: str
+    values: List[Optional[str]]
+    headers: Dict[str, str]
+
+
+def _check_all_resolver_targets(
+        databases: Dict[str, Dict[Optional[str], Dict[str, Any]]],
+        internal_names: Iterable[str],
+        remote_names: List[str]) -> None:
+    """Check every resolver of every database version against its target."""
+    internal = set(internal_names)
+    for name, configs in databases.items():
+        for version, config in configs.items():
+            check_resolver_targets((name, version), config, databases, internal, remote_names)
+
+
+def _call_cookies(
+        cookies: Dict[str, str], database_config: Dict[str, Any],
+        internal_call: bool) -> Union[ProxyResponse, Dict[str, str]]:
+    """Return the cookies the query can use, or an authentication error response.
+
+    A resolver's call skips authentication. An injected cookie whose
+    environment variable is not set is left out of that call, so SQL that
+    uses it fails instead of using an empty value.
+    """
+    filtered = filter_cookies_by_config(cookies, database_config)
+    if internal_call:
+        unset = unset_injected_cookies(database_config)
+        return {name: value for name, value in filtered.items() if name not in unset}
+    auth_error = _check_database_auth(filtered, database_config)
+    return auth_error if auth_error is not None else filtered
+
+
+# A matched route, merged with top-level query_params, and its path values.
+_RouteMatch = Tuple[Dict[str, Any], Dict[str, str]]
+
+
+def _match_route(
+        database_name: str, path: str,
+        database_config: Dict[str, Any]) -> Union[ProxyResponse, _RouteMatch]:
+    """Return the matching route, merged with top-level query_params, and its path values."""
+    route_config = find_database_route(path, database_config)
+    if route_config is None:
+        return _error_response(404, f"Route '{path}' not found in database '{database_name}'")
+    route_config = merge_query_params(route_config, database_config)
+    return route_config, extract_path_parameters(path, route_config.get("route", ""))
+
+
+def _target_failure(response: ProxyResponse) -> ResolverError:
+    """Turn a target's response into a resolver error; only 503 keeps its status.
+
+    The target answers with a response instead of rows when it fails, or when
+    its route returns an early response such as a fixed ``response:``.
+    """
+    status_code = 503 if response.status_code == 503 else 500
+    detail = response.error_message or "a response instead of rows"
+    return ResolverError(status_code, f"the target returned {response.status_code} ({detail})")
+
+
+def _log_resolver_failure(
+        key: DatabaseKey, route_config: Dict[str, Any], name: str,
+        resolver: Dict[str, Any], reason: str) -> None:
+    """Log a resolver failure with the database, route, resolver, target and reason."""
+    logger.warning(
+        "%s, route '%s', resolver '%s' (via %s): %s",
+        database_label(key), route_config.get("route"), name, resolver[VIA_KEY], reason,
+    )
+
+
 def _load_checked_database(
         database_name: str,
         main_config: Dict[str, Any],
@@ -900,14 +1105,14 @@ def _early_query_response(
 
 def _route_headers(
         route_config: Dict[str, Any],
-        path_params: Dict[str, str],
+        values: Dict[str, Optional[str]],
         key: DatabaseKey) -> Union[ProxyResponse, Dict[str, str]]:
-    """Fill the route's headers: from its path values, or return 500 Resolver error.
+    """Fill the route's headers: from its path and resolver values, or return 500 Resolver error.
 
     The log names the database, the route, the header and the reason, not the value.
     """
     try:
-        return fill_route_headers(route_config.get(HEADERS_KEY, {}), path_params)
+        return fill_route_headers(route_config.get(HEADERS_KEY, {}), values)
     except HeaderValueError as error:
         logger.warning("%s, route '%s': %s", database_label(key), route_config.get("route"), error)
         return _error_response(500, RESOLVER_ERROR_MESSAGE)
@@ -920,13 +1125,24 @@ def _build_query(
         query_params: Dict[str, str],
         cookies: Dict[str, str],
         multi_query_params: Dict[str, List[str]],
-        marker: str) -> Union[ProxyResponse, Tuple[str, List[Optional[str]]]]:
-    """Build SQL and bound values for the backend, or return a selection/build error."""
+        marker: str,
+        resolved: Dict[str, Optional[str]],
+        key: DatabaseKey) -> Union[ProxyResponse, Tuple[str, List[Optional[str]]]]:
+    """Build SQL and bound values for the backend, or return a selection/build error.
+
+    A templated table URI that fails a check gives 500 Resolver error.
+    """
     try:
         return build_sql_query(
             route_config, database_config, path_params, query_params,
-            cookies, multi_query_params, marker=marker
+            cookies, multi_query_params, marker=marker, resolved=resolved
         )
+    except TableUriError as error:
+        table_def = database_config["tables"][error.table]
+        name = table_value_name(table_def).partition(".")[0]
+        resolver = get_resolvers(database_config)[name]
+        _log_resolver_failure(key, route_config, name, resolver, str(error))
+        return _error_response(500, RESOLVER_ERROR_MESSAGE)
     except SqlSelectionError as e:
         return ProxyResponse(
             status_code=e.status_code,
@@ -938,23 +1154,30 @@ def _build_query(
         return _error_response(500, "SQL query error")
 
 
-async def _run_query(
-        backend: DatabaseBackend, sql: str, values: List[Optional[str]],
-        key: DatabaseKey) -> ProxyResponse:
-    """Return query rows as JSON, 503 for unavailability or 500 for other errors.
+async def _run_query(query: _DatabaseQuery) -> ProxyResponse:
+    """Return query rows as JSON, 503 for unavailability or 500 for other errors."""
+    fetched = await _fetch_rows(query)
+    if isinstance(fetched, ProxyResponse):
+        return fetched
+    columns, rows = fetched
+    return _json_response([
+        {column: _make_json_safe(value) for column, value in zip(columns, row)}
+        for row in rows
+    ])
+
+
+async def _fetch_rows(
+        query: _DatabaseQuery) -> Union[ProxyResponse, Tuple[List[str], List[Tuple[Any, ...]]]]:
+    """Run a query and return its columns and rows, or a 503 or 500 error response.
 
     Error responses exclude driver diagnostics. Unexpected pool closure is logged.
     """
     try:
-        columns, rows = await backend.execute(sql, values)
-        return _json_response([
-            {column: _make_json_safe(value) for column, value in zip(columns, row)}
-            for row in rows
-        ])
+        return await query.backend.execute(query.sql, query.values)
     except DatabaseUnavailableError:
-        return _error_response(503, "Database unavailable")
+        return _error_response(503, DATABASE_UNAVAILABLE_MESSAGE)
     except DatabaseLifecycleError:
-        logger.exception("%s: connection pool closed unexpectedly", database_label(key))
+        logger.exception("%s: connection pool closed unexpectedly", database_label(query.key))
         return _error_response(500, "Database query error")
     except Exception:
         return _error_response(500, "Database query error")

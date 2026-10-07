@@ -3,8 +3,9 @@
 Route Headers Module for API Dock
 
 Checks and fills the ``headers:`` of database routes. Each header value is a
-text template whose ``{{variables}}`` are path variables of the route. Values
-are written as text; they are not quoted or changed.
+text template whose ``{{variables}}`` are path variables of the route or
+values of the resolvers that the route lists. Values are written as text; they
+are not quoted or changed.
 
 License: BSD 3-Clause
 
@@ -14,7 +15,7 @@ License: BSD 3-Clause
 # IMPORTS
 #
 import re
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 
 #
@@ -58,31 +59,35 @@ class HeaderValueError(ValueError):
         super().__init__(f"header '{header}': {reason}")
 
 
-def check_route_headers(route_config: Dict[str, Any]) -> None:
+def check_route_headers(
+        route_config: Dict[str, Any], resolver_values: Iterable[str] = ()) -> None:
     """Check a route's ``headers:`` names and templates.
 
     Args:
         route_config: Route configuration with a ``route`` pattern.
+        resolver_values: ``<resolver>.<column>`` names that the route's
+            headers can use.
 
     Raises:
         ValueError: If headers is not a mapping, a name is not an HTTP token or
             is reserved, a template is not text, or a template uses a name that
-            is not a path variable of the route.
+            is not a path variable of the route or one of resolver_values.
     """
     if HEADERS_KEY not in route_config:
         return
     headers = route_config[HEADERS_KEY]
     if not isinstance(headers, dict):
         raise ValueError("headers must be a mapping of header names to text")
-    path_variables = route_path_variables(route_config.get("route", ""))
+    allowed = set(route_path_variables(route_config.get("route", ""))) | set(resolver_values)
     for name, template in headers.items():
         _check_header_name(name)
         if not isinstance(template, str):
             raise ValueError(f"headers.{name} must be text")
         for variable in VARIABLE_PATTERN.findall(template):
-            if variable not in path_variables:
+            if variable not in allowed:
                 raise ValueError(
-                    f"headers.{name}: '{{{{{variable}}}}}' is not a path variable of the route"
+                    f"headers.{name}: '{{{{{variable}}}}}' is not a path variable of the route "
+                    "or a value of a resolver in its resolve:"
                 )
 
 

@@ -19,11 +19,31 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import yaml
 
 from api_dock.postgres_config import check_postgres_config
-from api_dock.route_headers import HEADERS_KEY, check_route_headers
+from api_dock.resolvers import (
+    BIND_KEY,
+    RESOLVE_KEY,
+    RESOLVERS_KEY,
+    check_params_declared,
+    check_resolve_list,
+    check_resolvers,
+    check_table_value,
+    check_value_uses,
+    get_resolvers,
+    resolver_values_in,
+)
+from api_dock.route_headers import HEADERS_KEY, check_route_headers, route_path_variables
 from api_dock.sql_template_check import (
     check_comment_at_end,
     check_commented_variables,
     check_quoted_variables,
+)
+from api_dock.templated_tables import (
+    TEMPLATED_TABLE_KEYS,
+    check_table,
+    is_templated_table,
+    table_names_in,
+    table_sources,
+    table_value_name,
 )
 
 
@@ -365,8 +385,10 @@ def is_internal_database(database_config: Dict[str, Any]) -> bool:
 def needs_startup_snapshot(database_config: Any) -> bool:
     """Return whether a config uses a setting that is read only at startup.
 
-    These settings are ``internal:`` and route ``headers:``. A key counts even
-    if its value is malformed, so a live config can't start to use one.
+    These settings are ``internal:``, ``resolvers:``, route ``resolve:`` and
+    ``headers:``, and templated tables with their ``format:``, ``files:`` and
+    ``allow:`` keys. A key counts even if its value is malformed, so a live
+    config can't start to use one.
 
     Args:
         database_config: Database config as loaded from its file.
@@ -376,12 +398,37 @@ def needs_startup_snapshot(database_config: Any) -> bool:
     """
     if not isinstance(database_config, dict):
         return False
-    if INTERNAL_KEY in database_config:
+    if INTERNAL_KEY in database_config or RESOLVERS_KEY in database_config:
+        return True
+    tables = database_config.get('tables')
+    if isinstance(tables, dict) and any(_is_startup_table(table) for table in tables.values()):
         return True
     routes = database_config.get('routes')
     if not isinstance(routes, list):
         return False
-    return any(isinstance(route, dict) and HEADERS_KEY in route for route in routes)
+    return any(
+        isinstance(route, dict) and (HEADERS_KEY in route or RESOLVE_KEY in route)
+        for route in routes
+    )
+
+
+def route_sql_leaves(route_config: Dict[str, Any], database_config: Dict[str, Any]) -> List[str]:
+    """List the base SQL templates a route can run, with [[query]] references expanded.
+
+    Args:
+        route_config: Route configuration.
+        database_config: Database configuration with its queries.
+
+    Returns:
+        One SQL template per selector leaf.
+    """
+    leaves = [
+        node if isinstance(node, str) else node['sql']
+        for _, node in _selector_leaves(route_config.get('sql', ''), 'sql')
+    ]
+    return [
+        _expand_named_query(leaf, database_config) for leaf in leaves if isinstance(leaf, str)
+    ]
 
 
 def check_database_config(database_config: Dict[str, Any]) -> None:
@@ -395,6 +442,9 @@ def check_database_config(database_config: Dict[str, Any]) -> None:
     for variables because their values are written into the SQL text. No
     template may end inside a comment. ``internal:`` must be true or false,
     and route ``headers:`` are checked with check_route_headers().
+    ``resolvers:``, templated tables and each route's resolver values are
+    checked too. Checks that need the resolver's target are in
+    resolver_targets.
 
     Args:
         database_config: Database configuration, already merged with the main config.
@@ -404,7 +454,9 @@ def check_database_config(database_config: Dict[str, Any]) -> None:
             route (or query) and the template's location.
     """
     _check_internal(database_config)
+    check_resolvers(database_config)
     is_postgres = get_backend_name(database_config) == POSTGRES_BACKEND
+    _check_tables(database_config, is_postgres)
     if is_postgres:
         check_postgres_config(database_config)
     bound_checks, append_checks = _template_checks(is_postgres)
@@ -415,9 +467,10 @@ def check_database_config(database_config: Dict[str, Any]) -> None:
     for index, route_config in enumerate(database_config.get('routes', [])):
         try:
             validate_route_config(route_config)
-            check_route_headers(route_config)
             merged = merge_query_params(route_config, database_config)
             validate_route_config(merged)
+            _check_route_resolvers(merged, database_config)
+            check_route_headers(route_config, _header_resolver_values(merged, database_config))
             for location, template in _bound_templates(merged):
                 _check_template(location, template, bound_checks)
             for location, template in _append_templates(merged):
@@ -460,6 +513,130 @@ def _check_internal(database_config: Dict[str, Any]) -> None:
     value = database_config.get(INTERNAL_KEY, False)
     if not isinstance(value, bool):
         raise ValueError(f"internal: must be true or false, not {value!r}")
+
+
+def _is_startup_table(table_def: Any) -> bool:
+    """Return whether a table is templated or has a templated-table key."""
+    if is_templated_table(table_def):
+        return True
+    return isinstance(table_def, dict) and any(key in table_def for key in TEMPLATED_TABLE_KEYS)
+
+
+def _check_tables(database_config: Dict[str, Any], is_postgres: bool) -> None:
+    """Check the templated-table rules of every table, and the resolver each one uses."""
+    resolvers = get_resolvers(database_config)
+    for table_name, table_def in database_config.get('tables', {}).items():
+        try:
+            check_table(table_name, table_def, is_postgres)
+            if is_templated_table(table_def):
+                check_table_value(table_def, table_value_name(table_def), resolvers)
+        except ValueError as error:
+            raise ValueError(f"tables.{table_name}: {error}") from error
+
+
+def _check_route_resolvers(route_config: Dict[str, Any], database_config: Dict[str, Any]) -> None:
+    """Check a route's resolve: list and every resolver value it uses.
+
+    Values count in bound SQL (after [[query]] expansion), in headers and in
+    the URI of each templated table that the route's SQL names. sql_append
+    templates can't use a value or read a templated table, because their
+    values are written into the SQL text.
+
+    Args:
+        route_config: Route configuration, merged with top-level query_params.
+        database_config: Database configuration.
+
+    Raises:
+        ValueError: If a check fails. The message gives the reason.
+    """
+    resolvers = get_resolvers(database_config)
+    check_resolve_list(route_config, resolvers)
+    check_params_declared(
+        route_config, resolvers, route_path_variables(route_config.get('route', ''))
+    )
+    sql_templates = _value_templates(route_config, database_config)
+    check_value_uses(sql_templates + _header_templates(route_config), route_config, resolvers)
+    _check_table_uses(route_config, database_config, sql_templates)
+    for location, template in _append_templates(route_config):
+        if isinstance(template, str):
+            _check_append_template(location, template, database_config, resolvers)
+
+
+def _check_table_uses(
+        route_config: Dict[str, Any], database_config: Dict[str, Any],
+        templates: List[str]) -> None:
+    """Refuse a route that reads a templated table without listing its resolver."""
+    tables = database_config.get('tables', {})
+    listed = route_config.get(RESOLVE_KEY, [])
+    for template in templates:
+        for table_name in table_names_in(template):
+            table_def = tables.get(table_name)
+            if not is_templated_table(table_def):
+                continue
+            value_name = table_value_name(table_def)
+            resolver = value_name.partition('.')[0]
+            if resolver not in listed:
+                raise ValueError(
+                    f"reads table '{table_name}', which uses '{{{{{value_name}}}}}', but does "
+                    f"not list '{resolver}' in resolve:"
+                )
+
+
+def _check_append_template(
+        location: str, template: str, database_config: Dict[str, Any],
+        resolvers: Dict[str, Dict[str, Any]]) -> None:
+    """Refuse a resolver value or a templated table source in an sql_append template."""
+    values = resolver_values_in(template, resolvers)
+    if values:
+        resolver, column = values[0]
+        raise ValueError(
+            f"{location}: can't use the resolver value '{{{{{resolver}.{column}}}}}'"
+        )
+    tables = database_config.get('tables', {})
+    for table_name in table_sources(template):
+        if is_templated_table(tables.get(table_name)):
+            raise ValueError(f"{location}: can't read the templated table '{table_name}'")
+
+
+def _header_templates(route_config: Dict[str, Any]) -> List[str]:
+    """List a route's header templates; check_route_headers() checks their shape."""
+    headers = route_config.get(HEADERS_KEY, {})
+    if not isinstance(headers, dict):
+        return []
+    return [template for template in headers.values() if isinstance(template, str)]
+
+
+def _header_resolver_values(
+        route_config: Dict[str, Any], database_config: Dict[str, Any]) -> List[str]:
+    """List the ``<resolver>.<column>`` names that a route's headers can use."""
+    resolvers = get_resolvers(database_config)
+    return [
+        f"{name}.{column}"
+        for name in route_config.get(RESOLVE_KEY, [])
+        for column in resolvers[name].get(BIND_KEY, [])
+    ]
+
+
+def _value_templates(route_config: Dict[str, Any], database_config: Dict[str, Any]) -> List[str]:
+    """List a route's bound SQL templates, with [[query]] references expanded."""
+    return [
+        _expand_named_query(template, database_config)
+        for _, template in _bound_templates(route_config)
+        if isinstance(template, str)
+    ]
+
+
+def _expand_named_query(template: str, database_config: Dict[str, Any]) -> str:
+    """Return the named query's text if template is one [[query]] reference.
+
+    This is the rule that sql_builder uses for a route's base SQL.
+    """
+    stripped = template.strip()
+    if stripped.startswith("[[") and stripped.endswith("]]"):
+        query = database_config.get('queries', {}).get(stripped[2:-2])
+        if isinstance(query, str):
+            return query
+    return template
 
 
 def _validate_query_param(param_item: Any) -> None:

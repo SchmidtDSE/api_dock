@@ -12,6 +12,7 @@ License: BSD 3-Clause
 # IMPORTS
 #
 import re
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from api_dock.database_config import (
@@ -19,6 +20,14 @@ from api_dock.database_config import (
     POSTGRES_BACKEND,
     get_named_query,
     get_table_definition,
+)
+from api_dock.templated_tables import (
+    TABLE_REFERENCE_PATTERN,
+    bound_uri,
+    is_table_source,
+    is_templated_table,
+    table_source,
+    table_value_name,
 )
 
 
@@ -84,13 +93,17 @@ def build_sql_query(
         query_params: Optional[Dict[str, str]] = None,
         cookies: Optional[Dict[str, str]] = None,
         multi_query_params: Optional[Dict[str, List[str]]] = None,
-        marker: str = SQL_MARKER) -> Tuple[str, List[Optional[str]]]:
+        marker: str = SQL_MARKER,
+        resolved: Optional[Dict[str, Optional[str]]] = None) -> Tuple[str, List[Optional[str]]]:
     """Build SQL query text and the values to bind to its markers.
 
     Each ``{{var}}`` in the base SQL, named queries, and WHERE fragments is
     written as a marker and its value is added to the returned list, so
     caller-supplied values never become SQL text. ``sql_append`` values are the
     exception: they pass an allowed-character check and are written into the text.
+
+    A templated table in a FROM or JOIN position is written as a reader call,
+    such as ``read_parquet(?) AS name``, and its checked URI is bound there.
 
     Args:
         route_config: Route configuration dictionary with sql and query_params.
@@ -105,12 +118,15 @@ def build_sql_query(
         marker: Text written for each bound value: ``?`` for DuckDB,
             ``%s`` for PostgreSQL. With ``%s``, each literal ``%`` in the
             config's SQL is written ``%%``.
+        resolved: Resolver values by ``<resolver>.<column>`` name. They
+            replace any request value with the same name.
 
     Returns:
         Tuple of ``(sql, values)``: the SQL text with markers and the
         values in the order the markers appear. A None value is SQL NULL.
 
     Raises:
+        TableUriError: If a templated table's URI fails a check.
         ValueError: If a referenced table or query is not defined in config, a
             bound ``{{var}}`` has no value, or an ``sql_append`` value fails the
             allowed-character check.
@@ -123,6 +139,8 @@ def build_sql_query(
         cookies = {}
     if multi_query_params is None:
         multi_query_params = {}
+    if resolved is None:
+        resolved = {}
 
     # Resolve the base SQL via the selector. ``sql`` may be a plain string or a
     # rule-list decision tree; selection is driven by path, query, and cookie
@@ -139,10 +157,13 @@ def build_sql_query(
     # appear in the final SQL, so the value list stays in marker order.
     # Strip whitespace/newlines from base SQL (YAML block scalars add trailing \n)
     base_sql = _substitute_table_references(sql_template, database_config).strip()
-    sql_query, values = _bind_variables(base_sql, params, marker=marker)
+    sql_query, values = _bind_variables(
+        base_sql, params, marker=marker, fixed=_fixed_values(base_sql, database_config, resolved)
+    )
 
     where_fragments = build_where_clause_from_params(
-        route_config, query_params, path_params, multi_query_params, cookies, marker
+        route_config, query_params, path_params, multi_query_params, cookies, marker,
+        database_config, resolved
     )
     sql_query, values = _add_where_fragments(
         sql_query, values, where_fragments, database_config
@@ -302,7 +323,9 @@ def build_where_clause_from_params(
         path_params: Dict[str, str],
         multi_query_params: Optional[Dict[str, List[str]]] = None,
         cookies: Optional[Dict[str, str]] = None,
-        marker: str = SQL_MARKER
+        marker: str = SQL_MARKER,
+        database_config: Optional[Dict[str, Any]] = None,
+        resolved: Optional[Dict[str, Optional[str]]] = None
 ) -> List[Tuple[str, List[Optional[str]]]]:
     """Build WHERE clause fragments, with their bound values, from parameter configurations.
 
@@ -317,6 +340,10 @@ def build_where_clause_from_params(
             of the single-value ``sql`` template.
         cookies: Dictionary of cookie values, available as ``{{cookies.<name>}}``.
         marker: Text written for each bound value.
+        database_config: Database configuration. If given, templated table
+            sources in fragments are written as reader calls with bound URIs.
+            Other [[table]] references are left for the caller.
+        resolved: Resolver values; they replace request values with the same name.
 
     Returns:
         List of ``(fragment, values)`` pairs in config order. Fragments are to be
@@ -329,6 +356,7 @@ def build_where_clause_from_params(
         multi_query_params = {}
     if cookies is None:
         cookies = {}
+    binding = _FragmentBinding(marker, database_config or {}, resolved or {})
 
     query_param_configs = route_config.get('query_params', [])
     where_fragments = []
@@ -360,7 +388,7 @@ def build_where_clause_from_params(
         if ('multivalue_sql' in param_config and param_values is not None
                 and len(param_values) > 1):
             _append_bound_fragment(
-                where_fragments, param_config['multivalue_sql'], all_params, marker,
+                where_fragments, param_config['multivalue_sql'], all_params, binding,
                 {param_name: param_values}
             )
             continue
@@ -371,7 +399,7 @@ def build_where_clause_from_params(
             if param_value in conditional_config and 'sql' in conditional_config[param_value]:
                 sql_fragment = conditional_config[param_value]['sql']
                 if sql_fragment:  # Skip empty SQL fragments
-                    _append_bound_fragment(where_fragments, sql_fragment, all_params, marker)
+                    _append_bound_fragment(where_fragments, sql_fragment, all_params, binding)
             continue
 
         # Handle regular SQL parameters
@@ -383,11 +411,11 @@ def build_where_clause_from_params(
                 # Use provided value or default
                 effective_value = param_value if param_value is not None else param_config['default']
                 effective_params = {**all_params, param_name: str(effective_value)}
-                _append_bound_fragment(where_fragments, sql_fragment, effective_params, marker)
+                _append_bound_fragment(where_fragments, sql_fragment, effective_params, binding)
 
             # Handle optional parameters (only include if provided)
             elif param_value is not None:
-                _append_bound_fragment(where_fragments, sql_fragment, all_params, marker)
+                _append_bound_fragment(where_fragments, sql_fragment, all_params, binding)
 
     return where_fragments
 
@@ -529,15 +557,54 @@ def extract_path_parameters(path: str, pattern: str) -> Dict[str, str]:
     return params
 
 
+def request_values(
+        route_config: Dict[str, Any],
+        path_params: Dict[str, str],
+        query_params: Dict[str, str]) -> Dict[str, str]:
+    """Return path and query values, with query-param defaults for params not given.
+
+    Args:
+        route_config: Route configuration dictionary with query_params section.
+        path_params: Dictionary of path parameters.
+        query_params: Dictionary of query parameters from URL.
+
+    Returns:
+        Values by name.
+    """
+    return _apply_default_values(route_config, {**path_params, **query_params})
+
+
 #
 # INTERNAL
 #
-def _substitute_table_references(sql: str, database_config: Dict[str, Any]) -> str:
+@dataclass
+class _FragmentBinding:
+    """What binding a WHERE fragment needs besides its own values.
+
+    Attributes:
+        marker: Text written for each bound value.
+        database_config: Database configuration, for templated tables.
+        resolved: Resolver values, which replace request values.
+    """
+
+    marker: str
+    database_config: Dict[str, Any]
+    resolved: Dict[str, Optional[str]]
+
+
+def _substitute_table_references(
+        sql: str, database_config: Dict[str, Any], templated_only: bool = False) -> str:
     """Substitute [[table_name]] references with table file paths in FROM clauses.
+
+    A templated table in a FROM or JOIN position becomes a reader call whose
+    argument is the variable ``{{[[table_name]]}}``. _fixed_values() supplies
+    its value. A config template can't use that variable, because each
+    [[table_name]] in it is replaced first.
 
     Args:
         sql: SQL query template with [[table_name]] placeholders.
         database_config: Database configuration dictionary.
+        templated_only: Replace only templated table references.
 
     Returns:
         SQL with table references substituted.
@@ -545,30 +612,63 @@ def _substitute_table_references(sql: str, database_config: Dict[str, Any]) -> s
     Raises:
         ValueError: If a referenced table is not defined in config.
     """
-    # Find all [[table_name]] references
-    table_pattern = r'\[\[([^\]]+)\]\]'
+    tables = database_config.get('tables', {})
 
-    def replace_table_reference(match):
+    def replace_table_reference(match: re.Match[str]) -> str:
         table_name = match.group(1)
-        table_path = get_table_definition(table_name, database_config)
+        table_def = tables.get(table_name) if isinstance(tables, dict) else None
+        if is_templated_table(table_def):
+            if is_table_source(sql, match.start()):
+                return table_source(table_name, table_def, f"[[{table_name}]]")
+            return _table_alias(table_name, database_config)
+        if templated_only:
+            return match.group(0)
 
+        table_path = get_table_definition(table_name, database_config)
         if table_path is None:
             raise ValueError(f"Table '{table_name}' not found in database configuration")
 
-        # Check context: if preceded by FROM or JOIN, use full reference
-        # Otherwise, just use the table name (alias)
-        start_pos = match.start()
-        context_before = sql[max(0, start_pos-20):start_pos].upper()
-
-        if 'FROM' in context_before or 'JOIN' in context_before:
-            # Full reference for FROM/JOIN clauses
+        # A reference shortly after FROM or JOIN is a table source; elsewhere
+        # (SELECT, WHERE) it is the table's alias.
+        if is_table_source(sql, match.start()):
             return _full_table_reference(table_name, table_path, database_config)
-        else:
-            # Just the table name (alias) for other contexts like SELECT
-            return _table_alias(table_name, database_config)
+        return _table_alias(table_name, database_config)
 
-    result_sql = re.sub(table_pattern, replace_table_reference, sql)
-    return result_sql
+    return TABLE_REFERENCE_PATTERN.sub(replace_table_reference, sql)
+
+
+def _fixed_values(
+        sql: str, database_config: Dict[str, Any],
+        resolved: Dict[str, Optional[str]]) -> Dict[str, Optional[str]]:
+    """Return the values that no request value can replace.
+
+    These are the resolver values and the checked URI of each templated
+    table that the SQL reads.
+
+    Args:
+        sql: SQL after table substitution.
+        database_config: Database configuration dictionary.
+        resolved: Resolver values by ``<resolver>.<column>`` name.
+
+    Returns:
+        Values by variable name.
+
+    Raises:
+        TableUriError: If a table's URI fails a check.
+        ValueError: If a table's resolver value is missing.
+    """
+    values = dict(resolved)
+    tables = database_config.get('tables', {})
+    for name in VARIABLE_PATTERN.findall(sql):
+        if not (name.startswith('[[') and name.endswith(']]')):
+            continue
+        table_name = name[2:-2]
+        table_def = tables[table_name]
+        value_name = table_value_name(table_def)
+        if value_name not in resolved:
+            raise ValueError(f"No value for SQL variable '{value_name}'")
+        values[name] = bound_uri(table_name, table_def, resolved[value_name])
+    return values
 
 
 def _full_table_reference(
@@ -722,7 +822,8 @@ def _bind_variables(
         template: str,
         params: Dict[str, str],
         list_params: Optional[Dict[str, List[str]]] = None,
-        marker: str = SQL_MARKER) -> Tuple[str, List[Optional[str]]]:
+        marker: str = SQL_MARKER,
+        fixed: Optional[Dict[str, Optional[str]]] = None) -> Tuple[str, List[Optional[str]]]:
     """Replace each {{variable}} in an SQL template with a marker and collect its value.
 
     The template is read in one pass, so a value is never scanned for further
@@ -735,6 +836,8 @@ def _bind_variables(
         list_params: Parameters whose placeholder becomes a parenthesized list
             with one marker per value, for use with ``IN``.
         marker: Text written for each bound value.
+        fixed: Values used before list_params and params, such as resolver
+            values, so a request value can't replace them.
 
     Returns:
         Tuple of the SQL text with markers and the values in marker order.
@@ -745,11 +848,16 @@ def _bind_variables(
     """
     if list_params is None:
         list_params = {}
+    if fixed is None:
+        fixed = {}
     values: List[Optional[str]] = []
     template = _escape_percent(template, marker)
 
     def replace_variable(match: re.Match[str]) -> str:
         name = match.group(1)
+        if name in fixed:
+            values.append(fixed[name])
+            return marker
         if name in list_params:
             values.extend(str(value) for value in list_params[name])
             return "(" + ", ".join(marker for _ in list_params[name]) + ")"
@@ -767,18 +875,24 @@ def _append_bound_fragment(
         fragments: List[Tuple[str, List[Optional[str]]]],
         template: str,
         params: Dict[str, str],
-        marker: str,
+        binding: _FragmentBinding,
         list_params: Optional[Dict[str, List[str]]] = None) -> None:
     """Bind a WHERE fragment template and append it unless it is empty.
+
+    Templated table sources are written before binding, so their URIs take
+    their place among the fragment's values. Other [[table]] references are
+    written later, by _add_where_fragments().
 
     Args:
         fragments: List of ``(fragment, values)`` pairs to append to.
         template: SQL fragment template with {{variable}} placeholders.
         params: Dictionary of parameter values.
-        marker: Text written for each bound value.
+        binding: Marker, database config and resolver values.
         list_params: Parameters to expand to a marker list (see _bind_variables).
     """
-    sql, values = _bind_variables(template, params, list_params, marker)
+    template = _substitute_table_references(template, binding.database_config, True)
+    fixed = _fixed_values(template, binding.database_config, binding.resolved)
+    sql, values = _bind_variables(template, params, list_params, binding.marker, fixed)
     sql = sql.strip()
     if sql:
         fragments.append((sql, values))
