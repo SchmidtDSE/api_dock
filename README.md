@@ -1576,7 +1576,7 @@ Publishing a GitHub Release is what publishes to PyPI: `.github/workflows/publis
 
 ```bash
 # 0. Start from a clean, up-to-date main
-export VERSION=0.8.1          # the NEW version, no leading "v"
+export VERSION=0.8.2          # the NEW version, no leading "v"
 git checkout main
 git pull origin main
 git status
@@ -1587,7 +1587,7 @@ git status
 pixi run -e dev pytest -q
 
 # 3. Commit, tag, push (the commit command adds the "v$VERSION: " prefix)
-export COMMIT_MESSAGE='cross-schema unions, schema groups, source columns'
+export COMMIT_MESSAGE='query worker threads, duckdb settings, base_path, proxy host fix'
 git add -A
 git commit -m "v$VERSION: $COMMIT_MESSAGE"
 git tag "v$VERSION"
@@ -1599,17 +1599,14 @@ gh release create "v$VERSION" \
   --title "v$VERSION" \
   --notes "$(cat <<'EOF'
 * new features
-    - Cross-schema unions: `[[*.table]]` reads a table from every shared schema that has it, and `[[*!.table]]` does the same minus the current database/version's schema
-    - Named `schema_groups` in `databases/config.yaml`, used as `[[group.table]]` / `[[group!.table]]` (validated: known schemas only, no group/schema name clashes)
-    - Route `source_columns` adds where each union row came from (`schema`, `name`, `version`), with default names `schema_name`/`name`/`version` or your own; nothing is added by default
-    - `{{self.schema}}`, `{{self.name}}`, and `{{self.version}}` placeholders for the database/version being queried
-    - Together these support an "overlaps" route shared by every database/version (every detection overlapping a given one across all schemas, except that detection itself); shared query params such as `confidence`, `sort`, and `limit` apply to its rows
+    - `settings.duckdb`: DuckDB options applied to every database query (`memory_limit`, `threads`, `temp_directory`, or any other DuckDB setting), plus `max_concurrent_queries` to cap how many queries run at once
+    - `settings.base_path`: also serve the API under a URL prefix (e.g. `/dock`), for a CDN/proxy path such as CloudFront routing `https://app.example.org/dock/*` to API Dock; unprefixed paths keep working
 * bug fixes
-    - A `!` union that removes every member returns no rows (with the right columns) instead of failing, and only the schemas a union actually reads get views and storage credentials
+    - Database queries now run in worker threads, so one slow query no longer stalls every other request (including health checks on `/`)
+    - Remote proxying no longer forwards the client's `Host` (or hop-by-hop) headers upstream; upstream redirects (e.g. trailing-slash 307s) no longer point back at the proxy with the wrong host and path
 * cleanup / other improvements
-    - Added `SqlContext`; `build_sql_query()` / `build_sql_query_with_tables()` accept an optional `context`
-    - README: new "Querying across schemas" section with an overlaps example; example `databases/config.yaml` shows `schema_groups` and a union route
-    - Test suite grew from 198 to 227 tests (`test_schema_unions.py`, including a real DuckDB end-to-end overlaps test)
+    - README: document `base_path`, `duckdb`, and the previously undocumented `follow_redirects` setting
+    - Test suite grew from 227 to 253 tests (`test_runtime_settings.py`)
 EOF
 )"
 
