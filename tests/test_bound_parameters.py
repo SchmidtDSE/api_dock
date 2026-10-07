@@ -101,6 +101,24 @@ class TestBuildSqlQueryValues:
             assert sql == f"SELECT * FROM {TABLE_SQL} WHERE name = ?"
             assert values == [value]
 
+    def test_quoted_variable_is_read_as_variable(self) -> None:
+        """A string literal that is exactly one variable ('{{x}}') is bound like {{x}}."""
+        route = {
+            "route": "r",
+            "sql": "SELECT * FROM [[d]] WHERE kind = '{{kind}}'",
+            "query_params": [{"name": {"sql": "UPPER(name) = UPPER('{{name}}')"}}],
+        }
+        sql, values = build_sql_query(route, DATABASE_CONFIG, {}, {"kind": "a", "name": "b"})
+        assert sql == f"SELECT * FROM {TABLE_SQL} WHERE kind = ? AND UPPER(name) = UPPER(?)"
+        assert values == ["a", "b"]
+
+    def test_variable_inside_longer_string_is_left_as_text(self) -> None:
+        """'%{{x}}%' is not a whole-string variable, so it stays text (and fails at query time)."""
+        route = {"route": "r", "sql": "SELECT * FROM [[d]] WHERE name LIKE '%{{name}}%'"}
+        sql, values = build_sql_query(route, DATABASE_CONFIG, {}, {"name": "b"})
+        assert sql == f"SELECT * FROM {TABLE_SQL} WHERE name LIKE '%?%'"
+        assert values == ["b"]
+
     def test_multivalue_writes_one_marker_per_value(self) -> None:
         """multivalue_sql with n values writes (?, ..., ?) and the values in order."""
         route = {
