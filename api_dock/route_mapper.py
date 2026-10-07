@@ -17,10 +17,10 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 from api_dock.auth import validate_authentication
 from api_dock.config import filter_cookies_by_config, filter_remote_query_params, find_remote_config, find_route_mapping, get_authentication_config, get_database_names, get_remote_names, get_remote_versions, get_settings, is_route_allowed, is_versioned_remote, load_main_config, merge_inherited_config, resolve_latest_version
-from api_dock.database_config import find_database_route, get_database_versions, is_versioned_database, load_database_config, merge_query_params, resolve_latest_database_version
+from api_dock.database_config import apply_shared_definitions, find_database_route, get_database_versions, get_local_table_references, is_versioned_database, load_database_config, load_shared_config, merge_query_params, resolve_latest_database_version, SHARED_CONFIG_KEY
 from api_dock.listings import build_listing, resolve_listing_specs
-from api_dock.sql_builder import build_sql_query, extract_path_parameters, process_query_parameters, SqlSelectionError
-from api_dock.storage_auth import detect_required_backends, extract_table_metadata_by_backend, extract_table_uris, setup_storage_authentication
+from api_dock.sql_builder import build_schema_view_statements, build_sql_query_with_tables, extract_path_parameters, process_query_parameters, SqlSelectionError
+from api_dock.storage_auth import setup_table_storage_authentication
 from api_dock.types import PreparedRequest, ProxyResponse
 
 
@@ -404,6 +404,15 @@ class RouteMapper:
 
         database_config = merge_inherited_config(database_config, self.config)
 
+        try:
+            shared_file = load_shared_config()
+            shared_config = shared_file.get(SHARED_CONFIG_KEY, {})
+            database_config = apply_shared_definitions(
+                database_config, shared_file, database_name, version
+            )
+        except Exception:
+            return _error_response(500, "Shared database configuration error")
+
         filtered_cookies = filter_cookies_by_config(cookies, database_config)
 
         auth_config = get_authentication_config(database_config)
@@ -451,9 +460,9 @@ class RouteMapper:
             return _error_response(500, "Query parameter processing error")
 
         try:
-            sql_query = build_sql_query(
+            sql_query, table_refs = build_sql_query_with_tables(
                 route_config, database_config, path_params, query_params,
-                filtered_cookies, multi_query_params
+                filtered_cookies, multi_query_params, shared_config
             )
         except SqlSelectionError as e:
             return ProxyResponse(
@@ -470,10 +479,14 @@ class RouteMapper:
 
             conn = duckdb.connect(database=':memory:')
 
-            table_uris = extract_table_uris(database_config)
-            required_backends = detect_required_backends(table_uris)
-            backend_metadata = extract_table_metadata_by_backend(database_config)
-            setup_storage_authentication(conn, required_backends, backend_metadata)
+            # Authenticate every local table (as before) plus any shared tables
+            # the query references, then expose [[schema.table]] refs as views.
+            auth_tables = get_local_table_references(database_config, shared_config)
+            local_names = {table.sql_name for table in auth_tables}
+            auth_tables += [ref for ref in table_refs if ref.sql_name not in local_names]
+            setup_table_storage_authentication(conn, auth_tables)
+            for statement in build_schema_view_statements(table_refs):
+                conn.execute(statement)
 
             result = conn.execute(sql_query).fetchall()
             columns = [desc[0] for desc in conn.description] if conn.description else []
