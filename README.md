@@ -1562,7 +1562,7 @@ Publishing a GitHub Release is what publishes to PyPI: `.github/workflows/publis
 
 ```bash
 # 0. Start from a clean, up-to-date main
-export VERSION=0.8.0          # the NEW version, no leading "v"
+export VERSION=0.8.1          # the NEW version, no leading "v"
 git checkout main
 git pull origin main
 git status
@@ -1573,7 +1573,7 @@ git status
 pixi run -e dev pytest -q
 
 # 3. Commit, tag, push (the commit command adds the "v$VERSION: " prefix)
-export COMMIT_MESSAGE='shared database config (schemas, shared routes/query_params, inline slugs) + catalog endpoints'
+export COMMIT_MESSAGE='cross-schema unions, schema groups, source columns'
 git add -A
 git commit -m "v$VERSION: $COMMIT_MESSAGE"
 git tag "v$VERSION"
@@ -1585,23 +1585,17 @@ gh release create "v$VERSION" \
   --title "v$VERSION" \
   --notes "$(cat <<'EOF'
 * new features
-    - Catalog endpoints via the new `expose` main-config section: `/databases`, `/remotes`, and `/sources` list available model/versions (opt-in; `{model, version}` dicts or `"model/version"` strings; custom routes; per-model/version include filters; served with and without a trailing slash; added to `/` metadata)
-    - Shared database config `databases/config.yaml`: define tables once as global tables or named `schema` groups, with shared `meta` defaults (region/public) that a table's own keys override
-    - Version configs can set `schema:`; `[[table]]` resolves from the version's `tables`, then its schema, then shared global tables
-    - Any route can query any schema with `[[schema.table]]`, exposed to DuckDB as real views (so `schema.table.col` and your own aliases work), enabling cross-model queries
-    - Shared `routes` and `query_params` are added to every database/version; a version config's route with the same shape, or query param with the same name, overrides the shared one
-    - `include` / `exclude` on shared routes and query params, plus top-level `route_inclusions`, `route_exclusions`, `query_inclusions`, and `query_exclusions` (`'slug/version'`, `'slug'`, `'slug/*'`, or `{slug, version}`); the same route can be defined more than once with different include/exclude lists
-    - Inline `slugs:` define database/versions in the shared config instead of files (`version`, a `versions` list, or unversioned); files and slugs can be mixed, even for one model, and `latest`, version listings, and `expose` endpoints see both
+    - Cross-schema unions: `[[*.table]]` reads a table from every shared schema that has it, and `[[*!.table]]` does the same minus the current database/version's schema
+    - Named `schema_groups` in `databases/config.yaml`, used as `[[group.table]]` / `[[group!.table]]` (validated: known schemas only, no group/schema name clashes)
+    - Route `source_columns` adds where each union row came from (`schema`, `name`, `version`), with default names `schema_name`/`name`/`version` or your own; nothing is added by default
+    - `{{self.schema}}`, `{{self.name}}`, and `{{self.version}}` placeholders for the database/version being queried
+    - Together these support an "overlaps" route shared by every database/version (every detection overlapping a given one across all schemas, except that detection itself); shared query params such as `confidence`, `sort`, and `limit` apply to its rows
 * bug fixes
-    - Queries that read S3 tables with different `region`/`public` settings now work: each differing table gets its own path-scoped DuckDB secret instead of one connection-wide secret where the last table's settings won
-    - A malformed shared database config returns a clear 500 ("Shared database configuration error") instead of an unhandled error
+    - A `!` union that removes every member returns no rows (with the right columns) instead of failing, and only the schemas a union actually reads get views and storage credentials
 * cleanup / other improvements
-    - Added `TableReference` and `ListingSpec` dataclasses and a new `listings.py` module
-    - `build_sql_query_with_tables()` also returns the tables a query references (`build_sql_query()` is unchanged)
-    - Database version discovery (`is_versioned_database`, `get_database_versions`, `load_database_config`) handles both files and slugs, so routing, listings, and the CLI share one source of truth
-    - S3 secret creation consolidated; `_setup_s3_auth` supports named, scoped secrets
-    - README: new Catalog Endpoints and Shared Tables and Schemas sections, plus a commented example `databases/config.yaml`
-    - Test suite grew from 120 to 198 tests (`test_listings.py`, `test_shared_database_config.py`, including real DuckDB end-to-end tests)
+    - Added `SqlContext`; `build_sql_query()` / `build_sql_query_with_tables()` accept an optional `context`
+    - README: new "Querying across schemas" section with an overlaps example; example `databases/config.yaml` shows `schema_groups` and a union route
+    - Test suite grew from 198 to 227 tests (`test_schema_unions.py`, including a real DuckDB end-to-end overlaps test)
 EOF
 )"
 
