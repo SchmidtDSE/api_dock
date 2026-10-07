@@ -66,6 +66,10 @@ DUCKDB_ENGINE: str = "duckdb"
 POSTGRES_ENGINE: str = "postgres"
 ENGINES: frozenset = frozenset({DUCKDB_ENGINE, POSTGRES_ENGINE})
 
+# Catalog name a PostgreSQL connection is attached under when DuckDB runs a
+# query that reads PostgreSQL tables: api_dock_pg_<connection>.
+POSTGRES_CATALOG_PREFIX: str = "api_dock_pg_"
+
 # A [[...]] reference in a template; group 1 is the text inside the brackets.
 TABLE_REFERENCE_PATTERN: re.Pattern[str] = re.compile(r'\[\[([^\]]+)\]\]')
 
@@ -275,9 +279,36 @@ def build_schema_view_statements(table_refs: List[TableReference]) -> List[str]:
             schemas_created.add(reference.schema)
         statements.append(
             f"CREATE OR REPLACE VIEW {reference.sql_name} AS "
-            f"SELECT * FROM {_escape_sql_value(reference.uri)}"
+            f"SELECT * FROM {duckdb_table_source(reference)}"
         )
     return statements
+
+
+def duckdb_table_source(reference: TableReference) -> str:
+    """What DuckDB reads a table from: a quoted file URI or an attached PostgreSQL table.
+
+    Args:
+        reference: The resolved table.
+
+    Returns:
+        ``'<uri>'`` for a file table, or ``api_dock_pg_<connection>.<schema>.<table>``
+        for a PostgreSQL table (see postgres_catalog).
+    """
+    if reference.is_postgres:
+        return f"{postgres_catalog(reference.connection)}.{reference.uri}"
+    return _escape_sql_value(reference.uri)
+
+
+def postgres_catalog(connection: str) -> str:
+    """The DuckDB catalog a PostgreSQL connection is attached under.
+
+    Args:
+        connection: Connection name (a lower-case identifier).
+
+    Returns:
+        ``api_dock_pg_<connection>``.
+    """
+    return f"{POSTGRES_CATALOG_PREFIX}{connection}"
 
 
 def check_table_references(
@@ -859,6 +890,8 @@ def _substitute_table_references(
             # Full reference for FROM/JOIN clauses
             if reference.qualified:
                 return reference.sql_name
+            if reference.is_postgres:
+                return f"{duckdb_table_source(reference)} AS {reference.name}"
             return f"'{reference.uri}' AS {reference.name}"
         else:
             # Just the table name (alias) for other contexts like SELECT
