@@ -1504,47 +1504,61 @@ pixi run python scripts/hello_world.py
 
 ## Publishing a Release
 
+Publishing a GitHub Release is what publishes to PyPI: `.github/workflows/publish_to_pypi.yml` runs on `release: published`, builds the sdist and wheel with `uv build`, and uploads them using PyPI trusted publishing (OIDC). There's no local build, no API token, and no `twine`. conda-forge follows automatically: its bot opens a version PR on [conda-forge/api_dock-feedstock](https://github.com/conda-forge/api_dock-feedstock), which a maintainer merges.
+
 ```bash
-# 0. Make sure you are on `main` and merged with any changes
+# 0. Start from a clean, up-to-date main
+export VERSION=0.8.0          # the NEW version, no leading "v"
+git checkout main
+git pull origin main
+git status
 
-# 1. Bump version in pyproject.toml
+# 1. Set `version` in pyproject.toml to $VERSION
 
-# 2. Commit everything
+# 2. Run the tests
+pixi run -e dev pytest -q
+
+# 3. Commit, tag, push (the commit command adds the "v$VERSION: " prefix)
+export COMMIT_MESSAGE='shared database config (schemas, shared routes/query_params, inline slugs) + catalog endpoints'
 git add -A
-git commit -m "v0.6.1: stream proxy responses (fix large-response 502 + content-encoding)"
+git commit -m "v$VERSION: $COMMIT_MESSAGE"
+git tag "v$VERSION"
+git push origin main "v$VERSION"
 
-# 3. Tag and push
-git tag v0.6.1
-git push origin main v0.6.1
-
-# 4. Build the wheel (requires the `dev` pixi environment)
-rm -rf dist/
-find . -name "__pycache__" -type d -exec rm -rf {} +
-find . -name "*.pyc" -delete
-pixi run -e dev python -m build --wheel
-ls dist/*.whl
-
-# 5. Create GitHub release with the wheel attached
-gh release create v0.6.1 dist/api_dock-0.6.1-py3-none-any.whl \
-    --title "v0.6.1" --notes "$(cat <<'EOF'
+# 4. Publish the GitHub Release; this triggers the PyPI upload.
+#    Don't use --draft (the workflow only runs on a published release); no wheel needs attaching.
+gh release create "v$VERSION" \
+  --title "v$VERSION" \
+  --notes "$(cat <<'EOF'
 * new features
-    - Remote proxy responses are now streamed (FastAPI) — upstream bytes are piped to the client as they arrive instead of being buffered fully in memory
-    - New `timeout` setting (default 10s) for the upstream request; set to `null`/`false` to disable
+    - Catalog endpoints via the new `expose` main-config section: `/databases`, `/remotes`, and `/sources` list available model/versions (opt-in; `{model, version}` dicts or `"model/version"` strings; custom routes; per-model/version include filters; served with and without a trailing slash; added to `/` metadata)
+    - Shared database config `databases/config.yaml`: define tables once as global tables or named `schema` groups, with shared `meta` defaults (region/public) that a table's own keys override
+    - Version configs can set `schema:`; `[[table]]` resolves from the version's `tables`, then its schema, then shared global tables
+    - Any route can query any schema with `[[schema.table]]`, exposed to DuckDB as real views (so `schema.table.col` and your own aliases work), enabling cross-model queries
+    - Shared `routes` and `query_params` are added to every database/version; a version config's route with the same shape, or query param with the same name, overrides the shared one
+    - `include` / `exclude` on shared routes and query params, plus top-level `route_inclusions`, `route_exclusions`, `query_inclusions`, and `query_exclusions` (`'slug/version'`, `'slug'`, `'slug/*'`, or `{slug, version}`); the same route can be defined more than once with different include/exclude lists
+    - Inline `slugs:` define database/versions in the shared config instead of files (`version`, a `versions` list, or unversioned); files and slugs can be mixed, even for one model, and `latest`, version listings, and `expose` endpoints see both
 * bug fixes
-    - Large upstream responses no longer return 502 — streamed via `StreamingResponse` instead of reading the whole body into memory
-    - `Content-Encoding` (gzip/br/deflate) is now preserved on compressed responses — raw bytes are streamed via `aiter_raw()` so the header stays valid and the client can decompress
-    - Slow upstreams (e.g. large aggregation queries) no longer 502 at httpx's hardcoded 5s default — the timeout is now configurable via the `timeout` setting
+    - Queries that read S3 tables with different `region`/`public` settings now work: each differing table gets its own path-scoped DuckDB secret instead of one connection-wide secret where the last table's settings won
+    - A malformed shared database config returns a clear 500 ("Shared database configuration error") instead of an unhandled error
 * cleanup / other improvements
-    - Added `PreparedRequest` dataclass and split route validation/resolution into `RouteMapper.prepare_remote_request()`; the FastAPI adapter issues the streaming HTTP call
-    - `map_route()` (buffered) retained for the Flask/sync path
-    - Added streaming test coverage (`TestStreamUpstream`, plus `prepare_remote_request` and streaming-header tests) — 53 tests total
+    - Added `TableReference` and `ListingSpec` dataclasses and a new `listings.py` module
+    - `build_sql_query_with_tables()` also returns the tables a query references (`build_sql_query()` is unchanged)
+    - Database version discovery (`is_versioned_database`, `get_database_versions`, `load_database_config`) handles both files and slugs, so routing, listings, and the CLI share one source of truth
+    - S3 secret creation consolidated; `_setup_s3_auth` supports named, scoped secrets
+    - README: new Catalog Endpoints and Shared Tables and Schemas sections, plus a commented example `databases/config.yaml`
+    - Test suite grew from 120 to 198 tests (`test_listings.py`, `test_shared_database_config.py`, including real DuckDB end-to-end tests)
 EOF
 )"
 
-# 6. Publish to PyPI
-pixi run -e dev python -m twine upload dist/*.whl
-```
+# 5. Watch the publish workflow, then confirm PyPI has the new version
+gh run watch "$(gh run list --workflow=publish_to_pypi.yml -L1 --json databaseId -q '.[0].databaseId')" --repo SchmidtDSE/api_dock
+curl -s https://pypi.org/pypi/api-dock/json | python3 -c "import sys,json; print('PyPI latest:', json.load(sys.stdin)['info']['version'])"
 
+# 6. conda-forge: once the bot opens the v$VERSION PR (usually within hours), check that the recipe's
+#    run requirements match pyproject.toml dependencies (the bot only bumps version + sha256), then merge it
+gh pr list --repo conda-forge/api_dock-feedstock --state open
+```
 
 ---
 
