@@ -16,6 +16,7 @@ License: BSD 3-Clause
 #
 # IMPORTS
 #
+import json
 from pathlib import Path
 from typing import Any, Dict, Iterator, List
 
@@ -128,6 +129,64 @@ class TestMixedQueries:
         assert mapper.duckdb_backend.connections.keys() == {"core", "core2"}
 
 
+class TestNativeUnions:
+    """Unions whose members are all on one connection run natively on PostgreSQL."""
+
+    UNION = "SELECT u.* FROM [[*.detections]] u"
+    OVERLAPS = OVERLAPS_SQL.replace("d.schema_name, d.name", "d.schema_name")
+
+    @pytest.fixture
+    def native_client(self, tmp_path: Path, database: Dict[str, str]) -> Iterator[TestClient]:
+        """Both PostgreSQL schemas on the ``core`` connection; no Parquet."""
+        config_dir = tmp_path / "api_dock_config"
+        (config_dir / "databases" / "models").mkdir(parents=True)
+        (config_dir / "config.yaml").write_text(
+            yaml.safe_dump({"name": "t", "databases": ["models"]}))
+        (config_dir / "databases" / "config.yaml").write_text(yaml.safe_dump({"database": {
+            "connections": {"core": database},
+            "schema": {
+                "model_a": {"detections": {"connection": "core", "table": "mixed.dets_a"}},
+                "model_b": {"detections": {"connection": "core", "table": "mixed.dets_b"}},
+            },
+        }}))
+        routes = []
+        for suffix, engine in (("native", "postgres"), ("duckdb", "duckdb")):
+            routes += [
+                {"route": f"all/{suffix}", "engine": engine, "source_columns": ["schema"],
+                 "sql": self.UNION,
+                 "query_params": [{"confidence": {"sql": "u.confidence >= {{confidence}}"}}]},
+                {"route": f"others/{suffix}", "engine": engine,
+                 "sql": "SELECT o.id FROM [[*!.detections]] o"},
+                {"route": f"overlaps/{{{{id}}}}/{suffix}", "engine": engine,
+                 "source_columns": ["schema"], "sql": self.OVERLAPS},
+            ]
+        (config_dir / "databases" / "models" / "1.0.yaml").write_text(yaml.safe_dump(
+            {"name": "models", "schema": "model_a", "routes": routes}))
+        with TestClient(fast_api.create_app(str(config_dir / "config.yaml"))) as test_client:
+            yield test_client
+
+    @pytest.mark.parametrize("path, params", [
+        ("all/{}", {}),
+        ("all/{}", {"confidence": "0.5"}),
+        ("others/{}", {}),
+        ("overlaps/a1/{}", {}),
+    ])
+    def test_native_matches_duckdb(self, native_client: TestClient, path: str,
+                                   params: Dict[str, str]) -> None:
+        def rows(engine: str) -> List[Dict[str, Any]]:
+            response = native_client.get(f"/models/1.0/{path.format(engine)}", params=params)
+            assert response.status_code == 200, response.text
+            return sorted(response.json(), key=_json_key)
+        assert rows("native") == rows("duckdb")
+        assert rows("native")
+
+    def test_native_union_columns_line_up(self, native_client: TestClient) -> None:
+        by_id = {r["id"]: r for r in native_client.get("/models/1.0/all/native").json()}
+        assert by_id["a1"]["common_name"] == "Owl" and by_id["a1"]["label"] is None
+        assert by_id["b1"]["label"] == "L1" and by_id["b1"]["common_name"] is None
+        assert by_id["b1"]["schema_name"] == "model_b"
+
+
 #
 # INTERNAL
 #
@@ -181,3 +240,8 @@ def _write_config(tmp_path: Path, database: Dict[str, str],
         "name": "models", "schema": "model_a", "routes": routes,
     }))
     return str(config_dir / "config.yaml")
+
+
+def _json_key(row: Dict[str, Any]) -> str:
+    """A stable sort key for a JSON row."""
+    return json.dumps(row, sort_keys=True)
