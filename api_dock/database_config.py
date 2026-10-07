@@ -18,6 +18,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import yaml
 
+from api_dock.postgres_config import check_connection_config, check_postgres_table_name
 from api_dock.sql_template_check import (
     check_comment_at_end,
     check_commented_variables,
@@ -37,6 +38,18 @@ SHARED_CONFIG_FILE: str = "config.yaml"
 SHARED_CONFIG_KEY: str = "database"
 SHARED_META_KEY: str = "meta"
 SHARED_SCHEMA_KEY: str = "schema"
+
+# Named PostgreSQL connections in the shared ``database`` mapping. A table is a
+# PostgreSQL table when its definition has ``table`` (its PostgreSQL name)
+# instead of ``uri``; its ``connection`` comes from the table or from ``meta``.
+SHARED_CONNECTIONS_KEY: str = "connections"
+TABLE_CONNECTION_KEY: str = "connection"
+POSTGRES_TABLE_KEY: str = "table"
+
+# Keys of the shared ``database`` mapping that are not global tables.
+SHARED_RESERVED_KEYS: frozenset = frozenset({
+    SHARED_META_KEY, SHARED_SCHEMA_KEY, SHARED_CONNECTIONS_KEY,
+})
 
 # Shared routes/query_params added to every database/version config, plus
 # top-level lists that restrict all of them to (inclusions) or opt
@@ -290,6 +303,7 @@ def load_shared_config(config_dir: Optional[str] = None) -> Dict[str, Any]:
         normalized[key] = value
 
     _validate_schema_groups(normalized, shared_path)
+    _validate_connections(normalized, shared_path)
     return normalized
 
 
@@ -429,25 +443,31 @@ def resolve_table_reference(
         if entry is None:
             return None
         return TableReference(
-            name=name, uri=entry[0], metadata=entry[1], schema=schema_name, qualified=True
+            name=name, uri=entry[0], metadata=entry[1], connection=entry[2],
+            schema=schema_name, qualified=True
         )
 
     entry = _table_entry((database_config.get("tables") or {}).get(table_name), defaults)
     if entry is not None:
-        return TableReference(name=table_name, uri=entry[0], metadata=entry[1])
+        return TableReference(
+            name=table_name, uri=entry[0], metadata=entry[1], connection=entry[2]
+        )
 
     schema_name = database_config.get(DATABASE_SCHEMA_KEY)
     if schema_name:
         entry = _table_entry((schemas.get(schema_name) or {}).get(table_name), defaults)
         if entry is not None:
             return TableReference(
-                name=table_name, uri=entry[0], metadata=entry[1], schema=schema_name
+                name=table_name, uri=entry[0], metadata=entry[1], connection=entry[2],
+                schema=schema_name
             )
 
-    if table_name not in (SHARED_META_KEY, SHARED_SCHEMA_KEY):
+    if table_name not in SHARED_RESERVED_KEYS:
         entry = _table_entry(shared.get(table_name), defaults)
         if entry is not None:
-            return TableReference(name=table_name, uri=entry[0], metadata=entry[1])
+            return TableReference(
+                name=table_name, uri=entry[0], metadata=entry[1], connection=entry[2]
+            )
 
     return None
 
@@ -536,6 +556,62 @@ def get_schema_sources(
             sources[schema_name] = (database_name, version)
 
     return {k: v for k, v in sources.items() if k not in ambiguous}
+
+
+def route_templates(route_config: Dict[str, Any]) -> List[str]:
+    """Every SQL template a route can use: each selector branch and query param.
+
+    Args:
+        route_config: Route configuration, merged with top-level query_params.
+
+    Returns:
+        The route's sql (every selector branch, and each branch's sql_append)
+        and each query param's sql, multivalue_sql, conditional sql and
+        sql_append, as strings.
+    """
+    return [
+        template
+        for _, template in _bound_templates(route_config) + _append_templates(route_config)
+        if isinstance(template, str)
+    ]
+
+
+def check_table_definitions(
+        tables: Dict[str, Any],
+        shared_config: Optional[Dict[str, Any]],
+        location: str) -> None:
+    """Check that PostgreSQL table definitions name a known connection and a valid table.
+
+    File tables are not checked here (their URIs are read by DuckDB).
+
+    Args:
+        tables: Mapping of table name -> definition (a ``tables`` section, a
+            schema, or the shared global tables).
+        shared_config: The shared ``database`` mapping (for ``connections`` and
+            ``meta``), or None.
+        location: Where the tables are, for error messages.
+
+    Raises:
+        ValueError: If a PostgreSQL table has no or an unknown connection, or an
+            invalid PostgreSQL name.
+    """
+    shared = shared_config or {}
+    connections = shared.get(SHARED_CONNECTIONS_KEY) or {}
+    defaults = shared.get(SHARED_META_KEY) or {}
+    for table_name, table_def in (tables or {}).items():
+        entry = _table_entry(table_def, defaults)
+        if entry is None or not (isinstance(table_def, dict) and POSTGRES_TABLE_KEY in table_def):
+            continue
+        uri, _, connection = entry
+        prefix = f"{location}: table '{table_name}'"
+        if connection is None:
+            raise ValueError(f"{prefix} needs a '{TABLE_CONNECTION_KEY}' (or one in meta)")
+        if connection not in connections:
+            raise ValueError(f"{prefix} uses unknown connection '{connection}'")
+        try:
+            check_postgres_table_name(str(table_name), uri)
+        except ValueError as error:
+            raise ValueError(f"{location}: {error}") from error
 
 
 def get_local_table_references(
@@ -1089,6 +1165,32 @@ def _load_yaml_file(file_path: str) -> Dict[str, Any]:
         raise yaml.YAMLError(f"Invalid YAML in {file_path}: {e}")
 
 
+def _validate_connections(shared_file: Dict[str, Any], shared_path: str) -> None:
+    """Validate the shared ``connections`` and the PostgreSQL tables that use them.
+
+    Args:
+        shared_file: The normalized shared config.
+        shared_path: Path of the shared config (for error messages).
+
+    Raises:
+        ValueError: If a connection entry is invalid, or a PostgreSQL table in a
+            schema or among the global tables is invalid.
+    """
+    shared = shared_file.get(SHARED_CONFIG_KEY) or {}
+    connections = shared.get(SHARED_CONNECTIONS_KEY) or {}
+    if not isinstance(connections, dict):
+        raise ValueError(f"{SHARED_CONNECTIONS_KEY} must be a mapping in {shared_path}")
+    try:
+        for name, entry in connections.items():
+            check_connection_config(str(name), entry)
+        global_tables = {k: v for k, v in shared.items() if k not in SHARED_RESERVED_KEYS}
+        check_table_definitions(global_tables, shared, "global tables")
+        for schema_name, tables in (shared.get(SHARED_SCHEMA_KEY) or {}).items():
+            check_table_definitions(tables or {}, shared, f"schema '{schema_name}'")
+    except ValueError as error:
+        raise ValueError(f"{error} (in {shared_path})") from error
+
+
 def _validate_schema_groups(shared_file: Dict[str, Any], shared_path: str) -> None:
     """Validate the shared ``schema_groups`` mapping.
 
@@ -1245,25 +1347,37 @@ def _route_shape(pattern: Any) -> str:
 
 def _table_entry(
         table_def: Any,
-        defaults: Dict[str, Any]) -> Optional[Tuple[str, Dict[str, Any]]]:
-    """Split a table definition into its URI and effective metadata.
+        defaults: Dict[str, Any]) -> Optional[Tuple[str, Dict[str, Any], Optional[str]]]:
+    """Split a table definition into its location, metadata and connection.
+
+    A string or a dict with ``uri``/``path`` is a file table; a dict with
+    ``table`` is a PostgreSQL table, whose connection comes from the table or,
+    failing that, from ``meta``. File tables never get a connection.
 
     Args:
-        table_def: A URI string or a dict with ``uri``/``path`` plus metadata.
+        table_def: A URI string, a dict with ``uri``/``path`` plus metadata, or a
+            dict with ``table`` (and ``connection``) for a PostgreSQL table.
         defaults: Shared ``meta`` defaults; the table's own keys override them.
 
     Returns:
-        Tuple of (uri, metadata), or None if the definition has no URI.
+        Tuple of (uri or PostgreSQL table name, metadata, connection name or
+        None), or None if the definition has neither a URI nor a table name.
     """
+    file_defaults = {k: v for k, v in defaults.items() if k != TABLE_CONNECTION_KEY}
     if isinstance(table_def, str):
-        return (table_def, dict(defaults))
-    if isinstance(table_def, dict):
-        uri = table_def.get("uri") or table_def.get("path")
-        if not uri:
-            return None
-        own = {k: v for k, v in table_def.items() if k not in ("uri", "path")}
-        return (str(uri), {**defaults, **own})
-    return None
+        return (table_def, file_defaults, None)
+    if not isinstance(table_def, dict):
+        return None
+    if POSTGRES_TABLE_KEY in table_def:
+        metadata = {**defaults, **table_def}
+        connection = metadata.pop(TABLE_CONNECTION_KEY, None)
+        table = metadata.pop(POSTGRES_TABLE_KEY)
+        return (str(table), metadata, None if connection is None else str(connection))
+    uri = table_def.get("uri") or table_def.get("path")
+    if not uri:
+        return None
+    own = {k: v for k, v in table_def.items() if k not in ("uri", "path")}
+    return (str(uri), {**file_defaults, **own}, None)
 
 
 def _route_matches_pattern(path: str, pattern: str) -> bool:
