@@ -72,9 +72,13 @@ CATALOG_CONFIG: Dict[str, Any] = {
         "route": "missing",
         "sql": "SELECT * FROM [[items]] WHERE id = {{nope}}",
     }, {
-        # 0.7.x style: the quotes turn the marker into the text "?".
+        # 0.7.x style: a string literal that is exactly one variable is accepted.
         "route": "quoted",
         "sql": "SELECT * FROM [[items]] WHERE name = '{{name}}'",
+    }, {
+        # Any other quoted variable is text: the quotes turn the marker into "?".
+        "route": "quoted_pattern",
+        "sql": "SELECT * FROM [[items]] WHERE name LIKE '%{{name}}%'",
     }, {
         # DuckDB ignores the marker in the comment, but its value is still sent.
         "route": "commented",
@@ -227,11 +231,24 @@ class TestFilterValues:
         assert json.loads(result.content) == {"error": "SQL query error"}
 
     @pytest.mark.anyio
-    async def test_quoted_variable_is_database_query_error(
-            self, route_mapper: RouteMapper) -> None:
-        """A quoted {{var}} leaves its value without a marker, so DuckDB rejects the query."""
+    async def test_quoted_variable_is_bound(self, route_mapper: RouteMapper) -> None:
+        """A 0.7.x-style '{{var}}' is read as {{var}}, bound, and matches exactly."""
         result = await route_mapper.map_database_route(
             "catalog", "latest/quoted", {"name": "Alpha"}, {}
+        )
+        assert result.status_code == 200
+        assert [row["name"] for row in json.loads(result.content)] == ["Alpha"]
+        result = await route_mapper.map_database_route(
+            "catalog", "latest/quoted", {"name": "x' OR '1'='1"}, {}
+        )
+        assert json.loads(result.content) == []
+
+    @pytest.mark.anyio
+    async def test_quoted_pattern_is_database_query_error(
+            self, route_mapper: RouteMapper) -> None:
+        """A {{var}} inside a longer quoted string has no marker, so DuckDB rejects the query."""
+        result = await route_mapper.map_database_route(
+            "catalog", "latest/quoted_pattern", {"name": "Alpha"}, {}
         )
         assert result.status_code == 500
         assert json.loads(result.content) == {"error": "Database query error"}
