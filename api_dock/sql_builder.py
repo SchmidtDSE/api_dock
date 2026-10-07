@@ -14,8 +14,17 @@ License: BSD 3-Clause
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from api_dock.database_config import get_named_query, resolve_table_reference
-from api_dock.types import TableReference
+from api_dock.database_config import (
+    ALL_SCHEMAS,
+    DATABASE_SCHEMA_KEY,
+    EXCLUDE_SELF_SUFFIX,
+    get_named_query,
+    IDENTIFIER_PATTERN,
+    resolve_schema_union,
+    resolve_table_reference,
+    SCHEMA_SEPARATOR,
+)
+from api_dock.types import SqlContext, TableReference
 
 
 #
@@ -31,6 +40,18 @@ DEFAULT_NO_MATCH_RESPONSE: Dict[str, Any] = {
     "error": "No matching query configuration for the given parameters",
     "http_status": 400,
 }
+
+# Route key selecting which source facts to add as columns to [[*.table]] /
+# [[group.table]] union rows, and each fact's default column name.
+SOURCE_COLUMNS_KEY: str = "source_columns"
+SOURCE_COLUMN_DEFAULTS: Dict[str, str] = {
+    "schema": "schema_name",
+    "name": "name",
+    "version": "version",
+}
+
+# {{self.<fact>}} placeholders for the database/version being queried.
+SELF_PARAM_PREFIX: str = "self."
 
 # Sentinel signalling that a selector rule did not fire (distinct from a rule
 # that fires but resolves to an empty base SQL).
@@ -71,7 +92,8 @@ def build_sql_query(
         query_params: Optional[Dict[str, str]] = None,
         cookies: Optional[Dict[str, str]] = None,
         multi_query_params: Optional[Dict[str, List[str]]] = None,
-        shared_config: Optional[Dict[str, Any]] = None) -> str:
+        shared_config: Optional[Dict[str, Any]] = None,
+        context: Optional[SqlContext] = None) -> str:
     """Build SQL query with fragment-based WHERE clause support.
 
     Args:
@@ -86,6 +108,8 @@ def build_sql_query(
             that template is used instead of ``sql``.
         shared_config: The shared ``database`` mapping from
             ``databases/config.yaml`` (schemas, global tables, meta), or None.
+        context: Request context (database name/version, schema groups and
+            sources) for unions, ``source_columns`` and ``{{self.*}}``.
 
     Returns:
         Complete SQL query with all substitutions applied.
@@ -95,7 +119,7 @@ def build_sql_query(
     """
     sql_query, _ = build_sql_query_with_tables(
         route_config, database_config, path_params, query_params, cookies,
-        multi_query_params, shared_config
+        multi_query_params, shared_config, context
     )
     return sql_query
 
@@ -107,7 +131,8 @@ def build_sql_query_with_tables(
         query_params: Optional[Dict[str, str]] = None,
         cookies: Optional[Dict[str, str]] = None,
         multi_query_params: Optional[Dict[str, List[str]]] = None,
-        shared_config: Optional[Dict[str, Any]] = None) -> Tuple[str, List[TableReference]]:
+        shared_config: Optional[Dict[str, Any]] = None,
+        context: Optional[SqlContext] = None) -> Tuple[str, List[TableReference]]:
     """Build a SQL query and report the tables it references.
 
     Same as build_sql_query, but also returns every table resolved from a
@@ -122,15 +147,27 @@ def build_sql_query_with_tables(
         cookies: Dictionary of cookie values from request.
         multi_query_params: Full value lists for repeated query keys.
         shared_config: The shared ``database`` mapping, or None.
+        context: Request context for unions, ``source_columns`` and
+            ``{{self.*}}`` placeholders, or None.
 
     Returns:
         Tuple of (sql_query, table_references) where table_references are
         unique by SQL name, in first-reference order.
 
     Raises:
-        ValueError: If referenced table or query is not defined in config.
+        ValueError: If referenced table or query is not defined in config, a
+            union is misused, or ``source_columns`` is invalid.
     """
     table_refs: Dict[str, TableReference] = {}
+    if context is None:
+        context = SqlContext()
+    source_columns = _normalize_source_columns(route_config.get(SOURCE_COLUMNS_KEY))
+
+    def expand_tables(text: str) -> str:
+        return _substitute_table_references(
+            text, database_config, shared_config, table_refs, context, source_columns
+        )
+
     if path_params is None:
         path_params = {}
     if query_params is None:
@@ -160,9 +197,7 @@ def build_sql_query_with_tables(
 
     # Substitute table references [[table_name]] with FROM clauses
     # Strip whitespace/newlines from base SQL (YAML block scalars add trailing \n)
-    sql_with_tables = _substitute_table_references(
-        sql_template, database_config, shared_config, table_refs
-    ).strip()
+    sql_with_tables = expand_tables(sql_template).strip()
 
     # Resolve default values for value-only params so they're available for substitution
     all_params = {**path_params, **query_params}
@@ -178,8 +213,7 @@ def build_sql_query_with_tables(
     )
     # Expand [[table_name]] references in WHERE fragments (same syntax as main sql)
     where_fragments = [
-        _substitute_table_references(f, database_config, shared_config, table_refs)
-        for f in where_fragments
+        expand_tables(f) for f in where_fragments
     ]
 
     # Combine base SQL with WHERE fragments
@@ -198,8 +232,7 @@ def build_sql_query_with_tables(
     # branch GROUP BY precedes a shared ORDER BY / LIMIT.
     if branch_appends:
         expanded_branch = [
-            _substitute_table_references(fragment, database_config, shared_config, table_refs)
-            for fragment in branch_appends
+            expand_tables(fragment) for fragment in branch_appends
         ]
         sql_with_tables += ' ' + ' '.join(expanded_branch)
 
@@ -207,14 +240,15 @@ def build_sql_query_with_tables(
     append_fragments = build_append_clause_from_params(route_config, query_params, path_params)
     # Expand [[table_name]] references in APPEND fragments (same syntax as main sql)
     append_fragments = [
-        _substitute_table_references(f, database_config, shared_config, table_refs)
-        for f in append_fragments
+        expand_tables(f) for f in append_fragments
     ]
     if append_fragments:
         sql_with_tables += ' ' + ' '.join(append_fragments)
 
     # Substitute remaining path parameters {{param_name}} with values
     # This now includes cookies as {{cookies.cookie_name}}
+    # {{self.*}} first: they become SQL literals (or NULL), never plain params.
+    sql_with_tables = _substitute_self_params(sql_with_tables, database_config, context)
     sql_with_params = _substitute_variables_in_string(sql_with_tables, all_params)
 
     return (sql_with_params, list(table_refs.values()))
@@ -668,7 +702,9 @@ def _substitute_table_references(
         sql: str,
         database_config: Dict[str, Any],
         shared_config: Optional[Dict[str, Any]] = None,
-        collected: Optional[Dict[str, TableReference]] = None) -> str:
+        collected: Optional[Dict[str, TableReference]] = None,
+        context: Optional[SqlContext] = None,
+        source_columns: Optional[List[Tuple[str, str]]] = None) -> str:
     """Substitute [[table_name]] references with table file paths in FROM clauses.
 
     Unqualified tables (version ``tables``, the version's shared schema, or
@@ -676,7 +712,10 @@ def _substitute_table_references(
     ``name`` elsewhere. Qualified ``[[schema.table]]`` references expand to the
     view name ``schema.table`` after FROM/JOIN (no alias, so a user alias or
     ``schema.table.col`` still works) and to ``table`` elsewhere (DuckDB does
-    not accept ``schema.table.*``).
+    not accept ``schema.table.*``). Union references (``[[*.table]]``,
+    ``[[*!.table]]``, ``[[group.table]]``, ``[[group!.table]]``) expand, after
+    FROM/JOIN only, to a parenthesized ``UNION ALL BY NAME`` over the member
+    schema views; the SQL must give it an alias.
 
     Args:
         sql: SQL query template with [[table_name]] placeholders.
@@ -684,18 +723,41 @@ def _substitute_table_references(
         shared_config: The shared ``database`` mapping, or None.
         collected: Optional dict filled with each resolved TableReference,
             keyed by its SQL name.
+        context: Request context for union references, or None.
+        source_columns: Normalized (fact, column) pairs added to union rows.
 
     Returns:
         SQL with table references substituted.
 
     Raises:
-        ValueError: If a referenced table is not defined in config.
+        ValueError: If a referenced table is not defined in config, or a union
+            reference is used outside FROM/JOIN.
     """
     # Find all [[table_name]] references
     table_pattern = r'\[\[([^\]]+)\]\]'
 
     def replace_table_reference(match):
         table_name = match.group(1)
+
+        # Check context: if preceded by FROM or JOIN, use full reference
+        # Otherwise, just use the table name (alias)
+        start_pos = match.start()
+        context_before = sql[max(0, start_pos-20):start_pos].upper()
+        in_from_clause = 'FROM' in context_before or 'JOIN' in context_before
+
+        union = _resolve_union(table_name, database_config, shared_config, context)
+        if union is not None:
+            members, exclude_self = union
+            if not in_from_clause:
+                raise ValueError(f"[[{table_name}]] can only be used after FROM/JOIN")
+            union_sql, used_members = _render_union(
+                members, exclude_self, database_config, context, source_columns or []
+            )
+            if collected is not None:
+                for member in used_members:
+                    collected.setdefault(member.sql_name, member)
+            return union_sql
+
         reference = resolve_table_reference(table_name, database_config, shared_config)
 
         if reference is None:
@@ -703,12 +765,7 @@ def _substitute_table_references(
         if collected is not None:
             collected.setdefault(reference.sql_name, reference)
 
-        # Check context: if preceded by FROM or JOIN, use full reference
-        # Otherwise, just use the table name (alias)
-        start_pos = match.start()
-        context_before = sql[max(0, start_pos-20):start_pos].upper()
-
-        if 'FROM' in context_before or 'JOIN' in context_before:
+        if in_from_clause:
             # Full reference for FROM/JOIN clauses
             if reference.qualified:
                 return reference.sql_name
@@ -719,6 +776,176 @@ def _substitute_table_references(
 
     result_sql = re.sub(table_pattern, replace_table_reference, sql)
     return result_sql
+
+
+def _resolve_union(
+        reference: str,
+        database_config: Dict[str, Any],
+        shared_config: Optional[Dict[str, Any]],
+        context: Optional[SqlContext]) -> Optional[Tuple[List[TableReference], bool]]:
+    """Resolve a ``[[selector.table]]`` union reference, if it is one.
+
+    Args:
+        reference: Text inside the brackets (e.g. "*!.detections").
+        database_config: The version database configuration.
+        shared_config: The shared ``database`` mapping, or None.
+        context: Request context (for schema groups), or None.
+
+    Returns:
+        Tuple of (all member TableReferences, exclude_self flag), or None if
+        the reference is not a union (plain table or single schema).
+
+    Raises:
+        ValueError: If ``!`` is used on something other than ``*`` or a group.
+    """
+    if SCHEMA_SEPARATOR not in reference:
+        return None
+    selector, table_name = reference.split(SCHEMA_SEPARATOR, 1)
+    exclude_self = selector.endswith(EXCLUDE_SELF_SUFFIX)
+    base = selector[:-len(EXCLUDE_SELF_SUFFIX)] if exclude_self else selector
+
+    groups = context.schema_groups if context is not None else {}
+    members = resolve_schema_union(base, table_name, shared_config, groups)
+    if members is None:
+        if exclude_self:
+            raise ValueError(
+                f"'{EXCLUDE_SELF_SUFFIX}' only applies to '{ALL_SCHEMAS}' or a schema group: "
+                f"[[{reference}]]"
+            )
+        return None
+    return (members, exclude_self)
+
+
+def _render_union(
+        members: List[TableReference],
+        exclude_self: bool,
+        database_config: Dict[str, Any],
+        context: Optional[SqlContext],
+        source_columns: List[Tuple[str, str]]) -> Tuple[str, List[TableReference]]:
+    """Render union members as a parenthesized ``UNION ALL BY NAME`` subquery.
+
+    Each member reads its schema view and adds the requested source columns.
+    If ``exclude_self`` removes every member, the excluded member is kept with
+    ``LIMIT 0`` so the result has the right columns but no rows. A single
+    member is paired with an empty copy of itself so DuckDB's duplicate-name
+    check still catches a source column clashing with a real column.
+
+    Args:
+        members: Member table references (all qualified schema views).
+        exclude_self: Drop the current version's schema from the members.
+        database_config: The version database configuration.
+        context: Request context (schema sources), or None.
+        source_columns: (fact, column) pairs to add to each row.
+
+    Returns:
+        Tuple of (SQL subquery text without an alias, the members it reads).
+    """
+    self_schema = database_config.get(DATABASE_SCHEMA_KEY)
+    selected = [m for m in members if not (exclude_self and m.schema == self_schema)]
+
+    selects = [f"({_union_member_select(m, context, source_columns)})" for m in selected]
+    if not selects:
+        selected = [members[0]]
+        selects = [f"({_union_member_select(members[0], context, source_columns)} LIMIT 0)"]
+    elif len(selects) == 1 and source_columns:
+        selects.append(f"({_union_member_select(selected[0], context, source_columns)} LIMIT 0)")
+    return ("(" + " UNION ALL BY NAME ".join(selects) + ")", selected)
+
+
+def _union_member_select(
+        member: TableReference,
+        context: Optional[SqlContext],
+        source_columns: List[Tuple[str, str]]) -> str:
+    """Build one union member's SELECT with its source columns.
+
+    Args:
+        member: The member's (qualified) table reference.
+        context: Request context (schema sources), or None.
+        source_columns: (fact, column) pairs to add.
+
+    Returns:
+        ``SELECT *[, <value> AS <column> ...] FROM schema.table``.
+    """
+    sources = context.schema_sources if context is not None else {}
+    source_name, source_version = sources.get(member.schema, (None, None))
+    values = {"schema": member.schema, "name": source_name, "version": source_version}
+
+    columns = "".join(
+        f", {_sql_literal_or_null(values[fact])} AS {column}" for fact, column in source_columns
+    )
+    return f"SELECT *{columns} FROM {member.sql_name}"
+
+
+def _normalize_source_columns(spec: Any) -> List[Tuple[str, str]]:
+    """Normalize a route's ``source_columns`` into (fact, column) pairs.
+
+    Args:
+        spec: None, a list of fact names (default column names), or a mapping
+            of fact name -> column name.
+
+    Returns:
+        (fact, column) pairs in config order (empty if spec is None).
+
+    Raises:
+        ValueError: If a fact is unknown or a column name isn't an identifier.
+    """
+    if spec is None:
+        return []
+    if isinstance(spec, list):
+        pairs = [(str(fact), SOURCE_COLUMN_DEFAULTS.get(str(fact), "")) for fact in spec]
+    elif isinstance(spec, dict):
+        pairs = [(str(fact), str(column)) for fact, column in spec.items()]
+    else:
+        raise ValueError(f"{SOURCE_COLUMNS_KEY} must be a list or mapping, got {spec!r}")
+
+    for fact, column in pairs:
+        if fact not in SOURCE_COLUMN_DEFAULTS:
+            raise ValueError(
+                f"{SOURCE_COLUMNS_KEY}: unknown fact '{fact}' "
+                f"(expected one of {', '.join(SOURCE_COLUMN_DEFAULTS)})"
+            )
+        if not IDENTIFIER_PATTERN.match(column):
+            raise ValueError(f"{SOURCE_COLUMNS_KEY}: invalid column name '{column}'")
+    return pairs
+
+
+def _substitute_self_params(
+        sql: str,
+        database_config: Dict[str, Any],
+        context: Optional[SqlContext]) -> str:
+    """Replace ``{{self.schema}}``, ``{{self.name}}`` and ``{{self.version}}``.
+
+    Args:
+        sql: SQL text.
+        database_config: The version database configuration (its ``schema``).
+        context: Request context (database name and version), or None.
+
+    Returns:
+        SQL with each placeholder replaced by a quoted literal, or NULL when
+        the value is unknown.
+    """
+    values = {
+        "schema": database_config.get(DATABASE_SCHEMA_KEY),
+        "name": context.name if context is not None else None,
+        "version": context.version if context is not None else None,
+    }
+    for fact, value in values.items():
+        sql = sql.replace(f"{{{{{SELF_PARAM_PREFIX}{fact}}}}}", _sql_literal_or_null(value))
+    return sql
+
+
+def _sql_literal_or_null(value: Any) -> str:
+    """Render a value as an escaped SQL string literal, or NULL for None.
+
+    Args:
+        value: The value to render.
+
+    Returns:
+        ``'value'`` (quotes doubled) or ``CAST(NULL AS VARCHAR)``.
+    """
+    if value is None:
+        return "CAST(NULL AS VARCHAR)"
+    return _escape_sql_value(str(value))
 
 
 def _substitute_parameters(sql: str, params: Dict[str, str]) -> str:
