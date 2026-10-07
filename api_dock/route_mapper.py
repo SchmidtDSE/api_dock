@@ -12,13 +12,19 @@ License: BSD 3-Clause
 # IMPORTS
 #
 import asyncio
+import base64
+import ipaddress
 import json
 import os
 import re
 import threading
+from datetime import date, datetime, timedelta
+from decimal import Decimal
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+from uuid import UUID
+
 import httpx
 import yaml
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 from api_dock.auth import validate_authentication
 from api_dock.config import DEFAULT_CONFIG_DIR, filter_cookies_by_config, filter_remote_query_params, find_remote_config, find_route_mapping, get_authentication_config, get_database_names, get_remote_names, get_remote_versions, get_settings, is_route_allowed, is_versioned_remote, load_main_config, merge_inherited_config, resolve_latest_version
@@ -37,6 +43,13 @@ DEFAULT_VERSION: str = "latest"
 # Default upstream request timeout in seconds. Override with the `timeout`
 # setting; set it to null/false to disable the timeout entirely.
 DEFAULT_TIMEOUT: float = 10.0
+
+# Network address types that are written to JSON as their string form.
+IP_ADDRESS_TYPES: Tuple[type, ...] = (
+    ipaddress.IPv4Address, ipaddress.IPv6Address,
+    ipaddress.IPv4Interface, ipaddress.IPv6Interface,
+    ipaddress.IPv4Network, ipaddress.IPv6Network,
+)
 
 # Headers excluded from upstream→client forwarding.
 # Hop-by-hop headers (RFC 7230 §6.1) must not be forwarded by proxies.
@@ -964,10 +977,13 @@ def _filter_response_headers(headers: Dict[str, str]) -> Dict[str, str]:
 
 
 def _make_json_safe(value: Any) -> Any:
-    """Convert non-JSON-serializable values to JSON-safe types.
+    """Convert a database value to a value json can write.
 
-    Handles datetime objects, dates, decimals, and other common types
-    that DuckDB returns but aren't directly JSON serializable.
+    Dictionaries, lists and tuples are converted item by item; tuples become
+    lists. Dates and times become ISO strings, decimals become floats (which
+    may lose precision), bytes become base64 text, UUIDs and network addresses
+    become strings, and intervals become a number of seconds. Other values are
+    returned unchanged, so an unsupported type still fails JSON encoding.
 
     Args:
         value: Value to convert.
@@ -975,17 +991,18 @@ def _make_json_safe(value: Any) -> Any:
     Returns:
         JSON-safe version of the value.
     """
-    from datetime import date, datetime
-    from decimal import Decimal
-
-    if value is None:
-        return None
-    elif isinstance(value, (datetime, date)):
+    if isinstance(value, dict):
+        return {key: _make_json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_make_json_safe(item) for item in value]
+    if isinstance(value, (datetime, date)):
         return value.isoformat()
-    elif isinstance(value, Decimal):
+    if isinstance(value, Decimal):
         return float(value)
-    elif isinstance(value, bytes):
-        import base64
+    if isinstance(value, bytes):
         return base64.b64encode(value).decode('utf-8')
-    else:
-        return value
+    if isinstance(value, timedelta):
+        return value.total_seconds()
+    if isinstance(value, (UUID,) + IP_ADDRESS_TYPES):
+        return str(value)
+    return value
