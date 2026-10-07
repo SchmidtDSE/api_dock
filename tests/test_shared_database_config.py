@@ -2,8 +2,9 @@
 
 Tests for the shared database config (``databases/config.yaml``).
 
-Covers loading the shared ``database`` mapping, shared ``routes`` /
-``query_params`` merging with overrides and exclusions, ``[[table]]`` resolution order
+Covers loading the shared ``database`` mapping, inline ``slugs`` database/version
+configs (alongside config files), shared ``routes`` /
+``query_params`` merging with overrides, inclusions and exclusions, ``[[table]]`` resolution order
 (version tables -> version schema -> shared global tables), ``[[schema.table]]``
 references, shared ``meta`` defaults, the SQL each form renders to, schema view
 statements, path-scoped S3 secrets, and an end-to-end DuckDB query through
@@ -26,15 +27,20 @@ import yaml
 
 from api_dock.database_config import (
     apply_shared_definitions,
+    get_database_versions,
     get_local_table_references,
+    get_slug_configs,
+    is_versioned_database,
+    load_database_config,
     load_shared_config,
     load_shared_database_config,
     resolve_table_reference,
 )
+from api_dock.listings import build_listing
 from api_dock.route_mapper import RouteMapper
 from api_dock.sql_builder import build_schema_view_statements, build_sql_query_with_tables
 from api_dock.storage_auth import setup_table_storage_authentication
-from api_dock.types import TableReference
+from api_dock.types import ListingSpec, TableReference
 
 
 #
@@ -213,10 +219,191 @@ class TestApplySharedDefinitions:
         assert len(merged["routes"]) == 1 + 3
         assert merged["query_params"] == own["query_params"]
 
+    def test_route_include_limits_to_listed(self) -> None:
+        shared = {"routes": [{"route": "a", "sql": "x", "include": ["s/1.0", {"slug": "t"}]}]}
+        assert len(apply_shared_definitions({}, shared, "s", "1.0")["routes"]) == 1
+        assert apply_shared_definitions({}, shared, "s", "2.0")["routes"] == []
+        assert len(apply_shared_definitions({}, shared, "t", "7")["routes"]) == 1
+        assert apply_shared_definitions({}, shared, "u", "1.0")["routes"] == []
+
+    def test_include_keys_are_stripped(self) -> None:
+        shared = {
+            "routes": [{"route": "a", "sql": "x", "include": ["s"]}],
+            "query_params": [{"q": {"sql": "y", "include": ["s"], "exclude": ["s/2"]}}],
+        }
+        merged = apply_shared_definitions({}, shared, "s", "1")
+        assert merged["routes"] == [{"route": "a", "sql": "x"}]
+        assert merged["query_params"] == [{"q": {"sql": "y"}}]
+
+    def test_include_and_exclude_combine(self) -> None:
+        shared = {"routes": [{"route": "a", "sql": "x", "include": ["s"], "exclude": ["s/2"]}]}
+        assert len(apply_shared_definitions({}, shared, "s", "1")["routes"]) == 1
+        assert apply_shared_definitions({}, shared, "s", "2")["routes"] == []
+
+    def test_query_param_include(self) -> None:
+        shared = {"query_params": [{"q": {"sql": "y", "include": ["s/1"]}}]}
+        assert len(apply_shared_definitions({}, shared, "s", "1")["query_params"]) == 1
+        assert apply_shared_definitions({}, shared, "s", "2")["query_params"] == []
+
+    def test_same_route_with_complementary_include_exclude(self) -> None:
+        shared = {"routes": [
+            {"route": "detections/", "sql": "generic", "exclude": ["birdnet/2.4"]},
+            {"route": "/detections", "sql": "birdnet", "include": ["birdnet/2.4"]},
+        ]}
+        assert apply_shared_definitions({}, shared, "birdnet", "2.4")["routes"] == [
+            {"route": "/detections", "sql": "birdnet"},
+        ]
+        assert apply_shared_definitions({}, shared, "owl", "5.0")["routes"] == [
+            {"route": "detections/", "sql": "generic"},
+        ]
+
+    def test_first_selected_shared_route_wins(self) -> None:
+        shared = {"routes": [
+            {"route": "a/{{x}}", "sql": "first"},
+            {"route": "a/{{y}}", "sql": "second"},
+        ]}
+        assert [r["sql"] for r in apply_shared_definitions({}, shared, "s", "1")["routes"]] == [
+            "first",
+        ]
+
+    def test_first_selected_shared_query_param_wins(self) -> None:
+        shared = {"query_params": [
+            {"q": {"sql": "first", "include": ["other"]}},
+            {"q": {"sql": "second"}},
+            {"q": {"sql": "third"}},
+        ]}
+        assert apply_shared_definitions({}, shared, "s", "1")["query_params"] == [
+            {"q": {"sql": "second"}},
+        ]
+
+    def test_top_level_inclusions(self) -> None:
+        shared = {
+            **SHARED_FILE,
+            "route_inclusions": ["slug1"],
+            "query_inclusions": [{"slug": "slug2", "version": "5.0"}],
+        }
+        own = {"routes": [{"route": "own", "sql": "x"}], "query_params": [{"q": {"sql": "y"}}]}
+        merged = apply_shared_definitions(own, shared, "slug1", "1.0")
+        assert len(merged["routes"]) == 1 + 3
+        assert merged["query_params"] == own["query_params"]
+        merged = apply_shared_definitions(own, shared, "slug2", "5.0")
+        assert merged["routes"] == own["routes"]
+        assert len(merged["query_params"]) == 1 + 3
+
+    def test_top_level_inclusions_and_exclusions_combine(self) -> None:
+        shared = {**SHARED_FILE, "route_inclusions": ["slug1"], "route_exclusions": ["slug1/2"]}
+        assert len(apply_shared_definitions({}, shared, "slug1", "1")["routes"]) == 3
+        assert "routes" not in apply_shared_definitions({}, shared, "slug1", "2")
+
     def test_malformed_exclusion_raises(self) -> None:
         shared = {"routes": [{"route": "a", "sql": "x", "exclude": [{"version": "1"}]}]}
         with pytest.raises(ValueError):
             apply_shared_definitions({}, shared, "s", "1")
+
+
+class TestSlugConfigs:
+    """Inline database/version configs from the shared config's ``slugs``."""
+
+    SLUGS: List[Dict[str, Any]] = [
+        {"name": "bullfrog", "version": 2.5, "description": "d25", "schema": "bf_2p5"},
+        {
+            "name": "apple",
+            "authors": ["A"],
+            "versions": [
+                {"version": 1.0, "description": "d1", "schema": "a1"},
+                {"version": "12.0", "description": "d12", "authors": ["B"]},
+            ],
+        },
+        {"name": "plain", "description": "unversioned"},
+    ]
+
+    def test_single_version_form(self, tmp_path: Path) -> None:
+        _write_shared(tmp_path, {"slugs": self.SLUGS})
+        assert get_slug_configs(str(tmp_path))["bullfrog"] == {
+            "2.5": {"name": "bullfrog", "description": "d25", "schema": "bf_2p5"},
+        }
+
+    def test_versions_list_with_defaults(self, tmp_path: Path) -> None:
+        _write_shared(tmp_path, {"slugs": self.SLUGS})
+        apple = get_slug_configs(str(tmp_path))["apple"]
+        assert apple["1.0"] == {
+            "name": "apple", "authors": ["A"], "description": "d1", "schema": "a1",
+        }
+        assert apple["12.0"] == {"name": "apple", "authors": ["B"], "description": "d12"}
+
+    def test_unversioned_form(self, tmp_path: Path) -> None:
+        _write_shared(tmp_path, {"slugs": self.SLUGS})
+        assert get_slug_configs(str(tmp_path))["plain"] == {
+            None: {"name": "plain", "description": "unversioned"},
+        }
+        assert not is_versioned_database("plain", str(tmp_path))
+        assert load_database_config("plain", str(tmp_path))["description"] == "unversioned"
+
+    def test_same_name_in_several_entries_merges(self, tmp_path: Path) -> None:
+        _write_shared(tmp_path, {"slugs": [
+            {"name": "m", "version": "1.0"}, {"name": "m", "version": "2.0"},
+        ]})
+        assert sorted(get_slug_configs(str(tmp_path))["m"]) == ["1.0", "2.0"]
+
+    @pytest.mark.parametrize("slugs", [
+        [{"version": "1.0"}],
+        [{"name": "m", "version": "1.0", "versions": [{"version": "2.0"}]}],
+        [{"name": "m", "versions": []}],
+        [{"name": "m", "versions": [{"description": "no version"}]}],
+        [{"name": "m", "version": "1.0"}, {"name": "m", "version": 1.0}],
+        [{"name": "m", "version": "1.0"}, {"name": "m"}],
+        ["m"],
+    ])
+    def test_malformed_raises(self, tmp_path: Path, slugs: List[Any]) -> None:
+        _write_shared(tmp_path, {"slugs": slugs})
+        with pytest.raises(ValueError):
+            get_slug_configs(str(tmp_path))
+
+    def test_files_and_slugs_combine(self, tmp_path: Path) -> None:
+        _write_yaml(tmp_path / "databases" / "owl" / "4.0.yaml", {"name": "owl", "src": "file"})
+        _write_yaml(tmp_path / "databases" / "owl" / "5.0.yaml", {"name": "owl", "src": "file"})
+        _write_shared(tmp_path, {"slugs": [
+            {"name": "owl", "versions": [
+                {"version": "5.0", "src": "slug"}, {"version": "6.0", "src": "slug"},
+            ]},
+            {"name": "frog", "version": "1.0", "src": "slug"},
+        ]})
+        config_dir = str(tmp_path)
+        assert is_versioned_database("owl", config_dir)
+        assert is_versioned_database("frog", config_dir)
+        assert get_database_versions("owl", config_dir) == ["4.0", "5.0", "6.0"]
+        assert get_database_versions("frog", config_dir) == ["1.0"]
+        assert load_database_config("owl", config_dir, "4.0")["src"] == "file"
+        assert load_database_config("owl", config_dir, "5.0")["src"] == "file"  # file wins
+        assert load_database_config("owl", config_dir, "6.0")["src"] == "slug"
+        assert load_database_config("frog", config_dir, "1.0")["src"] == "slug"
+
+    def test_missing_version_still_raises_file_not_found(self, tmp_path: Path) -> None:
+        _write_shared(tmp_path, {"slugs": [{"name": "frog", "version": "1.0"}]})
+        with pytest.raises(FileNotFoundError):
+            load_database_config("frog", str(tmp_path), "9.9")
+        with pytest.raises(FileNotFoundError):
+            load_database_config("frog", str(tmp_path))
+        with pytest.raises(FileNotFoundError):
+            load_database_config("nope", str(tmp_path))
+
+    def test_no_shared_file_keeps_file_behavior(self, tmp_path: Path) -> None:
+        _write_yaml(tmp_path / "databases" / "owl" / "4.0.yaml", {"name": "owl"})
+        assert get_database_versions("owl", str(tmp_path)) == ["4.0"]
+        assert not is_versioned_database("frog", str(tmp_path))
+
+    def test_listing_includes_slug_versions(
+            self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        config_dir = tmp_path / "api_dock_config"
+        _write_yaml(config_dir / "databases" / "owl" / "4.0.yaml", {"name": "owl"})
+        _write_shared(config_dir, {"slugs": [
+            {"name": "owl", "version": "5.0"}, {"name": "plain"},
+        ]})
+        monkeypatch.chdir(tmp_path)
+        spec = ListingSpec(kind="databases", route="databases", as_dict=False)
+        assert build_listing(spec, {"databases": ["owl", "plain"]}) == [
+            "owl/4.0", "owl/5.0", "plain",
+        ]
 
 
 class TestResolveTableReference:
@@ -560,6 +747,66 @@ class TestMapDatabaseRouteEndToEnd:
         assert json.loads(result.content) == {"routes": ["detections/", "special/"]}
 
 
+    @pytest.mark.anyio
+    async def test_slug_defined_versions(
+            self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        conn = duckdb.connect()
+        for name in ("v4", "v5"):
+            conn.execute(f"COPY (SELECT '{name}' AS source) TO '{data_dir / name}.parquet'")
+        conn.close()
+
+        config_dir = tmp_path / "api_dock_config"
+        _write_yaml(config_dir / "config.yaml", {"name": "t", "databases": ["owl"]})
+        _write_shared(config_dir, {
+            "database": {"schema": {
+                "owl_4p0": {"detections": str(data_dir / "v4.parquet")},
+                "owl_5p0": {"detections": str(data_dir / "v5.parquet")},
+            }},
+            "slugs": [{"name": "owl", "version": 5.0, "schema": "owl_5p0"}],
+            "routes": [
+                {"route": "detections", "sql": "SELECT [[detections]].* FROM [[detections]]"},
+                {"route": "v5only", "sql": "SELECT 5 AS v", "include": ["owl/5.0"]},
+            ],
+        })
+        _write_yaml(config_dir / "databases" / "owl" / "4.0.yaml", {
+            "name": "owl", "schema": "owl_4p0",
+        })
+
+        monkeypatch.chdir(tmp_path)
+        mapper = RouteMapper(str(config_dir / "config.yaml"))
+
+        result = await mapper.map_database_route("owl", "")
+        assert json.loads(result.content) == {"versions": ["4.0", "5.0"]}
+
+        result = await mapper.map_database_route("owl", "4.0/detections")
+        assert json.loads(result.content) == [{"source": "v4"}]
+
+        result = await mapper.map_database_route("owl", "latest/detections")
+        assert json.loads(result.content) == [{"source": "v5"}]
+
+        result = await mapper.map_database_route("owl", "5.0/v5only")
+        assert json.loads(result.content) == [{"v": 5}]
+
+        result = await mapper.map_database_route("owl", "4.0/v5only")
+        assert result.status_code == 404
+
+        result = await mapper.map_database_route("owl", "6.0/detections")
+        assert result.status_code == 404
+
+    @pytest.mark.anyio
+    async def test_malformed_slugs_return_500(
+            self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        config_dir = tmp_path / "api_dock_config"
+        _write_yaml(config_dir / "config.yaml", {"name": "t", "databases": ["owl"]})
+        _write_shared(config_dir, {"slugs": [{"version": "1.0"}]})
+        monkeypatch.chdir(tmp_path)
+        mapper = RouteMapper(str(config_dir / "config.yaml"))
+        result = await mapper.map_database_route("owl", "1.0/detections")
+        assert result.status_code == 500
+
+
 #
 # INTERNAL
 #
@@ -575,6 +822,11 @@ class _RecordingConnection:
 
     def secret_statements(self) -> List[str]:
         return [s for s in self.statements if s.startswith("CREATE OR REPLACE SECRET")]
+
+
+def _write_shared(config_dir: Path, data: Dict[str, Any]) -> None:
+    """Write the shared ``databases/config.yaml`` under ``config_dir``."""
+    _write_yaml(config_dir / "databases" / "config.yaml", data)
 
 
 def _write_yaml(path: Path, data: Dict[str, Any]) -> None:
