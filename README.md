@@ -692,7 +692,7 @@ Rules:
 
 api_dock does not paste request values into SQL. Each `{{variable}}` in `sql`, `multivalue_sql`, conditional `sql` and `queries:` becomes a placeholder, and its value (from the path, query string, a `default`, or a cookie) is sent to DuckDB separately. DuckDB converts the value to the column's type, so number, date and boolean filters work as written. A value that is not a valid number, date or boolean for its column, such as `?age=25 OR true`, is rejected with an error instead of being run as SQL.
 
-Because the value is sent separately, **do not put quotes around variables**:
+Because the value is sent separately, **write variables without quotes**:
 
 | Write | Not |
 |---|---|
@@ -700,7 +700,7 @@ Because the value is sent separately, **do not put quotes around variables**:
 | `UPPER(name) = UPPER({{name}})` | `UPPER(name) = UPPER('{{name}}')` |
 | `name ILIKE '%' \|\| {{name}} \|\| '%'` | `name ILIKE '%{{name}}%'` |
 
-Inside quotes, the value's placeholder is read as literal text, so a request to a route with a quoted variable fails with `500 Database query error`. A variable also can't be inside a SQL comment (`-- {{x}}` or `/* {{x}} */`). Its value is still sent, but the database ignores the comment, so it gets one more value than the query uses and the request fails with `500 Database query error`. A variable also can't be used as a column name in double quotes (`"{{column}}"`).
+For compatibility with 0.8.x and earlier configs, a string that is exactly one variable (`'{{department}}'`) is read as `{{department}}`. Any other quoted variable, like `'%{{name}}%'`, is literal text, so a request to that route fails with `500 Database query error`; rewrite it with `||` as in the last row above. A variable also can't be inside a SQL comment (`-- {{x}}` or `/* {{x}} */`). Its value is still sent, but the database ignores the comment, so it gets one more value than the query uses and the request fails with `500 Database query error`. A variable also can't be used as a column name in double quotes (`"{{column}}"`).
 
 `sql_append` works differently. Its values are column names, `ASC`/`DESC` or numbers, which a database can't accept as separate values, so they are written into the SQL text. Each one must contain only letters, digits, spaces and `_ . , ( ) -`, and must not contain `--`. The same applies to the `sql_append` of a [conditional SQL selection](#conditional-sql-selection) branch.
 
