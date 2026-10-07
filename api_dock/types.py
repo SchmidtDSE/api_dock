@@ -172,6 +172,8 @@ class SqlContext:
             absent, so their ``name``/``version`` source columns are NULL.
         connection: The PostgreSQL connection the query runs natively on, or
             None when it runs on DuckDB. Decides how ``[[table]]`` is written.
+        columns: For native PostgreSQL queries: PostgreSQL table name ->
+            ``(column, type)`` pairs, used to line up union members.
     """
 
     name: Optional[str] = None
@@ -179,3 +181,4 @@ class SqlContext:
     schema_groups: Dict[str, List[str]] = field(default_factory=dict)
     schema_sources: Dict[str, Tuple[str, Optional[str]]] = field(default_factory=dict)
     connection: Optional[str] = None
+    columns: Dict[str, List[Tuple[str, str]]] = field(default_factory=dict)
