@@ -17,7 +17,7 @@ License: BSD 3-Clause
 #
 import asyncio
 import logging
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import psycopg
 from psycopg.conninfo import make_conninfo
@@ -52,6 +52,13 @@ RECONNECT_TIMEOUT_SECONDS: float = 300.0
 # connections. Class 08 (connection exceptions) is also treated as unavailable.
 UNAVAILABLE_SQLSTATES: frozenset = frozenset({"57P01", "57P02", "57P03"})
 CONNECTION_SQLSTATE_CLASS: str = "08"
+
+# A table's columns and their exact types, in order (for lining up unions).
+COLUMNS_SQL: str = (
+    "SELECT a.attname, format_type(a.atttypid, a.atttypmod) FROM pg_attribute a "
+    "WHERE a.attrelid = %s::regclass AND a.attnum > 0 AND NOT a.attisdropped "
+    "ORDER BY a.attnum"
+)
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +141,7 @@ class PostgresPools:
         """
         self._connections = connections
         self._backends: Dict[str, PostgresBackend] = {}
+        self._columns: Dict[Tuple[str, str], List[Tuple[str, str]]] = {}
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._closed = False
 
@@ -177,6 +185,34 @@ class PostgresPools:
         backends, self._backends = self._backends, {}
         for backend in backends.values():
             await backend.pool.close()
+
+    async def columns(
+            self, name: str, tables: Iterable[str]) -> Dict[str, List[Tuple[str, str]]]:
+        """Each table's columns and types, read once per table and then cached.
+
+        Columns are read from PostgreSQL the first time a table is needed and
+        kept until restart (a changed table definition needs a restart).
+
+        Args:
+            name: Connection name.
+            tables: PostgreSQL table names (``schema.table``) on that connection.
+
+        Returns:
+            Table name -> ``(column, type)`` pairs in column order.
+
+        Raises:
+            DatabaseUnavailableError: If the database can't be reached.
+            DatabaseLifecycleError: See backend().
+        """
+        backend = self.backend(name)
+        result = {}
+        for table in tables:
+            key = (name, table)
+            if key not in self._columns:
+                _, rows = await backend.execute(COLUMNS_SQL, [table], [])
+                self._columns[key] = [(str(column), str(data_type)) for column, data_type in rows]
+            result[table] = self._columns[key]
+        return result
 
     def backend(self, name: str) -> PostgresBackend:
         """The backend for a named connection.
