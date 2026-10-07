@@ -188,6 +188,26 @@ def resolve_settings(entry: Dict[str, Any]) -> PostgresSettings:
     )
 
 
+def conninfo(fields: Dict[str, str]) -> str:
+    """Build a libpq connection string (``key='value' ...``) from resolved fields.
+
+    Used to attach PostgreSQL connections to DuckDB, which takes a libpq
+    connection string. Values are quoted with ``\\`` and ``'`` escaped.
+
+    Args:
+        fields: Resolved connection fields (see resolve_settings), plus any
+            extra fields such as ``options``.
+
+    Returns:
+        The connection string. It may hold a password: never log it.
+    """
+    def quote(value: str) -> str:
+        """Quote one value for a libpq connection string."""
+        return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+    return " ".join(f"{key}={quote(str(value))}" for key, value in fields.items())
+
+
 def connection_options(statement_timeout_ms: int) -> str:
     """Build libpq options for read-only transactions, the query timeout and UTC.
 
