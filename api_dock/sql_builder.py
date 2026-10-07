@@ -14,7 +14,8 @@ License: BSD 3-Clause
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from api_dock.database_config import get_named_query, get_table_definition
+from api_dock.database_config import get_named_query, resolve_table_reference
+from api_dock.types import TableReference
 
 
 #
@@ -69,7 +70,8 @@ def build_sql_query(
         path_params: Optional[Dict[str, str]] = None,
         query_params: Optional[Dict[str, str]] = None,
         cookies: Optional[Dict[str, str]] = None,
-        multi_query_params: Optional[Dict[str, List[str]]] = None) -> str:
+        multi_query_params: Optional[Dict[str, List[str]]] = None,
+        shared_config: Optional[Dict[str, Any]] = None) -> str:
     """Build SQL query with fragment-based WHERE clause support.
 
     Args:
@@ -82,6 +84,8 @@ def build_sql_query(
             list of values received (for keys repeated in the URL). When a param
             has a ``multivalue_sql`` template and more than one value was passed,
             that template is used instead of ``sql``.
+        shared_config: The shared ``database`` mapping from
+            ``databases/config.yaml`` (schemas, global tables, meta), or None.
 
     Returns:
         Complete SQL query with all substitutions applied.
@@ -89,6 +93,44 @@ def build_sql_query(
     Raises:
         ValueError: If referenced table or query is not defined in config.
     """
+    sql_query, _ = build_sql_query_with_tables(
+        route_config, database_config, path_params, query_params, cookies,
+        multi_query_params, shared_config
+    )
+    return sql_query
+
+
+def build_sql_query_with_tables(
+        route_config: Dict[str, Any],
+        database_config: Dict[str, Any],
+        path_params: Optional[Dict[str, str]] = None,
+        query_params: Optional[Dict[str, str]] = None,
+        cookies: Optional[Dict[str, str]] = None,
+        multi_query_params: Optional[Dict[str, List[str]]] = None,
+        shared_config: Optional[Dict[str, Any]] = None) -> Tuple[str, List[TableReference]]:
+    """Build a SQL query and report the tables it references.
+
+    Same as build_sql_query, but also returns every table resolved from a
+    ``[[...]]`` reference, so the caller can set up storage authentication and
+    create views for ``[[schema.table]]`` references before executing.
+
+    Args:
+        route_config: Route configuration dictionary with sql and query_params.
+        database_config: Database configuration dictionary with tables definitions.
+        path_params: Dictionary of path parameters extracted from the route.
+        query_params: Dictionary of query parameters from URL.
+        cookies: Dictionary of cookie values from request.
+        multi_query_params: Full value lists for repeated query keys.
+        shared_config: The shared ``database`` mapping, or None.
+
+    Returns:
+        Tuple of (sql_query, table_references) where table_references are
+        unique by SQL name, in first-reference order.
+
+    Raises:
+        ValueError: If referenced table or query is not defined in config.
+    """
+    table_refs: Dict[str, TableReference] = {}
     if path_params is None:
         path_params = {}
     if query_params is None:
@@ -118,7 +160,9 @@ def build_sql_query(
 
     # Substitute table references [[table_name]] with FROM clauses
     # Strip whitespace/newlines from base SQL (YAML block scalars add trailing \n)
-    sql_with_tables = _substitute_table_references(sql_template, database_config).strip()
+    sql_with_tables = _substitute_table_references(
+        sql_template, database_config, shared_config, table_refs
+    ).strip()
 
     # Resolve default values for value-only params so they're available for substitution
     all_params = {**path_params, **query_params}
@@ -133,7 +177,10 @@ def build_sql_query(
         route_config, query_params, path_params, multi_query_params
     )
     # Expand [[table_name]] references in WHERE fragments (same syntax as main sql)
-    where_fragments = [_substitute_table_references(f, database_config) for f in where_fragments]
+    where_fragments = [
+        _substitute_table_references(f, database_config, shared_config, table_refs)
+        for f in where_fragments
+    ]
 
     # Combine base SQL with WHERE fragments
     if where_fragments:
@@ -151,7 +198,7 @@ def build_sql_query(
     # branch GROUP BY precedes a shared ORDER BY / LIMIT.
     if branch_appends:
         expanded_branch = [
-            _substitute_table_references(fragment, database_config)
+            _substitute_table_references(fragment, database_config, shared_config, table_refs)
             for fragment in branch_appends
         ]
         sql_with_tables += ' ' + ' '.join(expanded_branch)
@@ -159,7 +206,10 @@ def build_sql_query(
     # Build post-WHERE append fragments (ORDER BY, LIMIT, etc.)
     append_fragments = build_append_clause_from_params(route_config, query_params, path_params)
     # Expand [[table_name]] references in APPEND fragments (same syntax as main sql)
-    append_fragments = [_substitute_table_references(f, database_config) for f in append_fragments]
+    append_fragments = [
+        _substitute_table_references(f, database_config, shared_config, table_refs)
+        for f in append_fragments
+    ]
     if append_fragments:
         sql_with_tables += ' ' + ' '.join(append_fragments)
 
@@ -167,7 +217,36 @@ def build_sql_query(
     # This now includes cookies as {{cookies.cookie_name}}
     sql_with_params = _substitute_variables_in_string(sql_with_tables, all_params)
 
-    return sql_with_params
+    return (sql_with_params, list(table_refs.values()))
+
+
+def build_schema_view_statements(table_refs: List[TableReference]) -> List[str]:
+    """Build DuckDB statements exposing ``[[schema.table]]`` references as views.
+
+    Each qualified reference becomes ``CREATE SCHEMA IF NOT EXISTS <schema>``
+    plus ``CREATE OR REPLACE VIEW <schema>.<table>`` over the table's URI, so SQL
+    can address it as ``schema.table`` (and columns as ``schema.table.col``).
+    Unqualified references are inlined and need no view.
+
+    Args:
+        table_refs: Table references from build_sql_query_with_tables.
+
+    Returns:
+        SQL statements to execute (after storage auth) before the query.
+    """
+    statements: List[str] = []
+    schemas_created = set()
+    for reference in table_refs:
+        if not reference.qualified or not reference.schema:
+            continue
+        if reference.schema not in schemas_created:
+            statements.append(f"CREATE SCHEMA IF NOT EXISTS {reference.schema}")
+            schemas_created.add(reference.schema)
+        statements.append(
+            f"CREATE OR REPLACE VIEW {reference.sql_name} AS "
+            f"SELECT * FROM {_escape_sql_value(reference.uri)}"
+        )
+    return statements
 
 
 def resolve_route_sql(
@@ -585,12 +664,26 @@ def extract_path_parameters(path: str, pattern: str) -> Dict[str, str]:
 #
 # INTERNAL
 #
-def _substitute_table_references(sql: str, database_config: Dict[str, Any]) -> str:
+def _substitute_table_references(
+        sql: str,
+        database_config: Dict[str, Any],
+        shared_config: Optional[Dict[str, Any]] = None,
+        collected: Optional[Dict[str, TableReference]] = None) -> str:
     """Substitute [[table_name]] references with table file paths in FROM clauses.
+
+    Unqualified tables (version ``tables``, the version's shared schema, or
+    shared global tables) expand to ``'<uri>' AS name`` after FROM/JOIN and to
+    ``name`` elsewhere. Qualified ``[[schema.table]]`` references expand to the
+    view name ``schema.table`` after FROM/JOIN (no alias, so a user alias or
+    ``schema.table.col`` still works) and to ``table`` elsewhere (DuckDB does
+    not accept ``schema.table.*``).
 
     Args:
         sql: SQL query template with [[table_name]] placeholders.
         database_config: Database configuration dictionary.
+        shared_config: The shared ``database`` mapping, or None.
+        collected: Optional dict filled with each resolved TableReference,
+            keyed by its SQL name.
 
     Returns:
         SQL with table references substituted.
@@ -603,10 +696,12 @@ def _substitute_table_references(sql: str, database_config: Dict[str, Any]) -> s
 
     def replace_table_reference(match):
         table_name = match.group(1)
-        table_path = get_table_definition(table_name, database_config)
+        reference = resolve_table_reference(table_name, database_config, shared_config)
 
-        if table_path is None:
+        if reference is None:
             raise ValueError(f"Table '{table_name}' not found in database configuration")
+        if collected is not None:
+            collected.setdefault(reference.sql_name, reference)
 
         # Check context: if preceded by FROM or JOIN, use full reference
         # Otherwise, just use the table name (alias)
@@ -615,10 +710,12 @@ def _substitute_table_references(sql: str, database_config: Dict[str, Any]) -> s
 
         if 'FROM' in context_before or 'JOIN' in context_before:
             # Full reference for FROM/JOIN clauses
-            return f"'{table_path}' AS {table_name}"
+            if reference.qualified:
+                return reference.sql_name
+            return f"'{reference.uri}' AS {reference.name}"
         else:
             # Just the table name (alias) for other contexts like SELECT
-            return table_name
+            return reference.name
 
     result_sql = re.sub(table_pattern, replace_table_reference, sql)
     return result_sql
