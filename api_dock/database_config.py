@@ -56,6 +56,15 @@ SLUG_NAME_KEY: str = "name"
 SLUG_VERSION_KEY: str = "version"
 SLUG_VERSIONS_KEY: str = "versions"
 
+# Named groups of shared schemas: {group: [schema, ...]}, referenced in SQL as
+# [[group.table]]. Group names may not collide with schema names.
+SCHEMA_GROUPS_KEY: str = "schema_groups"
+
+# Union selectors: [[*.table]] = every shared schema with that table; a trailing
+# "!" ([[*!.table]], [[group!.table]]) drops the current version's schema.
+ALL_SCHEMAS: str = "*"
+EXCLUDE_SELF_SUFFIX: str = "!"
+
 # Exclusion version wildcard: matches every version (and unversioned databases).
 ALL_VERSIONS: str = "*"
 
@@ -212,7 +221,7 @@ def load_shared_config(config_dir: Optional[str] = None) -> Dict[str, Any]:
     """Load the whole shared database config file (``databases/config.yaml``).
 
     Top-level keys: ``database`` (tables, ``meta``, ``schema``), ``slugs``
-    (inline database/version configs), ``routes`` and
+    (inline database/version configs), ``schema_groups``, ``routes`` and
     ``query_params`` (added to every database/version), and the
     ``route_inclusions`` / ``query_inclusions`` and ``route_exclusions`` /
     ``query_exclusions`` lists.
@@ -250,12 +259,15 @@ def load_shared_config(config_dir: Optional[str] = None) -> Dict[str, Any]:
         ROUTE_EXCLUSIONS_KEY: list,
         QUERY_EXCLUSIONS_KEY: list,
         SLUGS_KEY: list,
+        SCHEMA_GROUPS_KEY: dict,
     }
     for key, expected in expected_types.items():
         value = contents.get(key) or expected()
         if not isinstance(value, expected):
             raise ValueError(f"'{key}' in {shared_path} must be a {expected.__name__}")
         normalized[key] = value
+
+    _validate_schema_groups(normalized, shared_path)
     return normalized
 
 
@@ -416,6 +428,92 @@ def resolve_table_reference(
             return TableReference(name=table_name, uri=entry[0], metadata=entry[1])
 
     return None
+
+
+def resolve_schema_union(
+        selector: str,
+        table_name: str,
+        shared_config: Optional[Dict[str, Any]] = None,
+        schema_groups: Optional[Dict[str, List[str]]] = None) -> Optional[List[TableReference]]:
+    """Resolve a union selector (``*`` or a schema group) to its member tables.
+
+    Args:
+        selector: ``*`` for every shared schema, or a ``schema_groups`` name
+            (without any trailing ``!``).
+        table_name: Table to read from each member schema.
+        shared_config: The shared ``database`` mapping, or None.
+        schema_groups: The shared ``schema_groups`` mapping, or None.
+
+    Returns:
+        Qualified TableReferences in schema/group order, or None if the
+        selector is neither ``*`` nor a group (i.e. it names a single schema).
+
+    Raises:
+        ValueError: If no schema has the table (``*``), or a group member is
+            not a schema or lacks the table.
+    """
+    schemas = (shared_config or {}).get(SHARED_SCHEMA_KEY) or {}
+    groups = schema_groups or {}
+
+    if selector == ALL_SCHEMAS:
+        members = [name for name, tables in schemas.items() if table_name in (tables or {})]
+        if not members:
+            raise ValueError(f"No shared schema has a table named '{table_name}'")
+    elif selector in groups:
+        members = list(groups[selector])
+        for schema_name in members:
+            if table_name not in (schemas.get(schema_name) or {}):
+                raise ValueError(
+                    f"Schema '{schema_name}' in group '{selector}' has no table '{table_name}'"
+                )
+    else:
+        return None
+
+    references = []
+    for schema_name in members:
+        reference = resolve_table_reference(
+            f"{schema_name}{SCHEMA_SEPARATOR}{table_name}", {}, shared_config
+        )
+        if reference is None:
+            raise ValueError(f"Table '{schema_name}.{table_name}' not found")
+        references.append(reference)
+    return references
+
+
+def get_schema_sources(
+        database_names: List[str],
+        config_dir: Optional[str] = None) -> Dict[str, Tuple[str, Optional[str]]]:
+    """Map each shared schema to the database/version that uses it.
+
+    Args:
+        database_names: Served database names (from the main config).
+        config_dir: Base config directory. If None, uses default.
+
+    Returns:
+        Schema name -> (database name, version or None). Schemas used by more
+        than one database/version are left out (their source is ambiguous).
+    """
+    sources: Dict[str, Tuple[str, Optional[str]]] = {}
+    ambiguous = set()
+
+    for database_name in database_names:
+        if is_versioned_database(database_name, config_dir):
+            versions: List[Optional[str]] = list(get_database_versions(database_name, config_dir))
+        else:
+            versions = [None]
+        for version in versions:
+            try:
+                config = load_database_config(database_name, config_dir, version)
+            except FileNotFoundError:
+                continue
+            schema_name = config.get(DATABASE_SCHEMA_KEY) if isinstance(config, dict) else None
+            if not schema_name:
+                continue
+            if schema_name in sources:
+                ambiguous.add(schema_name)
+            sources[schema_name] = (database_name, version)
+
+    return {k: v for k, v in sources.items() if k not in ambiguous}
 
 
 def get_local_table_references(
@@ -787,6 +885,37 @@ def _load_yaml_file(file_path: str) -> Dict[str, Any]:
         raise FileNotFoundError(f"Database configuration file not found: {file_path}")
     except yaml.YAMLError as e:
         raise yaml.YAMLError(f"Invalid YAML in {file_path}: {e}")
+
+
+def _validate_schema_groups(shared_file: Dict[str, Any], shared_path: str) -> None:
+    """Validate the shared ``schema_groups`` mapping.
+
+    Args:
+        shared_file: The normalized shared config.
+        shared_path: Path of the shared config (for error messages).
+
+    Raises:
+        ValueError: If a group name isn't a plain identifier or collides with a
+            schema name, or a group isn't a non-empty list of known schemas.
+    """
+    schemas = (shared_file.get(SHARED_CONFIG_KEY) or {}).get(SHARED_SCHEMA_KEY) or {}
+    for group, members in (shared_file.get(SCHEMA_GROUPS_KEY) or {}).items():
+        if not IDENTIFIER_PATTERN.match(str(group)):
+            raise ValueError(f"{SCHEMA_GROUPS_KEY}: invalid group name '{group}' in {shared_path}")
+        if group in schemas:
+            raise ValueError(
+                f"{SCHEMA_GROUPS_KEY}: '{group}' is also a schema name in {shared_path}"
+            )
+        if not isinstance(members, list) or not members:
+            raise ValueError(
+                f"{SCHEMA_GROUPS_KEY}: '{group}' must be a non-empty list in {shared_path}"
+            )
+        for member in members:
+            if member not in schemas:
+                raise ValueError(
+                    f"{SCHEMA_GROUPS_KEY}: '{group}' names unknown schema '{member}' "
+                    f"in {shared_path}"
+                )
 
 
 def _is_selected(
