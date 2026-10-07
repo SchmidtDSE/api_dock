@@ -180,18 +180,32 @@ remotes:
 settings:
   add_trailing_slash: true              # Auto-add trailing slash to paths (default: true)
   follow_protocol_downgrades: false     # Allow HTTPS->HTTP redirects (default: false)
+  follow_redirects: true                # Follow remote redirects (default: true)
   timeout: 10                           # Upstream request timeout in seconds (default: 10)
+  base_path: /dock                      # Also serve the API under this prefix (default: none)
+  duckdb:                               # Options for database queries (default: none)
+    memory_limit: 700MB
+    threads: 2
+    max_concurrent_queries: 2
 ```
 
-### HTTP behavior Settings
+### Settings
 
-The optional `settings` section controls HTTP behavior:
+The optional `settings` section controls HTTP and query behavior:
 
 - **`add_trailing_slash`** (default: `true`): Automatically append a trailing slash to all proxied paths. This prevents 307/301 redirects from remote APIs that require trailing slashes (e.g., `/projects` → `/projects/`). Set to `false` to disable this behavior.
 
 - **`follow_protocol_downgrades`** (default: `false`): Control how HTTP redirects are handled. When `false` (recommended), HTTPS→HTTP redirects are blocked for security. When `true`, allows following redirects that downgrade from HTTPS to HTTP (not recommended for production).
 
+- **`follow_redirects`** (default: `true`): Whether redirects from a remote are followed by API Dock (`true`) or passed through to the client with their `Location` header (`false`). Set it to `false` when a remote answers with redirects the client should follow itself, such as presigned S3 URLs for large files.
+
 - **`timeout`** (default: `10`): Upstream request timeout in seconds, applied to both the streaming and buffered proxy paths. Raise it for slow upstreams (e.g. large aggregation queries) that would otherwise return a 502 on timeout. Set to `null` or `false` to disable the timeout entirely (not recommended — a stalled upstream can hold the connection open indefinitely).
+
+- **`base_path`** (default: none): An extra URL prefix the API is also served under, e.g. `/dock`. Use it when a proxy or CDN forwards a path on another domain without stripping it (say CloudFront routes `https://app.example.org/dock/*` to API Dock): `/dock/birdnet/latest/detections/` is then handled as `/birdnet/latest/detections/`. Paths without the prefix keep working, so direct calls and health checks are unaffected.
+
+- **`duckdb`** (default: none): Options for the DuckDB connection each database query runs on. Every key except `max_concurrent_queries` is applied as `SET <key> = <value>`, so any [DuckDB setting](https://duckdb.org/docs/configuration/overview) works; the useful ones on small servers are `memory_limit` (DuckDB spills to disk or fails the query instead of exceeding it), `threads`, and `temp_directory`. `max_concurrent_queries` caps how many database queries run at once in the process; further queries wait their turn. Memory limits apply per query, so on a small instance set `memory_limit × max_concurrent_queries` below the instance's memory.
+
+Database queries run in worker threads, so a slow query doesn't hold up other requests (including health checks on `/`).
 
 ### Catalog Endpoints (`expose`)
 
