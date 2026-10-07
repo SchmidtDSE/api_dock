@@ -104,6 +104,7 @@ class TestRouteMapperProxyIssues:
     def _make_route_mapper(self, settings=None):
         """Build a RouteMapper with a minimal config that has one remote."""
         rm = RouteMapper.__new__(RouteMapper)
+        rm.config_dir = "api_dock_config"
         rm.remote_names = ["core"]
         rm.database_names = []
         rm.config = {
@@ -350,6 +351,7 @@ class TestApiDockLevelErrors:
     @pytest.mark.anyio
     async def test_unknown_remote_returns_404(self):
         rm = RouteMapper.__new__(RouteMapper)
+        rm.config_dir = "api_dock_config"
         rm.remote_names = ["core"]
         rm.database_names = []
         rm.config = {}
@@ -364,6 +366,7 @@ class TestApiDockLevelErrors:
     @pytest.mark.anyio
     async def test_blocked_route_returns_403(self):
         rm = RouteMapper.__new__(RouteMapper)
+        rm.config_dir = "api_dock_config"
         rm.remote_names = ["core"]
         rm.database_names = []
         rm.config = {}
@@ -382,6 +385,7 @@ class TestApiDockLevelErrors:
     @pytest.mark.anyio
     async def test_connection_error_returns_502(self):
         rm = RouteMapper.__new__(RouteMapper)
+        rm.config_dir = "api_dock_config"
         rm.remote_names = ["core"]
         rm.database_names = []
         rm.config = {}
@@ -456,6 +460,7 @@ class TestPrepareRemoteRequest:
 
     def _make_route_mapper(self, settings=None):
         rm = RouteMapper.__new__(RouteMapper)
+        rm.config_dir = "api_dock_config"
         rm.remote_names = ["core"]
         rm.database_names = []
         rm.config = {

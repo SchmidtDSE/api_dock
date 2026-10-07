@@ -14,10 +14,15 @@ License: BSD 3-Clause
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import yaml
 
+from api_dock.sql_template_check import (
+    check_comment_at_end,
+    check_commented_variables,
+    check_quoted_variables,
+)
 from api_dock.types import TableReference
 
 
@@ -76,6 +81,23 @@ SCHEMA_SEPARATOR: str = "."
 
 # Schema and table names exposed as DuckDB identifiers must be plain identifiers.
 IDENTIFIER_PATTERN: re.Pattern = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# Keys a query_params entry may have; at least one must be present.
+QUERY_PARAM_KEYS: frozenset = frozenset({
+    'sql', 'multivalue_sql', 'sql_append', 'response', 'conditional', 'action',
+    'required', 'default', 'missing_response',
+})
+
+# Keys each branch of a conditional query param may have; at least one must be present.
+CONDITION_KEYS: frozenset = frozenset({'sql', 'response', 'action'})
+
+# Checks for templates whose {{variables}} are bound. sql_append values are
+# written into the SQL, so their templates only need to not end in a comment,
+# which would hide the clauses joined after them.
+BOUND_TEMPLATE_CHECKS: Tuple[Callable[[str], None], ...] = (
+    check_quoted_variables, check_commented_variables, check_comment_at_end,
+)
+APPEND_TEMPLATE_CHECKS: Tuple[Callable[[str], None], ...] = (check_comment_at_end,)
 
 
 #
@@ -761,79 +783,79 @@ def find_database_route(path: str, database_config: Dict[str, Any]) -> Optional[
     return None
 
 
-def validate_route_config(route_config: Dict[str, Any]) -> bool:
-    """Validate route configuration with new declarative parameter format.
+def validate_route_config(route_config: Dict[str, Any]) -> None:
+    """Check the basic shape of a route configuration.
 
     Args:
         route_config: Route configuration dictionary.
 
-    Returns:
-        True if configuration is valid, False otherwise.
+    Raises:
+        ValueError: If the route is malformed. The message gives the reason.
     """
-    # Validate basic route structure
     if not isinstance(route_config, dict):
-        return False
-
-    # Check for required route field
+        raise ValueError("route must be a mapping")
     if 'route' not in route_config:
-        return False
-
+        raise ValueError("missing required 'route' key")
     # The sql selector may be a plain string or a list of selector rules.
     if 'sql' in route_config and not isinstance(route_config['sql'], (str, list)):
-        return False
+        raise ValueError("'sql' must be a string or a list of selector rules")
 
-    # Validate query_params structure if present
-    if 'query_params' in route_config:
-        query_params = route_config['query_params']
-        if not isinstance(query_params, list):
-            return False
+    query_params = route_config.get('query_params', [])
+    if not isinstance(query_params, list):
+        raise ValueError("'query_params' must be a list")
+    for param_item in query_params:
+        _validate_query_param(param_item)
 
-        for param_item in query_params:
-            if not isinstance(param_item, dict):
-                return False
 
-            # Each parameter should have exactly one key (the parameter name)
-            if len(param_item) != 1:
-                return False
+def check_database_config(
+        database_config: Dict[str, Any],
+        template_check: Optional[Callable[[str, Dict[str, Any]], None]] = None) -> None:
+    """Check every named query and route of a loaded database config.
 
-            param_name, param_config = next(iter(param_item.items()))
+    Each route is merged with top-level query_params, as a request would be,
+    then checked for shape and for {{variables}} inside quotes or comments in
+    any template whose values are bound. sql_append templates are not checked
+    for variables because their values are written into the SQL text. No
+    template may end inside a comment.
 
-            # Validate parameter configuration structure
-            if not isinstance(param_config, dict):
-                return False
+    Args:
+        database_config: Database configuration, already merged with the main
+            config (and with the shared config's routes/query_params).
+        template_check: Optional extra check run on every query and route
+            template, called as ``template_check(template, route_config)``
+            (``route_config`` is ``{}`` for named queries); it raises
+            ValueError for a bad template (e.g. an unknown ``[[table]]``).
 
-            # Check for valid configuration keys
-            valid_keys = {'sql', 'sql_append', 'response', 'conditional', 'action', 'required', 'default', 'missing_response'}
-            if not any(key in param_config for key in valid_keys):
-                return False
+    Raises:
+        ValueError: If a query or route fails a check. The message names the
+            route (or query) and the template's location.
+    """
+    def extra_checks(route_config: Dict[str, Any]) -> Tuple[Callable[[str], None], ...]:
+        """The template_check bound to one route, as a single-argument check."""
+        if template_check is None:
+            return ()
+        return (lambda template: template_check(template, route_config),)
 
-            # Validate conditional structure if present
-            if 'conditional' in param_config:
-                conditional = param_config['conditional']
-                if not isinstance(conditional, dict):
-                    return False
+    for query_name, query in database_config.get('queries', {}).items():
+        _check_template(
+            f"queries.{query_name}", query, BOUND_TEMPLATE_CHECKS + extra_checks({})
+        )
 
-                # Each conditional value should have sql, response, or action
-                for condition_key, condition_config in conditional.items():
-                    if not isinstance(condition_config, dict):
-                        return False
-                    valid_condition_keys = {'sql', 'response', 'action'}
-                    if not any(key in condition_config for key in valid_condition_keys):
-                        return False
-
-            # Validate action structure if present
-            if 'action' in param_config:
-                action = param_config['action']
-                if not isinstance(action, (str, dict)):
-                    return False
-
-            # Validate missing_response structure if present
-            if 'missing_response' in param_config:
-                missing_response = param_config['missing_response']
-                if not isinstance(missing_response, dict):
-                    return False
-
-    return True
+    for index, route_config in enumerate(database_config.get('routes', [])):
+        try:
+            validate_route_config(route_config)
+            merged = merge_query_params(route_config, database_config)
+            validate_route_config(merged)
+            for location, template in _bound_templates(merged):
+                _check_template(
+                    location, template, BOUND_TEMPLATE_CHECKS + extra_checks(merged)
+                )
+            for location, template in _append_templates(merged):
+                _check_template(
+                    location, template, APPEND_TEMPLATE_CHECKS + extra_checks(merged)
+                )
+        except ValueError as error:
+            raise ValueError(f"route '{_route_label(route_config, index)}': {error}") from error
 
 
 def load_database_config_with_inheritance(database_filename: str, main_config: Dict[str, Any], config_dir: Optional[str] = None, version: Optional[str] = None) -> Dict[str, Any]:
@@ -865,6 +887,186 @@ def load_database_config_with_inheritance(database_filename: str, main_config: D
 #
 # INTERNAL
 #
+def _validate_query_param(param_item: Any) -> None:
+    """Check the shape of one query_params entry.
+
+    Args:
+        param_item: A query_params list entry, expected as ``{name: config}``.
+
+    Raises:
+        ValueError: If the entry is malformed. The message names the param.
+    """
+    if not isinstance(param_item, dict) or len(param_item) != 1:
+        raise ValueError("each query_params entry must be a mapping with one param name")
+
+    param_name, param_config = next(iter(param_item.items()))
+    if not isinstance(param_config, dict):
+        raise ValueError(f"query param '{param_name}' must be a mapping")
+    if not any(key in param_config for key in QUERY_PARAM_KEYS):
+        raise ValueError(
+            f"query param '{param_name}' has none of the keys {sorted(QUERY_PARAM_KEYS)}"
+        )
+    if 'conditional' in param_config:
+        _validate_conditional(param_name, param_config['conditional'])
+    if 'action' in param_config and not isinstance(param_config['action'], (str, dict)):
+        raise ValueError(f"query param '{param_name}' action must be a string or mapping")
+    missing_response = param_config.get('missing_response', {})
+    if not isinstance(missing_response, dict):
+        raise ValueError(f"query param '{param_name}' missing_response must be a mapping")
+
+
+def _validate_conditional(param_name: str, conditional: Any) -> None:
+    """Check the shape of a query param's conditional section.
+
+    Args:
+        param_name: Name of the query param, for error messages.
+        conditional: The param's ``conditional`` value.
+
+    Raises:
+        ValueError: If the section is malformed. The message names the param.
+    """
+    if not isinstance(conditional, dict):
+        raise ValueError(f"query param '{param_name}' conditional must be a mapping")
+    for condition_key, condition_config in conditional.items():
+        if not isinstance(condition_config, dict) or not any(
+                key in condition_config for key in CONDITION_KEYS):
+            raise ValueError(
+                f"query param '{param_name}' conditional '{condition_key}' needs one of "
+                f"{sorted(CONDITION_KEYS)}"
+            )
+
+
+def _check_template(
+        location: str,
+        template: Any,
+        checks: Tuple[Callable[[str], None], ...]) -> None:
+    """Run checks on one SQL template, adding its location to any error.
+
+    Args:
+        location: Where the template is in the config, e.g. ``query_params.name.sql``.
+        template: The template; non-string values are skipped.
+        checks: Functions that raise ValueError for a bad template.
+
+    Raises:
+        ValueError: If a check fails.
+    """
+    if not isinstance(template, str):
+        return
+    try:
+        for check in checks:
+            check(template)
+    except ValueError as error:
+        raise ValueError(f"{location}: {error}") from error
+
+
+def _route_label(route_config: Any, index: int) -> str:
+    """Name a route for error messages.
+
+    Args:
+        route_config: Route configuration entry.
+        index: Position of the entry in the routes list.
+
+    Returns:
+        The route pattern, or ``routes[<index>]`` if the entry has none.
+    """
+    if isinstance(route_config, dict) and 'route' in route_config:
+        return str(route_config['route'])
+    return f"routes[{index}]"
+
+
+def _bound_templates(route_config: Dict[str, Any]) -> List[Tuple[str, Any]]:
+    """List a route's SQL templates whose {{variables}} are bound, with their locations.
+
+    Args:
+        route_config: Route configuration, merged with top-level query_params.
+
+    Returns:
+        ``(location, template)`` pairs for the route sql (every selector
+        branch), and each query param's sql, multivalue_sql and conditional sql.
+    """
+    templates = [
+        (location, node) if isinstance(node, str) else (f"{location}.sql", node['sql'])
+        for location, node in _selector_leaves(route_config.get('sql', ''), 'sql')
+    ]
+    for param_item in route_config.get('query_params', []):
+        param_name, param_config = next(iter(param_item.items()))
+        prefix = f"query_params.{param_name}"
+        for key in ('sql', 'multivalue_sql'):
+            if key in param_config:
+                templates.append((f"{prefix}.{key}", param_config[key]))
+        for condition_key, condition_config in param_config.get('conditional', {}).items():
+            if 'sql' in condition_config:
+                location = f"{prefix}.conditional.{condition_key}.sql"
+                templates.append((location, condition_config['sql']))
+    return templates
+
+
+def _append_templates(route_config: Dict[str, Any]) -> List[Tuple[str, Any]]:
+    """List a route's sql_append templates, with their locations.
+
+    Args:
+        route_config: Route configuration, merged with top-level query_params.
+
+    Returns:
+        ``(location, template)`` pairs for each selector branch's sql_append
+        (a string or a list) and each query param's sql_append.
+    """
+    templates = []
+    for location, node in _selector_leaves(route_config.get('sql', ''), 'sql'):
+        append = node.get('sql_append') if isinstance(node, dict) else None
+        if isinstance(append, list):
+            templates.extend(
+                (f"{location}.sql_append[{index}]", item) for index, item in enumerate(append)
+            )
+        elif append is not None:
+            templates.append((f"{location}.sql_append", append))
+    for param_item in route_config.get('query_params', []):
+        param_name, param_config = next(iter(param_item.items()))
+        if 'sql_append' in param_config:
+            templates.append((f"query_params.{param_name}.sql_append", param_config['sql_append']))
+    return templates
+
+
+def _selector_leaves(node: Any, location: str) -> List[Tuple[str, Any]]:
+    """List the leaves of an sql selector node, with their locations.
+
+    A node is a string, a leaf ``{sql, sql_append}``, a rule, or a list of
+    rules (see sql_builder.resolve_route_sql).
+
+    Args:
+        node: The selector node.
+        location: The node's location in the route config.
+
+    Returns:
+        ``(location, leaf)`` pairs, where each leaf is a SQL string or a
+        mapping with an ``sql`` key.
+    """
+    if isinstance(node, str):
+        return [(location, node)]
+    if isinstance(node, list):
+        return [
+            leaf
+            for index, item in enumerate(node)
+            for leaf in _selector_leaves(item, f"{location}[{index}]")
+        ]
+    if not isinstance(node, dict):
+        return []
+    if 'sql' in node:
+        return [(location, node)]
+
+    leaves = []
+    for key in ('then', 'else', 'default'):
+        if key in node:
+            leaves.extend(_selector_leaves(node[key], f"{location}.{key}"))
+    match = node.get('match')
+    if isinstance(match, dict):
+        for value, branch in match.items():
+            leaves.extend(_selector_leaves(branch, f"{location}.match.{value}"))
+    elif isinstance(match, list):
+        leaves.extend(_selector_leaves(match, f"{location}.match"))
+    return leaves
+
+
 def _load_yaml_file(file_path: str) -> Dict[str, Any]:
     """Load a YAML file and return its contents.
 

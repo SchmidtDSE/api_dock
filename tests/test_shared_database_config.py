@@ -490,7 +490,7 @@ class TestBuildSqlWithSharedTables:
 
     def test_unqualified_schema_table_inlines(self) -> None:
         route = {"sql": "SELECT [[detections]].* FROM [[detections]]"}
-        sql, refs = build_sql_query_with_tables(route, VERSION_CONFIG, shared_config=SHARED_CONFIG)
+        sql, values, refs = build_sql_query_with_tables(route, VERSION_CONFIG, shared_config=SHARED_CONFIG)
         assert sql == (
             "SELECT detections.* FROM 's3://bucket/bn24/detections.parquet' AS detections"
         )
@@ -503,18 +503,19 @@ class TestBuildSqlWithSharedTables:
                 "WHERE [[birdnet_2p4.detections]].recording_id = {{recording_id}}"
             ),
         }
-        sql, refs = build_sql_query_with_tables(
+        sql, values, refs = build_sql_query_with_tables(
             route, {}, {"recording_id": "4"}, shared_config=SHARED_CONFIG
         )
         assert sql == (
             "SELECT detections.* FROM birdnet_2p4.detections "
-            "WHERE detections.recording_id = '4'"
+            "WHERE detections.recording_id = ?"
         )
+        assert values == ["4"]
         assert [ref.sql_name for ref in refs] == ["birdnet_2p4.detections"]
 
     def test_qualified_keeps_user_alias(self) -> None:
         route = {"sql": "SELECT o.id FROM [[birdnet_3p0.detections]] o"}
-        sql, _ = build_sql_query_with_tables(route, {}, shared_config=SHARED_CONFIG)
+        sql, _, _ = build_sql_query_with_tables(route, {}, shared_config=SHARED_CONFIG)
         assert sql == "SELECT o.id FROM birdnet_3p0.detections o"
 
     def test_refs_from_fragments_are_collected(self) -> None:
@@ -522,7 +523,7 @@ class TestBuildSqlWithSharedTables:
             "sql": "SELECT [[revisions]].* FROM [[revisions]]",
             "query_params": [{"g": {"sql": "[[revisions]].id IN (SELECT id FROM [[table1]])"}}],
         }
-        _, refs = build_sql_query_with_tables(
+        _, _, refs = build_sql_query_with_tables(
             route, VERSION_CONFIG, query_params={"g": "1"}, shared_config=SHARED_CONFIG
         )
         assert [ref.sql_name for ref in refs] == ["revisions", "table1"]
@@ -795,16 +796,14 @@ class TestMapDatabaseRouteEndToEnd:
         result = await mapper.map_database_route("owl", "6.0/detections")
         assert result.status_code == 404
 
-    @pytest.mark.anyio
-    async def test_malformed_slugs_return_500(
+    def test_malformed_slugs_stop_startup(
             self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         config_dir = tmp_path / "api_dock_config"
         _write_yaml(config_dir / "config.yaml", {"name": "t", "databases": ["owl"]})
         _write_shared(config_dir, {"slugs": [{"version": "1.0"}]})
         monkeypatch.chdir(tmp_path)
-        mapper = RouteMapper(str(config_dir / "config.yaml"))
-        result = await mapper.map_database_route("owl", "1.0/detections")
-        assert result.status_code == 500
+        with pytest.raises(ValueError, match="slugs"):
+            RouteMapper(str(config_dir / "config.yaml"))
 
 
 #

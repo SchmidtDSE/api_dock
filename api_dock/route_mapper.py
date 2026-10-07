@@ -13,6 +13,7 @@ License: BSD 3-Clause
 #
 import asyncio
 import json
+import os
 import re
 import threading
 import httpx
@@ -20,10 +21,10 @@ import yaml
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 from api_dock.auth import validate_authentication
-from api_dock.config import filter_cookies_by_config, filter_remote_query_params, find_remote_config, find_route_mapping, get_authentication_config, get_database_names, get_remote_names, get_remote_versions, get_settings, is_route_allowed, is_versioned_remote, load_main_config, merge_inherited_config, resolve_latest_version
-from api_dock.database_config import apply_shared_definitions, find_database_route, get_database_versions, get_local_table_references, get_schema_sources, is_versioned_database, load_database_config, load_shared_config, merge_query_params, resolve_latest_database_version, SCHEMA_GROUPS_KEY, SHARED_CONFIG_KEY
+from api_dock.config import DEFAULT_CONFIG_DIR, filter_cookies_by_config, filter_remote_query_params, find_remote_config, find_route_mapping, get_authentication_config, get_database_names, get_remote_names, get_remote_versions, get_settings, is_route_allowed, is_versioned_remote, load_main_config, merge_inherited_config, resolve_latest_version
+from api_dock.database_config import apply_shared_definitions, check_database_config, find_database_route, get_database_versions, get_local_table_references, get_schema_sources, is_versioned_database, load_database_config, load_shared_config, merge_query_params, resolve_latest_database_version, SCHEMA_GROUPS_KEY, SHARED_CONFIG_KEY
 from api_dock.listings import build_listing, resolve_listing_specs
-from api_dock.sql_builder import build_schema_view_statements, build_sql_query_with_tables, extract_path_parameters, process_query_parameters, SOURCE_COLUMNS_KEY, SqlSelectionError
+from api_dock.sql_builder import build_schema_view_statements, build_sql_query_with_tables, check_table_references, extract_path_parameters, process_query_parameters, SOURCE_COLUMNS_KEY, SqlSelectionError
 from api_dock.storage_auth import setup_table_storage_authentication
 from api_dock.types import PreparedRequest, ProxyResponse, SqlContext
 
@@ -159,23 +160,40 @@ class RouteMapper:
     def __init__(self, config_path: Optional[str] = None) -> None:
         """Initialize RouteMapper with configuration.
 
+        Remote and database config files are read from the directory holding
+        the main config file. Every listed database config is checked here, so
+        a bad config stops startup instead of failing on a live request.
+
         Args:
             config_path: Path to main config file. If None, uses default.
+
+        Raises:
+            ValueError: If a listed database config is missing or fails a check.
         """
         try:
             self.config = load_main_config(config_path)
         except (FileNotFoundError, Exception):
             self.config = {"name": "api-dock", "description": "API Dock wrapper", "authors": []}
 
-        self.remote_names = get_remote_names(self.config)
+        self.config_dir = os.path.dirname(config_path) if config_path else DEFAULT_CONFIG_DIR
+        self.remote_names = get_remote_names(self.config, self.config_dir)
         self.database_names = get_database_names(self.config)
         self.settings = get_settings(self.config)
-        self.listing_specs, self.listing_warnings = resolve_listing_specs(self.config)
+        self.listing_specs, self.listing_warnings = resolve_listing_specs(
+            self.config, self.config_dir
+        )
         self.base_path = normalize_base_path(self.settings.get(BASE_PATH_KEY))
         self.duckdb_statements, max_queries = _duckdb_settings(
             self.settings.get(DUCKDB_SETTINGS_KEY)
         )
         self._query_slots = threading.BoundedSemaphore(max_queries) if max_queries else None
+
+        try:
+            shared_file = load_shared_config(self.config_dir)
+        except (ValueError, yaml.YAMLError) as error:
+            raise ValueError(f"Shared database config (databases/config.yaml): {error}") from error
+        for database_name in self.database_names:
+            _check_database(database_name, self.config, self.config_dir, shared_file)
 
     def get_config_metadata(self) -> Dict[str, Any]:
         """Get API metadata from configuration.
@@ -211,7 +229,7 @@ class RouteMapper:
             A list of ``{"model", "version"}`` dicts or ``"model/version"``
             strings, per the spec's format.
         """
-        return build_listing(spec, self.config)
+        return build_listing(spec, self.config, self.config_dir)
 
     async def prepare_remote_request(
             self,
@@ -254,7 +272,7 @@ class RouteMapper:
         if remote_name not in self.remote_names:
             return _error_response(404, f"Remote '{remote_name}' not found")
 
-        is_versioned = is_versioned_remote(remote_name, self.config)
+        is_versioned = is_versioned_remote(remote_name, self.config, self.config_dir)
 
         path_parts = path.split("/") if path else []
         version = None
@@ -262,7 +280,7 @@ class RouteMapper:
 
         if is_versioned and path_parts:
             potential_version = path_parts[0]
-            available_versions = get_remote_versions(remote_name, self.config)
+            available_versions = get_remote_versions(remote_name, self.config, self.config_dir)
 
             if potential_version == "latest":
                 version = resolve_latest_version(available_versions)
@@ -277,17 +295,22 @@ class RouteMapper:
             else:
                 return _error_response(404, f"Configuration for remote '{remote_name}' not found")
         elif is_versioned and not path:
-            available_versions = get_remote_versions(remote_name, self.config)
+            available_versions = get_remote_versions(remote_name, self.config, self.config_dir)
             return _json_response({"versions": available_versions})
 
         if not actual_path:
             actual_path = ""
 
-        if not is_route_allowed(actual_path, self.config, remote_name, version, method):
+        allowed = is_route_allowed(
+            actual_path, self.config, remote_name, version, method, self.config_dir
+        )
+        if not allowed:
             return _error_response(403, f"Route '{actual_path}' not allowed for remote '{remote_name}'")
 
         try:
-            remote_config = find_remote_config(remote_name, self.config, version=version)
+            remote_config = find_remote_config(
+                remote_name, self.config, self.config_dir, version=version
+            )
         except FileNotFoundError:
             return _error_response(404, f"Configuration for remote '{remote_name}' not found")
 
@@ -451,8 +474,10 @@ class RouteMapper:
         # Versions come from version files and the shared config's `slugs`, so
         # a malformed shared config surfaces here.
         try:
-            is_versioned = is_versioned_database(database_name)
-            available_versions = get_database_versions(database_name) if is_versioned else []
+            is_versioned = is_versioned_database(database_name, self.config_dir)
+            available_versions = (
+                get_database_versions(database_name, self.config_dir) if is_versioned else []
+            )
         except (ValueError, yaml.YAMLError):
             return _error_response(500, "Shared database configuration error")
 
@@ -479,7 +504,9 @@ class RouteMapper:
             return _json_response({"versions": available_versions})
 
         try:
-            database_config = load_database_config(database_name, version=version)
+            database_config = load_database_config(
+                database_name, self.config_dir, version=version
+            )
         except FileNotFoundError:
             return _error_response(404, f"Configuration for database '{database_name}' not found")
         except (ValueError, yaml.YAMLError):
@@ -488,7 +515,7 @@ class RouteMapper:
         database_config = merge_inherited_config(database_config, self.config)
 
         try:
-            shared_file = load_shared_config()
+            shared_file = load_shared_config(self.config_dir)
             shared_config = shared_file.get(SHARED_CONFIG_KEY, {})
             database_config = apply_shared_definitions(
                 database_config, shared_file, database_name, version
@@ -550,11 +577,11 @@ class RouteMapper:
                 version=version,
                 schema_groups=shared_file.get(SCHEMA_GROUPS_KEY) or {},
                 schema_sources=(
-                    get_schema_sources(self.database_names)
+                    get_schema_sources(self.database_names, self.config_dir)
                     if route_config.get(SOURCE_COLUMNS_KEY) else {}
                 ),
             )
-            sql_query, table_refs = build_sql_query_with_tables(
+            sql_query, sql_values, table_refs = build_sql_query_with_tables(
                 route_config, database_config, path_params, query_params,
                 filtered_cookies, multi_query_params, shared_config, context
             )
@@ -578,7 +605,7 @@ class RouteMapper:
             # DuckDB calls block; run them in a worker thread so one slow query
             # doesn't stall every other request (and health checks) meanwhile.
             response_data = await asyncio.to_thread(
-                self._run_query, sql_query, auth_tables,
+                self._run_query, sql_query, sql_values, auth_tables,
                 build_schema_view_statements(table_refs),
             )
         except Exception:
@@ -664,6 +691,7 @@ class RouteMapper:
     def _run_query(
             self,
             sql_query: str,
+            sql_values: List[Optional[str]],
             auth_tables: List[Any],
             view_statements: List[str]) -> List[Dict[str, Any]]:
         """Execute a database query on a fresh DuckDB connection (blocking).
@@ -672,7 +700,9 @@ class RouteMapper:
         schema views, then runs the query. Honors max_concurrent_queries.
 
         Args:
-            sql_query: The SQL to run.
+            sql_query: The SQL to run, with a ``?`` marker per bound value.
+            sql_values: Values for the markers, in order (sent separately from
+                the SQL, so they are never parsed as SQL).
             auth_tables: TableReferences to set up storage authentication for.
             view_statements: CREATE SCHEMA/VIEW statements to run first.
 
@@ -693,7 +723,7 @@ class RouteMapper:
                 setup_table_storage_authentication(conn, auth_tables)
                 for statement in view_statements:
                     conn.execute(statement)
-                result = conn.execute(sql_query).fetchall()
+                result = conn.execute(sql_query, sql_values).fetchall()
                 columns = [desc[0] for desc in conn.description] if conn.description else []
             finally:
                 conn.close()
@@ -732,7 +762,7 @@ class RouteMapper:
         """
         from api_dock.config import get_remote_mapping
 
-        mapping = get_remote_mapping(self.config)
+        mapping = get_remote_mapping(self.config, self.config_dir)
         for remote_name, config_path in mapping.items():
             if config_path and filename in config_path:
                 return remote_name
@@ -742,6 +772,69 @@ class RouteMapper:
 #
 # INTERNAL
 #
+def _check_database(
+        database_name: str,
+        main_config: Dict[str, Any],
+        config_dir: str,
+        shared_file: Dict[str, Any]) -> None:
+    """Load and check every version of a database listed in the main config.
+
+    Each version (from a config file or the shared config's ``slugs``) is checked
+    as a request would see it: merged with the main config and with the shared
+    routes/query_params that apply to it (after include/exclude). Besides the
+    template checks in check_database_config, every ``[[table]]``,
+    ``[[schema.table]]`` and union reference must resolve.
+
+    Args:
+        database_name: Name of the database.
+        main_config: Main configuration dictionary, for inheritance.
+        config_dir: Directory holding the config files.
+        shared_file: The loaded shared config (see load_shared_config).
+
+    Raises:
+        ValueError: If a config is missing or fails a check. The message names
+            the database and version.
+    """
+    try:
+        if is_versioned_database(database_name, config_dir):
+            versions: List[Optional[str]] = list(get_database_versions(database_name, config_dir))
+        else:
+            versions = [None]
+    except ValueError as error:
+        raise ValueError(f"Database '{database_name}': {error}") from error
+
+    shared_database = shared_file.get(SHARED_CONFIG_KEY, {})
+    schema_groups = shared_file.get(SCHEMA_GROUPS_KEY, {})
+
+    for version in versions:
+        label = f"Database '{database_name}'"
+        if version is not None:
+            label += f" version '{version}'"
+        try:
+            database_config = load_database_config(database_name, config_dir, version=version)
+        except FileNotFoundError as error:
+            raise ValueError(
+                f"{label} is listed in the main config but has no config file"
+            ) from error
+
+        database_config = merge_inherited_config(database_config, main_config)
+        database_config = apply_shared_definitions(
+            database_config, shared_file, database_name, version
+        )
+
+        def check_tables(template: str, route_config: Dict[str, Any]) -> None:
+            """Fail if a template's [[...]] references don't resolve for this version."""
+            check_table_references(
+                template, database_config, shared_database, schema_groups,
+                route_config.get(SOURCE_COLUMNS_KEY),
+            )
+
+        try:
+            check_database_config(database_config, check_tables)
+        except ValueError as error:
+            raise ValueError(f"{label}, {error}") from error
+
+
 def _duckdb_settings(options: Any) -> Tuple[List[str], Optional[int]]:
     """Turn ``settings.duckdb`` into SET statements and a concurrency cap.
 

@@ -64,7 +64,7 @@ class TestUnionRendering:
     def _sql(self, sql: str, schema: Any = "a", route: Dict[str, Any] = None,
              context: SqlContext = None) -> str:
         route_config = {"sql": sql, **(route or {})}
-        built, _ = build_sql_query_with_tables(
+        built, _, _ = build_sql_query_with_tables(
             route_config, {"schema": schema}, shared_config=SHARED,
             context=context or SqlContext(schema_groups=GROUPS),
         )
@@ -124,7 +124,7 @@ class TestUnionRendering:
         assert self._sql("SELECT * FROM [[b.detections]]") == "SELECT * FROM b.detections"
 
     def test_members_are_collected_for_views(self) -> None:
-        _, refs = build_sql_query_with_tables(
+        _, _, refs = build_sql_query_with_tables(
             {"sql": "SELECT * FROM [[*!.detections]] d"}, {"schema": "a"},
             shared_config=SHARED, context=SqlContext(),
         )
@@ -138,7 +138,7 @@ class TestSourceColumns:
     CONTEXT = SqlContext(schema_sources={"a": ("alpha", "1.0"), "b": ("beta", None)})
 
     def _sql(self, source_columns: Any, sql: str = "SELECT * FROM [[ab.detections]] d") -> str:
-        built, _ = build_sql_query_with_tables(
+        built, _, _ = build_sql_query_with_tables(
             {"sql": sql, "source_columns": source_columns}, {"schema": "a"},
             shared_config=SHARED,
             context=SqlContext(schema_groups=GROUPS, schema_sources=self.CONTEXT.schema_sources),
@@ -177,7 +177,7 @@ class TestSourceColumns:
             self._sql(spec)
 
     def test_no_source_columns_by_default(self) -> None:
-        built, _ = build_sql_query_with_tables(
+        built, _, _ = build_sql_query_with_tables(
             {"sql": "SELECT * FROM [[ab.detections]] d"}, {}, shared_config=SHARED,
             context=SqlContext(schema_groups=GROUPS),
         )
@@ -188,11 +188,12 @@ class TestSelfParams:
     """``{{self.*}}`` placeholders."""
 
     def test_values_and_nulls(self) -> None:
-        built, _ = build_sql_query_with_tables(
+        built, values, _ = build_sql_query_with_tables(
             {"sql": "SELECT {{self.schema}}, {{self.name}}, {{self.version}} FROM [[a.detections]]"},
             {"schema": "a"}, shared_config=SHARED, context=SqlContext(name="owl"),
         )
-        assert built == "SELECT 'a', 'owl', CAST(NULL AS VARCHAR) FROM a.detections"
+        assert built == "SELECT ?, ?, ? FROM a.detections"
+        assert values == ["a", "owl", None]
 
 
 class TestSchemaGroupsValidation:

@@ -112,7 +112,7 @@ class TestRequestHeaderFilter:
     async def test_prepared_request_has_no_host(self) -> None:
         mapper = RouteMapper.__new__(RouteMapper)
         mapper.remote_names, mapper.database_names, mapper.settings = ["core"], [], {}
-        mapper.config = {"remotes": ["core"]}
+        mapper.config, mapper.config_dir = {"remotes": ["core"]}, "api_dock_config"
         with patch("api_dock.route_mapper.is_versioned_remote", return_value=False), \
              patch("api_dock.route_mapper.is_route_allowed", return_value=True), \
              patch("api_dock.route_mapper.find_remote_config",

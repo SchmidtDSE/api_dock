@@ -30,6 +30,9 @@ from api_dock.types import PreparedRequest, ProxyResponse
 #
 # CONSTANTS
 #
+# The default app, built on first access to ``app`` (see __getattr__).
+_DEFAULT_APP: Any = None
+
 # Headers excluded when forwarding a streaming (raw-byte) upstream response.
 # Derived from route_mapper.HOP_BY_HOP_HEADERS but keeps content-encoding:
 # aiter_raw() yields the upstream's compressed bytes unchanged, so the
@@ -75,6 +78,29 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         app.add_middleware(_StripBasePath, base_path=route_mapper.base_path)
 
     return app
+
+
+def __getattr__(name: str) -> Any:
+    """Build the default ``app`` on first use instead of at import (PEP 562).
+
+    ``from api_dock.fast_api import app`` and server import strings
+    such as ``api_dock.fast_api:app`` still work. Building the app
+    at import time ran the startup config check on whatever config sits in the
+    current directory, so any import of api_dock (even ``api-dock --help``)
+    failed when that config was invalid.
+
+    Args:
+        name: The attribute being looked up.
+
+    Returns:
+        The default app, built from the default config on first access.
+
+    Raises:
+        AttributeError: For any other missing attribute.
+    """
+    if name == "app":
+        return _default_app()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 #
@@ -323,5 +349,13 @@ async def _stream_upstream(prepared: PreparedRequest) -> Response:
     )
 
 
-# Default app instance
-app = create_app()
+def _default_app() -> Any:
+    """Build the default FastAPI app once, from the default config.
+
+    Returns:
+        The cached app.
+    """
+    global _DEFAULT_APP
+    if _DEFAULT_APP is None:
+        _DEFAULT_APP = create_app()
+    return _DEFAULT_APP

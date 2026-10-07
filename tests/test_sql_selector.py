@@ -211,20 +211,21 @@ class TestSelectorComposition:
 
     def test_count_mode_composes_where_and_group_by(self) -> None:
         """count=True selects the histogram base; recording filter + GROUP BY compose."""
-        sql = build_sql_query(
+        sql, values = build_sql_query(
             COUNT_ROUTE, DATABASE_CONFIG, {}, {"recording": "1", "count": "True"}, {}, {}
         )
         expected = (
             "SELECT detections.common_name, detections.scientific_name, COUNT(*) AS count "
             "FROM 'data/detections.parquet' AS detections "
-            "WHERE detections.recording_id = '1' "
+            "WHERE detections.recording_id = ? "
             "GROUP BY detections.common_name, detections.scientific_name"
         )
         assert sql == expected
+        assert values == ["1"]
 
     def test_count_mode_with_shared_limit(self) -> None:
         """A shared LIMIT append lands after the branch GROUP BY."""
-        sql = build_sql_query(
+        sql, _ = build_sql_query(
             COUNT_ROUTE, DATABASE_CONFIG, {},
             {"recording": "1", "count": "1", "limit": "20"}, {}, {}
         )
@@ -232,12 +233,15 @@ class TestSelectorComposition:
 
     def test_default_mode_returns_rows(self) -> None:
         """Without count, the else branch returns rows with the recording filter."""
-        sql = build_sql_query(COUNT_ROUTE, DATABASE_CONFIG, {}, {"recording": "1"}, {}, {})
+        sql, values = build_sql_query(
+            COUNT_ROUTE, DATABASE_CONFIG, {}, {"recording": "1"}, {}, {}
+        )
         expected = (
             "SELECT detections.* FROM 'data/detections.parquet' AS detections "
-            "WHERE detections.recording_id = '1'"
+            "WHERE detections.recording_id = ?"
         )
         assert sql == expected
+        assert values == ["1"]
 
     def test_no_match_raises_through_build(self) -> None:
         """A selector with no default raises SqlSelectionError from build_sql_query."""
@@ -251,6 +255,7 @@ class TestMapDatabaseRouteSelection:
 
     def _make_rm(self):
         rm = RouteMapper.__new__(RouteMapper)
+        rm.config_dir = "api_dock_config"
         rm.remote_names = []
         rm.database_names = ["mydb"]
         rm.config = {}

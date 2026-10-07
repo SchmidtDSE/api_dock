@@ -22,6 +22,8 @@ from api_dock.route_mapper import collect_multi_query_params, RouteMapper, strip
 #
 # CONSTANTS
 #
+# The default app, built on first access to ``app`` (see __getattr__).
+_DEFAULT_APP: Any = None
 
 
 #
@@ -56,6 +58,29 @@ def create_app(config_path: Optional[str] = None) -> Flask:
         app.wsgi_app = _strip_base_path(app.wsgi_app, route_mapper.base_path)
 
     return app
+
+
+def __getattr__(name: str) -> Any:
+    """Build the default ``app`` on first use instead of at import (PEP 562).
+
+    ``from api_dock.flask_api import app`` and server import strings
+    such as ``api_dock.flask_api:app`` still work. Building the app
+    at import time ran the startup config check on whatever config sits in the
+    current directory, so any import of api_dock (even ``api-dock --help``)
+    failed when that config was invalid.
+
+    Args:
+        name: The attribute being looked up.
+
+    Returns:
+        The default app, built from the default config on first access.
+
+    Raises:
+        AttributeError: For any other missing attribute.
+    """
+    if name == "app":
+        return _default_app()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 #
@@ -237,5 +262,13 @@ def _add_error_handlers(app: Flask) -> None:
         return jsonify({"error": "Internal server error"}), 500
 
 
-# Default app instance
-app = create_app()
+def _default_app() -> Any:
+    """Build the default Flask app once, from the default config.
+
+    Returns:
+        The cached app.
+    """
+    global _DEFAULT_APP
+    if _DEFAULT_APP is None:
+        _DEFAULT_APP = create_app()
+    return _DEFAULT_APP
