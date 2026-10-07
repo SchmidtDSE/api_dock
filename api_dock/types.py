@@ -123,13 +123,16 @@ class TableReference:
 
     Attributes:
         name: Table name (e.g. "detections").
-        uri: File path/URI the table reads from.
+        uri: For a file table, the file path/URI it reads from; for a
+            PostgreSQL table, its name in PostgreSQL (``schema.table``).
         metadata: Effective storage metadata (region, public, ...) with the
             shared ``meta`` defaults applied and the table's own keys winning.
         schema: Shared-config schema the table belongs to, if any.
         qualified: True when referenced as ``[[schema.table]]``. Qualified
             tables are exposed as DuckDB views (``schema.table``) rather than
             inlined as ``'<uri>' AS table``.
+        connection: Name of the PostgreSQL connection (``database.connections``)
+            for a PostgreSQL table; None for a file table.
     """
 
     name: str
@@ -137,6 +140,12 @@ class TableReference:
     metadata: Dict[str, Any] = field(default_factory=dict)
     schema: Optional[str] = None
     qualified: bool = False
+    connection: Optional[str] = None
+
+    @property
+    def is_postgres(self) -> bool:
+        """True for a table on a PostgreSQL connection."""
+        return self.connection is not None
 
     @property
     def sql_name(self) -> str:
