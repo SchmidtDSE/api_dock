@@ -36,6 +36,18 @@
 #       items:
 #         uri: s3://your-bucket/v2/items/**/*.parquet
 #
+# # database/version configs defined inline instead of as files (list them under
+# # `databases:` in the main config like any other database)
+# slugs:
+#   - name: items_db
+#     versions:
+#       - version: "1.0"
+#         description: Items v1
+#         schema: items_v1
+#       - version: "2.0"
+#         description: Items v2
+#         schema: items_v2
+#
 # # routes and query_params added to EVERY database/version config. A version
 # # config's own route with the same shape (or query param with the same name)
 # # replaces the shared one; its extra routes are kept.
@@ -49,9 +61,21 @@
 #       - slug: other_db
 #         version: 1.0
 #
+#   # same route twice: the first one that selects a slug/version is used
+#   - route: items/
+#     exclude: ['example_db']
+#     sql: SELECT [[items]].* FROM [[items]]
+#   - route: items/
+#     include: ['example_db']   # ONLY add this route to these slug/versions
+#     sql: SELECT [[items]].id FROM [[items]]
+#
 # query_params:
 #   - limit:
 #       sql_append: LIMIT {{limit}}
+#
+# # limit all shared routes / query params to these slug/versions (empty = no limit)
+# route_inclusions: []
+# query_inclusions: []
 #
 # # opt slug/versions out of all shared routes / query params
 # route_exclusions: []
