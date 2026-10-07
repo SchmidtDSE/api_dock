@@ -18,11 +18,11 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 from api_dock.auth import validate_authentication
 from api_dock.config import filter_cookies_by_config, filter_remote_query_params, find_remote_config, find_route_mapping, get_authentication_config, get_database_names, get_remote_names, get_remote_versions, get_settings, is_route_allowed, is_versioned_remote, load_main_config, merge_inherited_config, resolve_latest_version
-from api_dock.database_config import apply_shared_definitions, find_database_route, get_database_versions, get_local_table_references, is_versioned_database, load_database_config, load_shared_config, merge_query_params, resolve_latest_database_version, SHARED_CONFIG_KEY
+from api_dock.database_config import apply_shared_definitions, find_database_route, get_database_versions, get_local_table_references, get_schema_sources, is_versioned_database, load_database_config, load_shared_config, merge_query_params, resolve_latest_database_version, SCHEMA_GROUPS_KEY, SHARED_CONFIG_KEY
 from api_dock.listings import build_listing, resolve_listing_specs
-from api_dock.sql_builder import build_schema_view_statements, build_sql_query_with_tables, extract_path_parameters, process_query_parameters, SqlSelectionError
+from api_dock.sql_builder import build_schema_view_statements, build_sql_query_with_tables, extract_path_parameters, process_query_parameters, SOURCE_COLUMNS_KEY, SqlSelectionError
 from api_dock.storage_auth import setup_table_storage_authentication
-from api_dock.types import PreparedRequest, ProxyResponse
+from api_dock.types import PreparedRequest, ProxyResponse, SqlContext
 
 
 #
@@ -467,9 +467,20 @@ class RouteMapper:
             return _error_response(500, "Query parameter processing error")
 
         try:
+            # Schema -> name/version lookups load every database config, so only
+            # do them when the route asks for source columns.
+            context = SqlContext(
+                name=database_name,
+                version=version,
+                schema_groups=shared_file.get(SCHEMA_GROUPS_KEY) or {},
+                schema_sources=(
+                    get_schema_sources(self.database_names)
+                    if route_config.get(SOURCE_COLUMNS_KEY) else {}
+                ),
+            )
             sql_query, table_refs = build_sql_query_with_tables(
                 route_config, database_config, path_params, query_params,
-                filtered_cookies, multi_query_params, shared_config
+                filtered_cookies, multi_query_params, shared_config, context
             )
         except SqlSelectionError as e:
             return ProxyResponse(
@@ -478,7 +489,7 @@ class RouteMapper:
                 content_type="application/json",
                 error_message=str(e.response.get("error")) if e.response.get("error") else None,
             )
-        except ValueError:
+        except (ValueError, yaml.YAMLError):
             return _error_response(500, "SQL query error")
 
         try:
