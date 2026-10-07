@@ -1610,7 +1610,7 @@ Publishing a GitHub Release is what publishes to PyPI: `.github/workflows/publis
 
 ```bash
 # 0. Start from a clean, up-to-date main
-export VERSION=0.8.2          # the NEW version, no leading "v"
+export VERSION=0.9.0          # the NEW version, no leading "v"
 git checkout main
 git pull origin main
 git status
@@ -1621,7 +1621,7 @@ git status
 pixi run -e dev pytest -q
 
 # 3. Commit, tag, push (the commit command adds the "v$VERSION: " prefix)
-export COMMIT_MESSAGE='query worker threads, duckdb settings, base_path, proxy host fix'
+export COMMIT_MESSAGE='bound SQL parameters (fix SQL injection) and startup config checks'
 git add -A
 git commit -m "v$VERSION: $COMMIT_MESSAGE"
 git tag "v$VERSION"
@@ -1633,14 +1633,17 @@ gh release create "v$VERSION" \
   --title "v$VERSION" \
   --notes "$(cat <<'EOF'
 * new features
-    - `settings.duckdb`: DuckDB options applied to every database query (`memory_limit`, `threads`, `temp_directory`, or any other DuckDB setting), plus `max_concurrent_queries` to cap how many queries run at once
-    - `settings.base_path`: also serve the API under a URL prefix (e.g. `/dock`), for a CDN/proxy path such as CloudFront routing `https://app.example.org/dock/*` to API Dock; unprefixed paths keep working
+    - Request values are sent to DuckDB as bound parameters, separately from the SQL, so they can never run as SQL. Write variables without quotes (`UPPER(name) = UPPER({{name}})`); a string that is exactly one variable (`'{{name}}'`) still works, and patterns like `'%{{name}}%'` become `'%' || {{name}} || '%'`
+    - Startup checks: API Dock refuses to start, naming the database, version, route and template, if a config has a quoted or commented variable, a template ending in a comment, a malformed route, an invalid shared `databases/config.yaml`, a `[[table]]` / `[[schema.table]]` / union reference that doesn't resolve, or invalid `source_columns`. Each version is checked as requests see it (shared routes/query_params, include/exclude, slugs)
+    - Database and remote configs are read from the folder that holds the main config file
 * bug fixes
-    - Database queries now run in worker threads, so one slow query no longer stalls every other request (including health checks on `/`)
-    - Remote proxying no longer forwards the client's `Host` (or hop-by-hop) headers upstream; upstream redirects (e.g. trailing-slash 307s) no longer point back at the proxy with the wrong host and path
+    - SQL injection: query/path/cookie values were pasted into SQL and only quoted when the SQL fragment happened to contain words like SELECT/WHERE/AND/OR, so filters like `confidence >= {{confidence}}` accepted raw SQL (`?confidence=0 OR 1=1`, `UNION SELECT ... read_csv(...)`)
+    - `response:` bodies are filled in as plain text (they no longer get SQL quotes)
+    - Importing api_dock (or running `api-dock --help`) no longer builds an app from the current directory's config; the default `app`/`fastapi_app`/`flask_app` are built on first use
 * cleanup / other improvements
-    - README: document `base_path`, `duckdb`, and the previously undocumented `follow_redirects` setting
-    - Test suite grew from 227 to 253 tests (`test_runtime_settings.py`)
+    - Removed unused `build_sql_query_legacy` / `_substitute_parameters`; `build_sql_query` returns `(sql, values)` and `build_sql_query_with_tables` returns `(sql, values, tables)`
+    - New `sql_template_check` module and `check_table_references`; README sections "How values reach the database" and "Startup checks"
+    - Test suite grew from 253 to 373 tests
 EOF
 )"
 
