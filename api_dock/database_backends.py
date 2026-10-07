@@ -17,9 +17,10 @@ import asyncio
 import re
 import threading
 from abc import ABC, abstractmethod
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-from api_dock.sql_builder import build_schema_view_statements, SQL_MARKER
+from api_dock.postgres_config import connection_options, conninfo, resolve_settings
+from api_dock.sql_builder import build_schema_view_statements, postgres_catalog, SQL_MARKER
 from api_dock.storage_auth import setup_table_storage_authentication
 from api_dock.types import TableReference
 
@@ -86,22 +87,29 @@ class DuckDBBackend(DatabaseBackend):
     The DuckDB driver blocks, so each query runs in a worker thread, letting
     other requests (and health checks) be served meanwhile. The ``settings.duckdb``
     options, storage authentication for every table, and views for
-    ``[[schema.table]]`` references are set up on the connection first.
+    ``[[schema.table]]`` references are set up on the connection first. Each
+    PostgreSQL connection a query reads is attached read-only (with the
+    connection's statement timeout), so DuckDB can mix PostgreSQL tables with
+    files and with tables on other connections.
 
     Attributes:
         statements: ``SET`` statements from ``settings.duckdb``.
         max_concurrent_queries: Cap on queries running at once, or None.
     """
 
-    def __init__(self, options: Any = None) -> None:
+    def __init__(self, options: Any = None,
+                 connections: Optional[Dict[str, Dict[str, Any]]] = None) -> None:
         """Create the backend from the ``settings.duckdb`` options.
 
         Args:
             options: The ``settings.duckdb`` mapping, or None.
+            connections: The ``database.connections`` mapping (for attaching
+                PostgreSQL tables), or None.
 
         Raises:
             ValueError: If the options are invalid (see parse_duckdb_settings).
         """
+        self.connections = connections or {}
         self.statements, self.max_concurrent_queries = parse_duckdb_settings(options)
         self._slots = (
             threading.BoundedSemaphore(self.max_concurrent_queries)
@@ -152,7 +160,10 @@ class DuckDBBackend(DatabaseBackend):
             try:
                 for statement in self.statements:
                     conn.execute(statement)
-                setup_table_storage_authentication(conn, tables)
+                self._attach_postgres(conn, tables)
+                setup_table_storage_authentication(
+                    conn, [table for table in tables if not table.is_postgres]
+                )
                 for statement in build_schema_view_statements(tables):
                     conn.execute(statement)
                 rows = conn.execute(sql, values).fetchall()
@@ -163,6 +174,38 @@ class DuckDBBackend(DatabaseBackend):
         finally:
             if self._slots is not None:
                 self._slots.release()
+
+
+    def _attach_postgres(self, conn: Any, tables: List[TableReference]) -> None:
+        """Attach each PostgreSQL connection the query's tables use, read-only.
+
+        Args:
+            conn: The query's DuckDB connection.
+            tables: The tables the query may read.
+
+        Raises:
+            ValueError: If a connection's settings can't be resolved (e.g. an
+                unset ``env:`` variable).
+            DatabaseUnavailableError: If a connection can't be attached.
+        """
+        names = sorted({table.connection for table in tables if table.is_postgres})
+        if not names:
+            return
+        conn.execute("INSTALL postgres")
+        conn.execute("LOAD postgres")
+        for name in names:
+            settings = resolve_settings(self.connections[name])
+            dsn = conninfo({
+                **settings.fields,
+                "options": connection_options(settings.statement_timeout_ms),
+            })
+            try:
+                conn.execute(
+                    f"ATTACH '{dsn.replace(chr(39), chr(39) * 2)}' AS {postgres_catalog(name)} "
+                    "(TYPE postgres, READ_ONLY)"
+                )
+            except Exception as error:
+                raise DatabaseUnavailableError("Database unavailable") from error
 
 
 def parse_duckdb_settings(options: Any) -> Tuple[List[str], Optional[int]]:
