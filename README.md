@@ -699,9 +699,30 @@ Rules:
 
 **For more details**, see the [SQL Database Support Wiki](https://github.com/SchmidtDSE/api_dock/wiki/SQL-Database-Support).
 
+### PostgreSQL tables
+
+Tables can also live in PostgreSQL. Define named connections in the shared `databases/config.yaml` and point tables at them with `table:` instead of `uri:` (install with `pip install 'api_dock[postgres]'`):
+
+```yaml
+database:
+  connections:
+    core:
+      host: db.example.com
+      dbname: soundhub
+      user: api_dock_readonly            # use a SELECT-only login
+      password: env:SOUNDHUB_DB_PASSWORD
+      sslmode: verify-full
+  schema:
+    core_v1:
+      recordings: {connection: core, table: public.recordings}
+```
+
+Each route runs **natively on PostgreSQL** when all its tables (union members included) are on one connection, and on **DuckDB** otherwise: DuckDB attaches the PostgreSQL connections read-only, so unions and joins can mix PostgreSQL tables with files and with other connections. An optional `engine: postgres | duckdb` on a route checks or forces the choice. Connections open one pool each when the FastAPI server starts (Flask is not supported with PostgreSQL). See the [PostgreSQL wiki page](https://github.com/SchmidtDSE/api_dock/wiki/PostgreSQL) for connection settings, SQL details, safety, errors and lifecycle.
+
 ---
 
 ## URL Query Parameters
+
 
 
 ### How values reach the database
