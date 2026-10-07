@@ -70,9 +70,6 @@ ENGINES: frozenset = frozenset({DUCKDB_ENGINE, POSTGRES_ENGINE})
 # query that reads PostgreSQL tables: api_dock_pg_<connection>.
 POSTGRES_CATALOG_PREFIX: str = "api_dock_pg_"
 
-# A [[...]] reference in a template; group 1 is the text inside the brackets.
-TABLE_REFERENCE_PATTERN: re.Pattern[str] = re.compile(r'\[\[([^\]]+)\]\]')
-
 # {{self.<fact>}} placeholders for the database/version being queried.
 SELF_PARAM_PREFIX: str = "self."
 
@@ -379,6 +376,34 @@ def collect_table_references(
     return list(collected.values())
 
 
+def route_tables(
+        route_config: Dict[str, Any],
+        database_config: Dict[str, Any],
+        shared_config: Optional[Dict[str, Any]] = None,
+        schema_groups: Optional[Dict[str, List[str]]] = None) -> List[TableReference]:
+    """Every table a route's templates can reference (every branch and query param).
+
+    Args:
+        route_config: Route configuration, merged with top-level query_params.
+        database_config: The version database configuration.
+        shared_config: The shared ``database`` mapping, or None.
+        schema_groups: The shared ``schema_groups`` mapping, or None.
+
+    Returns:
+        The tables, including union members (duplicates possible).
+
+    Raises:
+        ValueError: If a reference doesn't resolve.
+    """
+    tables: List[TableReference] = []
+    for template in route_templates(route_config):
+        tables.extend(collect_table_references(
+            template, database_config, shared_config, schema_groups,
+            route_config.get(SOURCE_COLUMNS_KEY),
+        ))
+    return tables
+
+
 def route_engine(
         route_config: Dict[str, Any],
         database_config: Dict[str, Any],
@@ -387,11 +412,11 @@ def route_engine(
     """Choose the engine a route's queries run on.
 
     A route runs natively on a PostgreSQL connection when every table its
-    templates can reference (every selector branch and query param) is on that
-    one connection; otherwise it runs on DuckDB, which also reads PostgreSQL
-    tables (mixing them with files, or with tables on other connections).
-    Unions currently always run on DuckDB. A route's ``engine`` setting checks
-    the choice (``postgres``) or forces DuckDB (``duckdb``).
+    templates can reference (every selector branch and query param, union
+    members included) is on that one connection; otherwise it runs on DuckDB,
+    which also reads PostgreSQL tables (mixing them with files, or with tables
+    on other connections). A route's ``engine`` setting checks the choice
+    (``postgres``) or forces DuckDB (``duckdb``).
 
     Args:
         route_config: Route configuration, merged with top-level query_params.
@@ -412,20 +437,9 @@ def route_engine(
     if engine is not None and engine not in ENGINES:
         raise ValueError(f"{ENGINE_KEY} must be one of {sorted(ENGINES)}, got {engine!r}")
 
-    tables: List[TableReference] = []
-    has_union = False
-    for template in route_templates(route_config):
-        tables.extend(collect_table_references(
-            template, database_config, shared_config, schema_groups,
-            route_config.get(SOURCE_COLUMNS_KEY),
-        ))
-        has_union = has_union or _has_union(template, database_config, shared_config,
-                                            schema_groups)
-
+    tables = route_tables(route_config, database_config, shared_config, schema_groups)
     connections = {table.connection for table in tables}
-    native = (
-        connections and None not in connections and len(connections) == 1 and not has_union
-    )
+    native = connections and None not in connections and len(connections) == 1
     connection = next(iter(connections)) if native else None
 
     if engine == DUCKDB_ENGINE:
@@ -433,7 +447,7 @@ def route_engine(
     if engine == POSTGRES_ENGINE and connection is None:
         raise ValueError(
             f"{ENGINE_KEY}: {POSTGRES_ENGINE} needs every table the route uses to be on one "
-            "PostgreSQL connection (and no unions)"
+            "PostgreSQL connection"
         )
     return connection
 
@@ -988,6 +1002,8 @@ def _render_union(
     """
     self_schema = database_config.get(DATABASE_SCHEMA_KEY)
     selected = [m for m in members if not (exclude_self and m.schema == self_schema)]
+    if context is not None and context.connection is not None:
+        return _render_postgres_union(members, selected, context, source_columns)
 
     selects = [f"({_union_member_select(m, context, source_columns)})" for m in selected]
     if not selects:
@@ -996,6 +1012,79 @@ def _render_union(
     elif len(selects) == 1 and source_columns:
         selects.append(f"({_union_member_select(selected[0], context, source_columns)} LIMIT 0)")
     return ("(" + " UNION ALL BY NAME ".join(selects) + ")", selected)
+
+
+def _render_postgres_union(
+        members: List[TableReference],
+        selected: List[TableReference],
+        context: SqlContext,
+        source_columns: List[Tuple[str, str]]) -> Tuple[str, List[TableReference]]:
+    """Render a union natively on PostgreSQL, lining columns up by name.
+
+    PostgreSQL has no ``UNION ALL BY NAME``, so every member lists every column
+    of the union (in order of first appearance), with a typed NULL for columns
+    it lacks, then the source columns. If ``!`` removed every member, the first
+    member is read with ``WHERE false`` so the result has its columns but no rows.
+
+    Args:
+        members: All member tables (PostgreSQL tables on one connection).
+        selected: The members left after ``!`` excluded the current schema.
+        context: Request context with each member's columns.
+        source_columns: (fact, column) pairs to add to each row.
+
+    Returns:
+        Tuple of (SQL subquery text without an alias, the members it reads).
+
+    Raises:
+        ValueError: If a member's columns are unknown or a source column has
+            the same name as a real column.
+    """
+    rows_from = selected or [members[0]]
+    columns: Dict[str, str] = {}
+    for member in rows_from:
+        if member.uri not in context.columns:
+            raise ValueError(f"Columns of PostgreSQL table '{member.uri}' are unknown")
+        for name, data_type in context.columns[member.uri]:
+            columns.setdefault(name, data_type)
+    clashes = sorted({column for _, column in source_columns} & set(columns))
+    if clashes:
+        raise ValueError(f"source column(s) {clashes} clash with table columns")
+
+    selects = []
+    for member in rows_from:
+        own = {name for name, _ in context.columns[member.uri]}
+        parts = [
+            f'"{name}"' if name in own else f'NULL::{data_type} AS "{name}"'
+            for name, data_type in columns.items()
+        ]
+        parts += [
+            f'{_sql_literal_or_null(value)} AS "{column}"'
+            for column, value in _source_values(member, context, source_columns)
+        ]
+        source = '.'.join(f'"{part}"' for part in member.uri.split('.'))
+        where = "" if selected else " WHERE false"
+        selects.append(f"(SELECT {', '.join(parts)} FROM {source}{where})")
+    return ("(" + " UNION ALL ".join(selects) + ")", rows_from)
+
+
+def _source_values(
+        member: TableReference,
+        context: Optional[SqlContext],
+        source_columns: List[Tuple[str, str]]) -> List[Tuple[str, Optional[str]]]:
+    """The (column, value) pairs a union member adds for ``source_columns``.
+
+    Args:
+        member: The member table.
+        context: Request context (schema sources), or None.
+        source_columns: (fact, column) pairs to add.
+
+    Returns:
+        (column name, value or None) pairs, in order.
+    """
+    sources = context.schema_sources if context is not None else {}
+    source_name, source_version = sources.get(member.schema, (None, None))
+    values = {"schema": member.schema, "name": source_name, "version": source_version}
+    return [(column, values[fact]) for fact, column in source_columns]
 
 
 def _union_member_select(
@@ -1012,12 +1101,9 @@ def _union_member_select(
     Returns:
         ``SELECT *[, <value> AS <column> ...] FROM schema.table``.
     """
-    sources = context.schema_sources if context is not None else {}
-    source_name, source_version = sources.get(member.schema, (None, None))
-    values = {"schema": member.schema, "name": source_name, "version": source_version}
-
     columns = "".join(
-        f", {_sql_literal_or_null(values[fact])} AS {column}" for fact, column in source_columns
+        f", {_sql_literal_or_null(value)} AS {column}"
+        for column, value in _source_values(member, context, source_columns)
     )
     return f"SELECT *{columns} FROM {member.sql_name}"
 
@@ -1107,29 +1193,6 @@ def _substitute_variables_in_string(template: str, params: Dict[str, str]) -> st
         return str(params[name]) if name in params else match.group(0)
 
     return VARIABLE_PATTERN.sub(replace_variable, template)
-
-
-def _has_union(
-        template: str,
-        database_config: Dict[str, Any],
-        shared_config: Optional[Dict[str, Any]],
-        schema_groups: Optional[Dict[str, List[str]]]) -> bool:
-    """Check whether a template uses a union reference (``*`` or a schema group).
-
-    Args:
-        template: SQL template.
-        database_config: The version database configuration.
-        shared_config: The shared ``database`` mapping, or None.
-        schema_groups: The shared ``schema_groups`` mapping, or None.
-
-    Returns:
-        True if any ``[[...]]`` reference is a union.
-    """
-    context = SqlContext(schema_groups=schema_groups or {})
-    return any(
-        _resolve_union(reference, database_config, shared_config, context) is not None
-        for reference in TABLE_REFERENCE_PATTERN.findall(template)
-    )
 
 
 def _is_named_query_reference(sql_template: str, database_config: Dict[str, Any]) -> bool:
