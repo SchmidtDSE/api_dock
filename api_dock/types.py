@@ -170,9 +170,12 @@ class SqlContext:
         schema_sources: Schema name -> (name, version) of the single
             database/version that uses it. Schemas used by none or several are
             absent, so their ``name``/``version`` source columns are NULL.
+        connection: The PostgreSQL connection the query runs natively on, or
+            None when it runs on DuckDB. Decides how ``[[table]]`` is written.
     """
 
     name: Optional[str] = None
     version: Optional[str] = None
     schema_groups: Dict[str, List[str]] = field(default_factory=dict)
     schema_sources: Dict[str, Tuple[str, Optional[str]]] = field(default_factory=dict)
+    connection: Optional[str] = None
