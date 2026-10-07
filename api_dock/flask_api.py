@@ -60,7 +60,6 @@ def create_app(config_path: Optional[str] = None) -> Flask:
     return app
 
 
-
 def __getattr__(name: str) -> Any:
     """Build the default ``app`` on first use instead of at import (PEP 562).
 
@@ -261,7 +260,6 @@ def _add_error_handlers(app: Flask) -> None:
     def internal_error(error):
         """Return JSON response for 500 errors."""
         return jsonify({"error": "Internal server error"}), 500
-
 
 
 def _default_app() -> Any:
