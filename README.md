@@ -386,6 +386,22 @@ Database configurations are stored in `api_dock_config/databases/` directory. Ea
 - **routes**: REST endpoints mapped to SQL queries
 - **schema** (optional): the shared schema (from `databases/config.yaml`) this config's `[[table]]` references fall back to. See [Shared Tables and Schemas](#shared-tables-and-schemas-databasesconfigyaml)
 
+### Startup checks
+
+When API Dock starts, it checks every database and version listed in the main config, from config files and from the shared `databases/config.yaml` (`slugs`), exactly as requests will see them: merged with the main config and with the shared `routes`/`query_params` that apply to that version (after `include`/`exclude`). If anything is wrong it refuses to start and names the database, version, route and template, for example:
+
+```
+ValueError: Database 'owl' version '4.0', route '/detections/{{id}}/overlaps': sql: Table 'all_modelz.detections' not found in database configuration
+```
+
+It checks that:
+- the shared `databases/config.yaml` is valid (`slugs`, `schema_groups`, and the types of its sections)
+- every route and query param has a valid shape
+- no `{{variable}}` is inside a quoted string (other than a string that is exactly one variable, `'{{x}}'`), a quoted identifier, or a SQL comment, and no template ends inside a comment (see [How values reach the database](#how-values-reach-the-database))
+- every `[[table]]`, `[[schema.table]]`, `[[*.table]]` and `[[group.table]]` reference resolves, unions are only used after `FROM`/`JOIN`, and `source_columns` is valid
+
+Database and remote config files are read from the folder that holds the main config file.
+
 ### Syntax
 
 As with the remote-apis, the routes to databases use double-curly-brackets {{}} to reference url variable placeholders.
