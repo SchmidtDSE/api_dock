@@ -1,0 +1,58 @@
+# Shared database config (optional).
+#
+# Define tables once here instead of repeating them in every database/version
+# config. Everything lives under the `database` key; `meta` and `schema` are
+# reserved names, every other key is a global table.
+#
+# Table lookup for an unqualified [[name]] (first match wins):
+#   1. the version config's own `tables`
+#   2. the schema named by the version config's `schema:` key
+#   3. global tables in this file
+# Any route can also reference a schema table directly as [[schema.table]].
+# To keep a table private to one database/version, define it in that config.
+#
+# database:
+#   # shared defaults applied to every table (here and in version configs);
+#   # a table's own keys override them
+#   meta:
+#     region: us-west-2
+#     public: true
+#
+#   # global tables: [[users]] from any database config
+#   users:
+#     uri: s3://your-bucket/users.parquet
+#   audit_log:
+#     uri: s3://your-private-bucket/audit.parquet
+#     region: us-east-1
+#     public: false
+#
+#   # schemas: [[items_v1.items]] from any route, or [[items]] from a version
+#   # config that sets `schema: items_v1`
+#   schema:
+#     items_v1:
+#       items:
+#         uri: s3://your-bucket/v1/items.parquet
+#     items_v2:
+#       items:
+#         uri: s3://your-bucket/v2/items/**/*.parquet
+#
+# # routes and query_params added to EVERY database/version config. A version
+# # config's own route with the same shape (or query param with the same name)
+# # replaces the shared one; its extra routes are kept.
+# routes:
+#   - route: items/{{id}}
+#     sql: SELECT [[items]].* FROM [[items]] WHERE [[items]].id = {{id}}
+#   - route: items/{{id}}/audit
+#     sql: SELECT [[audit_log]].* FROM [[audit_log]] WHERE [[audit_log]].item_id = {{id}}
+#     exclude:                  # skip this route for these slug/versions
+#       - 'example_db'          # every version ('example_db/*' is the same)
+#       - slug: other_db
+#         version: 1.0
+#
+# query_params:
+#   - limit:
+#       sql_append: LIMIT {{limit}}
+#
+# # opt slug/versions out of all shared routes / query params
+# route_exclusions: []
+# query_exclusions: []
