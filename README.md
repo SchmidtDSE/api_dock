@@ -524,6 +524,60 @@ Notes:
 - Storage credentials are set per table. Tables whose `region`/`public` differ from the rest get their own S3 secret scoped to their path, so one query can mix regions and public/private buckets.
 - Views are created only for the `[[schema.table]]` tables a query actually references.
 
+#### Querying across schemas (`[[*.table]]`, schema groups)
+
+Union references read the same table from several schemas at once:
+
+| Reference | Reads |
+|---|---|
+| `[[*.detections]]` | every shared schema that has a `detections` table, including the current one |
+| `[[*!.detections]]` | the same, minus the current database/version's `schema:` |
+| `[[group1.detections]]` | the schemas listed in `schema_groups.group1` |
+| `[[group1!.detections]]` | that group, minus the current schema |
+
+```yaml
+# api_dock_config/databases/config.yaml
+schema_groups:          # named lists of shared schemas
+  birdnet_models:
+    - birdnet_2p4
+    - birdnet_bullfrog_2p4v0p5
+```
+
+- A union expands, after `FROM`/`JOIN` only, to a parenthesized `UNION ALL BY NAME` over the member schemas, so give it an alias: `FROM [[*.detections]] detections`. Columns missing from some members come back as `NULL`.
+- `*` skips schemas without the table. A group whose member lacks the table, a group naming an unknown schema, and a group sharing a name with a schema are all errors. `!` applies only to `*` and groups; with no `schema:`, it removes nothing.
+- Every member gets its own S3 credentials (see above), so a union can mix regions and public/private buckets.
+
+**Source columns.** Union rows carry only the tables' real columns unless the route asks for more with `source_columns`. The available facts are `schema` (the member schema), and `name` and `version` (the database/version whose `schema:` is that schema, or `NULL` if none or several use it):
+
+```yaml
+source_columns: [schema, name, version]      # adds schema_name, name, version
+source_columns: {schema: _schema, name: model}   # pick a subset and rename
+```
+
+A source column that clashes with a real column raises an error. To use one for filtering without returning it, use DuckDB's `EXCLUDE`: `SELECT detections.* EXCLUDE (schema_name) ...`.
+
+**`{{self.*}}` placeholders.** `{{self.schema}}`, `{{self.name}}` and `{{self.version}}` are the current database/version's schema, name and version, as SQL literals (`NULL` when unknown).
+
+Together they make an "overlaps" route that every database/version can share. It returns every detection overlapping the given one, across all schemas, except that detection itself; other overlapping rows in the same schema are kept:
+
+```yaml
+routes:
+  - route: detections/{{id}}/overlaps
+    source_columns: [schema, name, version]
+    sql: |
+      WITH src AS (
+        SELECT recording_id, start_time, end_time FROM [[detections]] WHERE id = {{id}}
+      )
+      SELECT detections.*
+      FROM [[*.detections]] detections
+      JOIN src ON detections.recording_id = src.recording_id
+              AND detections.start_time < src.end_time
+              AND detections.end_time   > src.start_time
+      WHERE NOT (detections.schema_name = {{self.schema}} AND detections.id = {{id}})
+```
+
+Aliasing the union as `detections` also lets shared filters such as `[[detections]].confidence >= {{confidence}}` apply to the overlapping rows.
+
 #### Inline database configs (`slugs`)
 
 Simple database/version configs (often just a description and a `schema`) can live in the shared file instead of in their own files. Config files keep working, and the two can be mixed, even for the same database:
