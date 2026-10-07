@@ -101,7 +101,8 @@ def build_sql_query(
         cookies: Optional[Dict[str, str]] = None,
         multi_query_params: Optional[Dict[str, List[str]]] = None,
         shared_config: Optional[Dict[str, Any]] = None,
-        context: Optional[SqlContext] = None) -> Tuple[str, List[Optional[str]]]:
+        context: Optional[SqlContext] = None,
+        marker: str = SQL_MARKER) -> Tuple[str, List[Optional[str]]]:
     """Build SQL query text and the values to bind to its markers.
 
     Each ``{{var}}`` in the base SQL, named queries, and WHERE fragments is
@@ -123,6 +124,7 @@ def build_sql_query(
             ``databases/config.yaml`` (schemas, global tables, meta), or None.
         context: Request context (database name/version, schema groups and
             sources) for unions, ``source_columns`` and ``{{self.*}}``.
+        marker: Text written for each bound value (the backend's marker).
 
     Returns:
         Tuple of ``(sql, values)``: the SQL text with ``?`` markers and the
@@ -136,7 +138,7 @@ def build_sql_query(
     """
     sql_query, values, _ = build_sql_query_with_tables(
         route_config, database_config, path_params, query_params, cookies,
-        multi_query_params, shared_config, context
+        multi_query_params, shared_config, context, marker
     )
     return sql_query, values
 
@@ -149,7 +151,8 @@ def build_sql_query_with_tables(
         cookies: Optional[Dict[str, str]] = None,
         multi_query_params: Optional[Dict[str, List[str]]] = None,
         shared_config: Optional[Dict[str, Any]] = None,
-        context: Optional[SqlContext] = None
+        context: Optional[SqlContext] = None,
+        marker: str = SQL_MARKER
 ) -> Tuple[str, List[Optional[str]], List[TableReference]]:
     """Build a SQL query, its bound values, and the tables it references.
 
@@ -167,6 +170,7 @@ def build_sql_query_with_tables(
         shared_config: The shared ``database`` mapping, or None.
         context: Request context for unions, ``source_columns`` and
             ``{{self.*}}`` placeholders, or None.
+        marker: Text written for each bound value (the backend's marker).
 
     Returns:
         Tuple of (sql_query, values, table_references): the SQL with ``?``
@@ -217,10 +221,13 @@ def build_sql_query_with_tables(
     # Each piece is bound on its own and pieces are joined in the order they
     # appear in the final SQL, so the value list stays in marker order.
     # Strip whitespace/newlines from base SQL (YAML block scalars add trailing \n)
-    sql_query, values = _bind_variables(expand_tables(sql_template).strip(), params)
+    sql_query, values = _bind_variables(
+        expand_tables(sql_template).strip(), params, marker=marker
+    )
 
     where_fragments = build_where_clause_from_params(
-        route_config, query_params, path_params, multi_query_params, cookies, self_params
+        route_config, query_params, path_params, multi_query_params, cookies, self_params,
+        marker
     )
     sql_query, values = _add_where_fragments(sql_query, values, where_fragments, expand_tables)
 
@@ -440,7 +447,8 @@ def build_where_clause_from_params(
         path_params: Dict[str, str],
         multi_query_params: Optional[Dict[str, List[str]]] = None,
         cookies: Optional[Dict[str, str]] = None,
-        extra_params: Optional[Dict[str, Optional[str]]] = None
+        extra_params: Optional[Dict[str, Optional[str]]] = None,
+        marker: str = SQL_MARKER
 ) -> List[Tuple[str, List[Optional[str]]]]:
     """Build WHERE clause fragments, with their bound values, from parameter configurations.
 
@@ -456,6 +464,7 @@ def build_where_clause_from_params(
         cookies: Dictionary of cookie values, available as ``{{cookies.<name>}}``.
         extra_params: Additional values fragments may reference (e.g. the
             ``{{self.*}}`` placeholders).
+        marker: Text written for each bound value (the backend's marker).
 
     Returns:
         List of ``(fragment, values)`` pairs in config order. Fragments are to be
@@ -502,7 +511,7 @@ def build_where_clause_from_params(
             _append_bound_fragment(
                 where_fragments, param_config['multivalue_sql'], all_params,
                 {param_name: param_values}
-            )
+            , marker=marker)
             continue
 
         # Handle conditional parameters that have SQL
@@ -511,7 +520,9 @@ def build_where_clause_from_params(
             if param_value in conditional_config and 'sql' in conditional_config[param_value]:
                 sql_fragment = conditional_config[param_value]['sql']
                 if sql_fragment:  # Skip empty SQL fragments
-                    _append_bound_fragment(where_fragments, sql_fragment, all_params)
+                    _append_bound_fragment(
+                        where_fragments, sql_fragment, all_params, marker=marker
+                    )
             continue
 
         # Handle regular SQL parameters
@@ -523,11 +534,13 @@ def build_where_clause_from_params(
                 # Use provided value or default
                 effective_value = param_value if param_value is not None else param_config['default']
                 effective_params = {**all_params, param_name: str(effective_value)}
-                _append_bound_fragment(where_fragments, sql_fragment, effective_params)
+                _append_bound_fragment(
+                    where_fragments, sql_fragment, effective_params, marker=marker
+                )
 
             # Handle optional parameters (only include if provided)
             elif param_value is not None:
-                _append_bound_fragment(where_fragments, sql_fragment, all_params)
+                _append_bound_fragment(where_fragments, sql_fragment, all_params, marker=marker)
 
     return where_fragments
 
@@ -1063,7 +1076,8 @@ def _post_where_clauses(
 def _bind_variables(
         template: str,
         params: Dict[str, Optional[str]],
-        list_params: Optional[Dict[str, List[str]]] = None) -> Tuple[str, List[Optional[str]]]:
+        list_params: Optional[Dict[str, List[str]]] = None,
+        marker: str = SQL_MARKER) -> Tuple[str, List[Optional[str]]]:
     """Replace each {{variable}} in an SQL template with a marker and collect its value.
 
     The template is read in one pass, so a value is never scanned for further
@@ -1076,6 +1090,7 @@ def _bind_variables(
         params: Dictionary of parameter values.
         list_params: Parameters whose placeholder becomes a parenthesized list
             with one marker per value, for use with ``IN``.
+        marker: Text written for each bound value.
 
     Returns:
         Tuple of the SQL text with markers and the values in marker order.
@@ -1093,12 +1108,12 @@ def _bind_variables(
         name = match.group(1)
         if name in list_params:
             values.extend(str(value) for value in list_params[name])
-            return "(" + ", ".join(SQL_MARKER for _ in list_params[name]) + ")"
+            return "(" + ", ".join(marker for _ in list_params[name]) + ")"
         if name not in params:
             raise ValueError(f"No value for SQL variable '{name}'")
         value = params[name]
         values.append(None if value is None else str(value))
-        return SQL_MARKER
+        return marker
 
     sql = VARIABLE_PATTERN.sub(replace_variable, template)
     return sql, values
@@ -1108,7 +1123,8 @@ def _append_bound_fragment(
         fragments: List[Tuple[str, List[Optional[str]]]],
         template: str,
         params: Dict[str, Optional[str]],
-        list_params: Optional[Dict[str, List[str]]] = None) -> None:
+        list_params: Optional[Dict[str, List[str]]] = None,
+        marker: str = SQL_MARKER) -> None:
     """Bind a WHERE fragment template and append it unless it is empty.
 
     Args:
@@ -1116,8 +1132,9 @@ def _append_bound_fragment(
         template: SQL fragment template with {{variable}} placeholders.
         params: Dictionary of parameter values.
         list_params: Parameters to expand to a marker list (see _bind_variables).
+        marker: Text written for each bound value.
     """
-    sql, values = _bind_variables(template, params, list_params)
+    sql, values = _bind_variables(template, params, list_params, marker)
     sql = sql.strip()
     if sql:
         fragments.append((sql, values))
