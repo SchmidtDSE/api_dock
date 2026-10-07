@@ -16,8 +16,6 @@ import base64
 import ipaddress
 import json
 import os
-import re
-import threading
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
@@ -29,9 +27,9 @@ import yaml
 from api_dock.auth import validate_authentication
 from api_dock.config import DEFAULT_CONFIG_DIR, filter_cookies_by_config, filter_remote_query_params, find_remote_config, find_route_mapping, get_authentication_config, get_database_names, get_remote_names, get_remote_versions, get_settings, is_route_allowed, is_versioned_remote, load_main_config, merge_inherited_config, resolve_latest_version
 from api_dock.database_config import apply_shared_definitions, check_database_config, find_database_route, get_database_versions, get_local_table_references, get_schema_sources, is_versioned_database, load_database_config, load_shared_config, merge_query_params, resolve_latest_database_version, SCHEMA_GROUPS_KEY, SHARED_CONFIG_KEY
+from api_dock.database_backends import DUCKDB_SETTINGS_KEY, DuckDBBackend
 from api_dock.listings import build_listing, resolve_listing_specs
-from api_dock.sql_builder import build_schema_view_statements, build_sql_query_with_tables, check_table_references, extract_path_parameters, process_query_parameters, SOURCE_COLUMNS_KEY, SqlSelectionError
-from api_dock.storage_auth import setup_table_storage_authentication
+from api_dock.sql_builder import build_sql_query_with_tables, check_table_references, extract_path_parameters, process_query_parameters, SOURCE_COLUMNS_KEY, SqlSelectionError
 from api_dock.types import PreparedRequest, ProxyResponse, SqlContext
 
 
@@ -87,18 +85,10 @@ EXCLUDED_REQUEST_HEADERS: frozenset = frozenset({
     "upgrade",
 })
 
-# `settings.duckdb` options. Every key is applied to each query's DuckDB
-# connection as `SET <key> = <value>` (memory_limit, threads, temp_directory,
-# ...), except max_concurrent_queries, which caps how many database queries run
-# at once in this process (others wait their turn).
-DUCKDB_SETTINGS_KEY: str = "duckdb"
-MAX_CONCURRENT_QUERIES_KEY: str = "max_concurrent_queries"
-
 # `settings.base_path`: an optional URL prefix (e.g. "/dock") the API is also
 # served under, for when a proxy/CDN forwards a path prefix unchanged.
 BASE_PATH_KEY: str = "base_path"
 
-DUCKDB_OPTION_PATTERN: re.Pattern = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 #
@@ -196,10 +186,7 @@ class RouteMapper:
             self.config, self.config_dir
         )
         self.base_path = normalize_base_path(self.settings.get(BASE_PATH_KEY))
-        self.duckdb_statements, max_queries = _duckdb_settings(
-            self.settings.get(DUCKDB_SETTINGS_KEY)
-        )
-        self._query_slots = threading.BoundedSemaphore(max_queries) if max_queries else None
+        self.duckdb_backend = DuckDBBackend(self.settings.get(DUCKDB_SETTINGS_KEY))
 
         try:
             shared_file = load_shared_config(self.config_dir)
@@ -615,15 +602,13 @@ class RouteMapper:
         auth_tables += [ref for ref in table_refs if ref.sql_name not in local_names]
 
         try:
-            # DuckDB calls block; run them in a worker thread so one slow query
-            # doesn't stall every other request (and health checks) meanwhile.
-            response_data = await asyncio.to_thread(
-                self._run_query, sql_query, sql_values, auth_tables,
-                build_schema_view_statements(table_refs),
-            )
+            columns, rows = await self.duckdb_backend.execute(sql_query, sql_values, auth_tables)
         except Exception:
             return _error_response(500, "Database query error")
-        return _json_response(response_data)
+        return _json_response([
+            {column: _make_json_safe(value) for column, value in zip(columns, row)}
+            for row in rows
+        ])
 
     def is_remote_name(self, name: str) -> bool:
         """Check if a given name is a configured remote name.
@@ -700,54 +685,6 @@ class RouteMapper:
             return result
         except Exception as e:
             return _error_response(500, f"Sync wrapper error: {str(e)}")
-
-    def _run_query(
-            self,
-            sql_query: str,
-            sql_values: List[Optional[str]],
-            auth_tables: List[Any],
-            view_statements: List[str]) -> List[Dict[str, Any]]:
-        """Execute a database query on a fresh DuckDB connection (blocking).
-
-        Applies the ``settings.duckdb`` options, storage authentication and
-        schema views, then runs the query. Honors max_concurrent_queries.
-
-        Args:
-            sql_query: The SQL to run, with a ``?`` marker per bound value.
-            sql_values: Values for the markers, in order (sent separately from
-                the SQL, so they are never parsed as SQL).
-            auth_tables: TableReferences to set up storage authentication for.
-            view_statements: CREATE SCHEMA/VIEW statements to run first.
-
-        Returns:
-            Result rows as JSON-safe dicts.
-        """
-        import duckdb
-
-        # getattr: RouteMappers built without __init__ (e.g. in tests) have neither.
-        slots = getattr(self, '_query_slots', None)
-        if slots is not None:
-            slots.acquire()
-        try:
-            conn = duckdb.connect(database=':memory:')
-            try:
-                for statement in getattr(self, 'duckdb_statements', []):
-                    conn.execute(statement)
-                setup_table_storage_authentication(conn, auth_tables)
-                for statement in view_statements:
-                    conn.execute(statement)
-                result = conn.execute(sql_query, sql_values).fetchall()
-                columns = [desc[0] for desc in conn.description] if conn.description else []
-            finally:
-                conn.close()
-        finally:
-            if slots is not None:
-                slots.release()
-
-        return [
-            {column: _make_json_safe(value) for column, value in zip(columns, row)}
-            for row in result
-        ]
 
     def _is_remote_filename(self, filename: str) -> bool:
         """Check if a filename corresponds to a remote config file.
@@ -846,46 +783,6 @@ def _check_database(
             check_database_config(database_config, check_tables)
         except ValueError as error:
             raise ValueError(f"{label}, {error}") from error
-
-
-def _duckdb_settings(options: Any) -> Tuple[List[str], Optional[int]]:
-    """Turn ``settings.duckdb`` into SET statements and a concurrency cap.
-
-    Args:
-        options: Mapping of DuckDB option -> value, plus optional
-            max_concurrent_queries; or None.
-
-    Returns:
-        Tuple of (SET statements, max concurrent queries or None).
-
-    Raises:
-        ValueError: If options isn't a mapping, an option name isn't a plain
-            identifier, or max_concurrent_queries isn't a positive integer.
-    """
-    if not options:
-        return ([], None)
-    if not isinstance(options, dict):
-        raise ValueError(f"settings.{DUCKDB_SETTINGS_KEY} must be a mapping")
-
-    max_queries = options.get(MAX_CONCURRENT_QUERIES_KEY)
-    if max_queries is not None and (not isinstance(max_queries, int) or max_queries < 1):
-        raise ValueError(f"settings.{DUCKDB_SETTINGS_KEY}.{MAX_CONCURRENT_QUERIES_KEY} "
-                         "must be a positive integer")
-
-    statements = []
-    for name, value in options.items():
-        if name == MAX_CONCURRENT_QUERIES_KEY:
-            continue
-        if not DUCKDB_OPTION_PATTERN.match(str(name)):
-            raise ValueError(f"settings.{DUCKDB_SETTINGS_KEY}: invalid option name '{name}'")
-        if isinstance(value, bool):
-            literal = "true" if value else "false"
-        elif isinstance(value, (int, float)):
-            literal = str(value)
-        else:
-            literal = "'" + str(value).replace("'", "''") + "'"
-        statements.append(f"SET {name} = {literal}")
-    return (statements, max_queries)
 
 
 def _filter_request_headers(headers: Dict[str, str]) -> Dict[str, str]:
