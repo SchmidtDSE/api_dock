@@ -26,10 +26,10 @@ import yaml
 
 from api_dock.auth import validate_authentication
 from api_dock.config import DEFAULT_CONFIG_DIR, filter_cookies_by_config, filter_remote_query_params, find_remote_config, find_route_mapping, get_authentication_config, get_database_names, get_remote_names, get_remote_versions, get_settings, is_route_allowed, is_versioned_remote, load_main_config, merge_inherited_config, resolve_latest_version
-from api_dock.database_config import apply_shared_definitions, check_database_config, find_database_route, get_database_versions, get_local_table_references, get_schema_sources, is_versioned_database, load_database_config, load_shared_config, merge_query_params, resolve_latest_database_version, SCHEMA_GROUPS_KEY, SHARED_CONFIG_KEY
+from api_dock.database_config import apply_shared_definitions, check_database_config, check_table_definitions, find_database_route, get_database_versions, get_local_table_references, get_schema_sources, is_versioned_database, load_database_config, load_shared_config, merge_query_params, resolve_latest_database_version, SCHEMA_GROUPS_KEY, SHARED_CONFIG_KEY
 from api_dock.database_backends import DUCKDB_SETTINGS_KEY, DuckDBBackend
 from api_dock.listings import build_listing, resolve_listing_specs
-from api_dock.sql_builder import build_sql_query_with_tables, check_table_references, extract_path_parameters, process_query_parameters, SOURCE_COLUMNS_KEY, SqlSelectionError
+from api_dock.sql_builder import build_sql_query_with_tables, check_table_references, route_engine, extract_path_parameters, process_query_parameters, SOURCE_COLUMNS_KEY, SqlSelectionError
 from api_dock.types import PreparedRequest, ProxyResponse, SqlContext
 
 
@@ -780,7 +780,15 @@ def _check_database(
             )
 
         try:
+            check_table_definitions(database_config.get("tables") or {}, shared_database, "tables")
             check_database_config(database_config, check_tables)
+            for index, route_config in enumerate(database_config.get("routes") or []):
+                merged = merge_query_params(route_config, database_config)
+                try:
+                    route_engine(merged, database_config, shared_database, schema_groups)
+                except ValueError as error:
+                    route_name = route_config.get("route", f"routes[{index}]")
+                    raise ValueError(f"route '{route_name}': {error}") from error
         except ValueError as error:
             raise ValueError(f"{label}, {error}") from error
 
