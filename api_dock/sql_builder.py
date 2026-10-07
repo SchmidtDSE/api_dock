@@ -186,6 +186,7 @@ def build_sql_query_with_tables(
     source_columns = _normalize_source_columns(route_config.get(SOURCE_COLUMNS_KEY))
 
     def expand_tables(text: str) -> str:
+        """Expand [[...]] table references, recording each referenced table."""
         return _substitute_table_references(
             text, database_config, shared_config, table_refs, context, source_columns
         )
@@ -926,6 +927,7 @@ def _substitute_variables_in_string(template: str, params: Dict[str, str]) -> st
         String with variables substituted.
     """
     def replace_variable(match: re.Match[str]) -> str:
+        """Return one placeholder's value as text (or the placeholder if unknown)."""
         name = match.group(1)
         return str(params[name]) if name in params else match.group(0)
 
