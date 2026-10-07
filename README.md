@@ -524,6 +524,37 @@ Notes:
 - Storage credentials are set per table. Tables whose `region`/`public` differ from the rest get their own S3 secret scoped to their path, so one query can mix regions and public/private buckets.
 - Views are created only for the `[[schema.table]]` tables a query actually references.
 
+#### Inline database configs (`slugs`)
+
+Simple database/version configs (often just a description and a `schema`) can live in the shared file instead of in their own files. Config files keep working, and the two can be mixed, even for the same database:
+
+```yaml
+# api_dock_config/databases/config.yaml
+slugs:
+  - name: birdnet-bullfrog         # the database slug in the URL
+    version: "2.5"                 # one version...
+    description: American Bullfrog Classifier from Birdnet 2.4
+    schema: birdnet_bullfrog_2p5v0p5
+  - name: birdnet-apple
+    authors: [API Team]            # ...or several; keys here are defaults for each version
+    versions:
+      - version: "1.0"
+        description: Apple Classifier 1.0
+        schema: birdnet_apple_1p0
+      - version: "12.0"
+        description: Apple Classifier 12.0
+        schema: birdnet_apple_12p0
+  - name: notes                    # no version/versions = an unversioned database
+    tables:
+      notes: s3://your-bucket/notes.parquet
+```
+
+- Each entry (or each `versions` item) takes the same keys as a database config file: `description`, `authors`, `schema`, `tables`, `routes`, `query_params`, and so on. Shared `routes`/`query_params` (below), including `include`/`exclude`, apply to them like any other database/version.
+- Like file-based databases, a slug is only served if it's listed under `databases:` in the main `config.yaml`.
+- A database's versions are the union of its version files and its `slugs` versions, so `latest`, the `/{database}` versions listing, and the `expose` catalog endpoints all see both. If a file and a slug define the same database/version, the file wins.
+- Quote versions (`version: "2.10"`). Unquoted YAML numbers are floats, so `2.10` would become `"2.1"`.
+- A malformed `slugs` section (missing `name`, both `version` and `versions`, a duplicate version, or a mix of versioned and unversioned entries for one name) returns a 500 "Shared database configuration error".
+
 #### Shared routes and query params
 
 The shared file can also define top-level `routes` and `query_params`. These are added to **every** database/version, which is handy when each model/version serves the same endpoints over its own `schema`:
@@ -547,6 +578,14 @@ routes:
       - slug: slug3
         version: '*'               # '*' = every version
 
+  # the same route defined twice: one for everything except birdnet/2.4, one only for it
+  - route: detections/
+    exclude: ['birdnet/2.4']
+    sql: SELECT [[detections]].* FROM [[detections]]
+  - route: detections/
+    include: ['birdnet/2.4']       # ONLY add this route to these slug/versions
+    sql: SELECT [[detections]].*, [[revisions]].id AS revision_id FROM [[detections]] LEFT JOIN [[revisions]] ON [[revisions]].observation_id = [[detections]].id
+
 query_params:
   - confidence:
       sql: "[[detections]].confidence >= {{confidence}}"
@@ -555,6 +594,10 @@ query_params:
       exclude: ['slug1/3.9']
   - limit:
       sql_append: LIMIT {{limit}}
+
+# limit ALL shared routes / query params to these slug/versions
+route_inclusions: ['birdnet', 'owl/5.0']
+query_inclusions: []                 # empty or missing = no restriction
 
 # opt slug/versions out of ALL shared routes / query params
 route_exclusions: ['legacy_db']
@@ -566,7 +609,9 @@ query_exclusions:
 Rules:
 - **The version config wins.** Its own routes come first and replace any shared route with the same shape. Shape means the same path segments; `{{param}}` names and leading/trailing slashes are ignored, so `detections/{{id}}` and `/detections/{{detection_id}}/` are the same route. Routes the version config adds on top are kept.
 - Shared `query_params` behave like a version config's top-level `query_params`. They apply to every route, and a param with the same name in the version config (or on a route) overrides the shared one.
-- `exclude`, `route_exclusions` and `query_exclusions` take a list of `'<slug>/<version>'` strings or `{slug: <slug>, version: <version>}` mappings. `'<slug>'`, `'<slug>/*'` or a missing/`'*'` version match every version, including unversioned databases. Versions compare numerically when possible (`2.3`, `"2.3"`), and `latest` is resolved before matching.
+- `include` and `route_inclusions`/`query_inclusions` are the opposite of `exclude` and `route_exclusions`/`query_exclusions`. When given (non-empty), the route or query param is added **only** to the listed slug/versions. A shared item is added only if it passes both the top-level lists and its own `include`/`exclude`.
+- The same route (by shape) or query param (by name) can appear more than once in the shared file. Each database/version gets the first one whose `include`/`exclude` select it, so complementary `include`/`exclude` lists give different databases different versions of an endpoint.
+- `include`, `exclude` and the four top-level lists take a list of `'<slug>/<version>'` strings or `{slug: <slug>, version: <version>}` mappings. `'<slug>'`, `'<slug>/*'` or a missing/`'*'` version match every version, including unversioned databases. Versions compare numerically when possible (`2.3`, `"2.3"`), and `latest` is resolved before matching.
 
 **For more details**, see the [SQL Database Support Wiki](https://github.com/SchmidtDSE/api_dock/wiki/SQL-Database-Support).
 
