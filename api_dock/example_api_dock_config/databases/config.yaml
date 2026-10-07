@@ -36,6 +36,11 @@
 #       items:
 #         uri: s3://your-bucket/v2/items/**/*.parquet
 #
+# # named groups of schemas: [[all_items.items]] reads both; [[all_items!.items]]
+# # skips the current version's schema; [[*.items]] reads every schema
+# schema_groups:
+#   all_items: [items_v1, items_v2]
+#
 # # database/version configs defined inline instead of as files (list them under
 # # `databases:` in the main config like any other database)
 # slugs:
@@ -68,6 +73,13 @@
 #   - route: items/
 #     include: ['example_db']   # ONLY add this route to these slug/versions
 #     sql: SELECT [[items]].id FROM [[items]]
+#   # every items row in the same group as this one, from any schema, tagged with its source
+#   - route: items/{{id}}/related
+#     source_columns: [schema, name, version]
+#     sql: >
+#       SELECT items.* FROM [[*.items]] items
+#       WHERE items.group_id = (SELECT group_id FROM [[items]] WHERE id = {{id}})
+#         AND NOT (items.schema_name = {{self.schema}} AND items.id = {{id}})
 #
 # query_params:
 #   - limit:
