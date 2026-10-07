@@ -29,7 +29,7 @@ from api_dock.config import DEFAULT_CONFIG_DIR, filter_cookies_by_config, filter
 from api_dock.database_config import apply_shared_definitions, check_database_config, check_table_definitions, find_database_route, get_database_versions, get_local_table_references, get_schema_sources, is_versioned_database, load_database_config, load_shared_config, merge_query_params, resolve_latest_database_version, SCHEMA_GROUPS_KEY, SHARED_CONFIG_KEY, SHARED_CONNECTIONS_KEY
 from api_dock.database_backends import DatabaseLifecycleError, DatabaseUnavailableError, DUCKDB_SETTINGS_KEY, DuckDBBackend
 from api_dock.listings import build_listing, resolve_listing_specs
-from api_dock.sql_builder import build_sql_query_with_tables, check_table_references, route_engine, extract_path_parameters, process_query_parameters, SOURCE_COLUMNS_KEY, SqlSelectionError
+from api_dock.sql_builder import build_sql_query_with_tables, check_table_references, route_engine, route_tables, extract_path_parameters, process_query_parameters, SOURCE_COLUMNS_KEY, SqlSelectionError
 from api_dock.types import PreparedRequest, ProxyResponse, SqlContext
 
 
@@ -622,6 +622,15 @@ class RouteMapper:
                 route_config, database_config, shared_config, context.schema_groups
             )
             backend = self._backend(context.connection)
+            if context.connection is not None:
+                # Native PostgreSQL unions list every column, so they need each
+                # table's columns (cached after the first request per table).
+                tables = route_tables(
+                    route_config, database_config, shared_config, context.schema_groups
+                )
+                context.columns = await self._postgres.columns(
+                    context.connection, sorted({table.uri for table in tables})
+                )
             sql_query, sql_values, table_refs = build_sql_query_with_tables(
                 route_config, database_config, path_params, query_params,
                 filtered_cookies, multi_query_params, shared_config, context, backend.marker
@@ -635,6 +644,8 @@ class RouteMapper:
             )
         except DatabaseLifecycleError as error:
             return _error_response(500, str(error))
+        except DatabaseUnavailableError:
+            return _error_response(503, "Database unavailable")
         except (ValueError, yaml.YAMLError):
             return _error_response(500, "SQL query error")
 
