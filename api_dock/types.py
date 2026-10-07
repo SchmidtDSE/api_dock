@@ -2,7 +2,7 @@
 
 Types Module for API Dock
 
-Shared type definitions used across the proxy response pipeline.
+Shared type definitions used across the proxy response and database pipelines.
 
 License: BSD 3-Clause
 
@@ -111,3 +111,36 @@ class ListingSpec:
     route: str
     as_dict: bool
     include: Any = True
+
+
+@dataclass
+class TableReference:
+    """A resolved ``[[table]]`` reference used by a database route's SQL.
+
+    Produced by ``database_config.resolve_table_reference()``. Tables can come
+    from the version config's ``tables``, a schema in the shared
+    ``databases/config.yaml``, or that file's global tables.
+
+    Attributes:
+        name: Table name (e.g. "detections").
+        uri: File path/URI the table reads from.
+        metadata: Effective storage metadata (region, public, ...) with the
+            shared ``meta`` defaults applied and the table's own keys winning.
+        schema: Shared-config schema the table belongs to, if any.
+        qualified: True when referenced as ``[[schema.table]]``. Qualified
+            tables are exposed as DuckDB views (``schema.table``) rather than
+            inlined as ``'<uri>' AS table``.
+    """
+
+    name: str
+    uri: str
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    schema: Optional[str] = None
+    qualified: bool = False
+
+    @property
+    def sql_name(self) -> str:
+        """Name the table is addressed by in SQL (``schema.table`` if qualified)."""
+        if self.qualified and self.schema:
+            return f"{self.schema}.{self.name}"
+        return self.name
