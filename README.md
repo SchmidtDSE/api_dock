@@ -110,6 +110,7 @@ file.
 | shared tables, schemas, slugs, shared routes | [Shared Database Config](https://github.com/SchmidtDSE/api_dock/wiki/Shared-Database-Config) |
 | unions across schemas (`[[*.table]]`, schema groups) | [Cross-Schema Queries](https://github.com/SchmidtDSE/api_dock/wiki/Cross-Schema-Queries) |
 | PostgreSQL connections, engines, safety | [PostgreSQL](https://github.com/SchmidtDSE/api_dock/wiki/PostgreSQL) |
+| databases, versions and values generated from a query, refreshed on a schedule | [Lookups](https://github.com/SchmidtDSE/api_dock/wiki/Lookups) |
 | `/databases`, `/remotes`, `/sources` listings | [Catalog Endpoints](https://github.com/SchmidtDSE/api_dock/wiki/Catalog-Endpoints) |
 | `RouteMapper` in your own app, production deployment | [Python API and Deployment](https://github.com/SchmidtDSE/api_dock/wiki/Python-API-and-Deployment) |
 
@@ -126,6 +127,7 @@ api-dock describe [config_name]             # print the config
 api-dock generate-key                       # local encryption key
 api-dock encrypt "secret"                   # also --method env_key|aws_kms
 api-dock decrypt "gAAAAA..."
+api-dock lookups                            # run the config's lookups and print their rows
 ```
 
 Flask responses are buffered and Flask refuses configs with PostgreSQL connections; use the default
@@ -146,6 +148,8 @@ FastAPI backbone for those. Full reference: [Getting Started](https://github.com
 - **Engines.** A route whose tables are all on one PostgreSQL connection runs natively through
   that connection's pool. Anything else runs on an in-memory DuckDB in a worker thread, with
   PostgreSQL attached read-only when needed.
+- **Lookups.** Named queries (SQL over the configured tables, or an HTTP API) run at startup
+  and on a schedule; `from:` entries turn their rows into database versions or remote versions.
 - **Startup checks.** Every database and version is checked as requests will see it (table
   references, quoted variables, unions, connections, engines); a bad config stops startup with a
   message naming the database, version and route.
@@ -161,6 +165,7 @@ api_dock/                   the package
   route_mapper.py           RouteMapper: request handling, startup checks, PostgreSQL lifecycle
   fast_api.py, flask_api.py the two app backbones
   database_config.py        database configs, shared config, versions and slugs
+  lookups.py                lookups: templates, SQL/HTTP runners, refresh
   sql_builder.py            SQL building, table references, unions, engine choice
   database_backends.py      DuckDB backend    postgres_backend.py, postgres_config.py   PostgreSQL
   storage_auth.py, auth.py, encryption.py, listings.py, sql_template_check.py, types.py
