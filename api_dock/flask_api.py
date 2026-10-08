@@ -206,7 +206,6 @@ def _add_remote_routes(app: Flask, route_mapper: RouteMapper) -> None:
         """
         return _handle_proxy(route_mapper, remote_name, "")
 
-
     @app.route("/<remote_name>/<path:path>", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
     def proxy_to_remote(remote_name: str, path: str):
         """Proxy requests to remote APIs or databases.
