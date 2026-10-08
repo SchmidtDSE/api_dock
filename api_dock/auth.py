@@ -444,7 +444,8 @@ class GCPSecretsAuth(AuthenticationProvider):
             from google.auth.exceptions import DefaultCredentialsError
         except ImportError:
             raise AuthenticationError(
-                "google-cloud-secret-manager package is required for GCP Secrets authentication"
+                "GCP Secrets authentication needs google-cloud-secret-manager: "
+                "pip install 'api_dock[gcp]'"
             )
 
         super().__init__(failed_response)
