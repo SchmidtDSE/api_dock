@@ -603,7 +603,7 @@ def load_shared_remote_config(config_dir: Optional[str] = None) -> Dict[str, Any
     shared_path = os.path.join(config_dir, REMOTES_DIR, REMOTES_SHARED_FILE)
     store = get_store(config_dir)
     return memoized(
-        ("remotes", file_key(shared_path), store.generation, id(store)),
+        ("remotes", file_key(shared_path), store.generation),
         lambda: _expand_remote_config(load_static_remote_config(config_dir), store, shared_path),
     )
 
