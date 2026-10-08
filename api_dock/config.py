@@ -15,7 +15,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import yaml
 
@@ -43,6 +43,9 @@ GENERATED_FLAG: str = "__generated__"
 DEFAULT_SETTINGS: Dict[str, Any] = {
     "add_trailing_slash": True,
 }
+
+# Settings that must be true or false.
+BOOLEAN_SETTINGS: Tuple[str, ...] = ("add_trailing_slash", "follow_redirects")
 
 # Default authentication and cookie settings
 DEFAULT_AUTH_SETTINGS: Dict[str, Any] = {
@@ -225,14 +228,25 @@ def get_settings(config: Dict[str, Any]) -> Dict[str, Any]:
 
     Returns:
         Dictionary of settings with defaults applied.
+
+    Raises:
+        ValueError: If ``settings`` isn't a mapping, a true/false setting
+            isn't a boolean, or ``timeout`` isn't a positive number (or
+            null/false to disable it).
     """
     settings = DEFAULT_SETTINGS.copy()
-    config_settings = config.get("settings", {})
+    config_settings = config.get("settings") or {}
+    if not isinstance(config_settings, dict):
+        raise ValueError("settings must be a mapping")
+    settings.update(config_settings)
 
-    # Update defaults with config values
-    if config_settings:
-        settings.update(config_settings)
-
+    for key in BOOLEAN_SETTINGS:
+        if key in settings and not isinstance(settings[key], bool):
+            raise ValueError(f"settings.{key} must be true or false")
+    timeout = settings.get("timeout")
+    if timeout is not None and timeout is not False and (
+            isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0):
+        raise ValueError("settings.timeout must be a positive number of seconds, or null/false")
     return settings
 
 
