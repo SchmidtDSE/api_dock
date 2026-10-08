@@ -11,6 +11,7 @@ License: BSD 3-Clause
 #
 # IMPORTS
 #
+import asyncio
 import json
 import warnings
 from contextlib import asynccontextmanager
@@ -81,6 +82,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         warnings.warn(message, stacklevel=2)
 
     _add_main_routes(app, route_mapper)
+    _add_lookup_routes(app, route_mapper)
     _add_listing_routes(app, route_mapper)
     _add_remote_routes(app, route_mapper)
     _add_error_handlers(app)
@@ -150,6 +152,32 @@ def _add_main_routes(app: FastAPI, route_mapper: RouteMapper) -> None:
     async def get_meta() -> Dict[str, Any]:
         """Return metadata from main config."""
         return route_mapper.get_config_metadata()
+
+
+def _add_lookup_routes(app: FastAPI, route_mapper: RouteMapper) -> None:
+    """Add the ``settings.lookups.refresh_route`` endpoint, if configured.
+
+    Args:
+        app: FastAPI application instance.
+        route_mapper: RouteMapper instance.
+    """
+    endpoint = route_mapper.lookup_endpoint
+    if endpoint is None:
+        return
+
+    @app.api_route(f"/{endpoint.route}", methods=["GET", "POST"])
+    async def lookups(request: Request) -> Response:
+        """GET: lookup status. POST: refresh lookups (all, or ?name=...)."""
+        result = await asyncio.to_thread(
+            route_mapper.lookup_endpoint_response,
+            request.method,
+            request.headers.get("authorization"),
+            request.query_params.getlist("name"),
+        )
+        return Response(
+            content=result.content, status_code=result.status_code,
+            media_type=result.content_type,
+        )
 
 
 def _add_listing_routes(app: FastAPI, route_mapper: RouteMapper) -> None:
