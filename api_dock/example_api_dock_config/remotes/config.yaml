@@ -1,0 +1,38 @@
+# Shared remote config (optional).
+#
+# Define remotes here instead of (or as well as) one file per remote. Each key
+# under `remotes` is a remote name; its value is what a remote file would hold
+# (url, description, routes, restricted, cookies, ...). A remote defined here is
+# served only when it's listed in the main config's `remotes`.
+#
+#   - `version: <v>`: one version (served at /<name>/<v>/... and /<name>/latest/...)
+#   - `versions: [...]`: several versions; the remote's other keys are defaults
+#     each version's keys override
+#   - neither: an unversioned remote (/<name>/...)
+#
+# Files and entries here can be mixed: versions from remotes/<name>/<v>.yaml and
+# from this file are combined, and a file wins when both define the same
+# version (or both define the same unversioned remote). Quote versions so YAML
+# keeps them as text ("0.10", not 0.10, which YAML reads as 0.1).
+#
+# remotes:
+#   weather:
+#     url: https://api.weather.example.com
+#     description: Weather service
+#
+#   core:
+#     description: Core API
+#     version: "0.5.0"
+#     url: https://api.example.com
+#
+#   wolf:
+#     description: Wolves API
+#     authors:
+#       - https://example.org/
+#     versions:
+#       - version: "1.0"
+#         url: https://api.wolves.example.com
+#         description: Stable
+#       - version: "0.1"
+#         url: https://beta.api.wolves.example.com
+#         description: Beta
