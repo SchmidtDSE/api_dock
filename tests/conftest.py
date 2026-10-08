@@ -4,7 +4,8 @@ Shared pytest fixtures for API Dock tests.
 
 ``postgres_server`` runs a throwaway PostgreSQL server for the session (from
 the dev environment's conda-forge ``postgresql``). Tests that use it are
-skipped when PostgreSQL or the psycopg driver isn't available.
+skipped when PostgreSQL or the psycopg driver isn't available. ``http_server``
+serves JSON from a local ``http.server`` (for HTTP lookups).
 
 License: BSD 3-Clause
 
@@ -12,12 +13,15 @@ License: BSD 3-Clause
 #
 # IMPORTS
 #
+import json
 import shutil
 import socket
 import subprocess
 import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Dict, Iterator
+from typing import Any, Dict, Iterator, List
 
 import pytest
 
@@ -65,6 +69,40 @@ def postgres_server() -> Iterator[Dict[str, str]]:
         subprocess.run(["pg_ctl", "-D", str(data), "-m", "immediate", "stop"],
                        capture_output=True)
         shutil.rmtree(root, ignore_errors=True)
+
+
+@pytest.fixture
+def http_server() -> Iterator[Any]:
+    """A local HTTP server returning ``server.body`` as JSON with ``server.status``."""
+
+    class State:
+        body: Any = []
+        status: int = 200
+        requests: List[Dict[str, Any]] = []
+        url: str = ""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 (http.server API)
+            State.requests.append({"path": self.path, "headers": dict(self.headers)})
+            payload = State.body if isinstance(State.body, str) else json.dumps(State.body)
+            self.send_response(State.status)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(payload.encode())
+
+        def log_message(self, *args: Any) -> None:
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    State.url = f"http://127.0.0.1:{server.server_address[1]}"
+    State.requests = []
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield State
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 #
