@@ -133,6 +133,14 @@ class TestRefresh:
         assert _ids(mapper, "perch", "8.0/detections") == ["d"]
         assert "rejected" in mapper.lookups.status()[0]["error"]
 
+    def test_skipped_row_warned_once(self, tmp_path: Path, caplog: Any) -> None:
+        mapper = _mapper(tmp_path)
+        _catalog(tmp_path, RUNS + [("bad name", "1.0", "bad_1p0", "r9", ["z"])])
+        with caplog.at_level("WARNING"):
+            mapper.refresh_lookups()
+            _get(mapper, "perch", "8.0/detections")
+        assert caplog.text.count("skipped: name 'bad name'") == 1
+
     def test_failed_refresh_keeps_rows(self, tmp_path: Path) -> None:
         mapper = _mapper(tmp_path)
         (tmp_path / "catalog.parquet").unlink()
