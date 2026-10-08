@@ -237,7 +237,7 @@ Publishing a GitHub Release is what publishes to PyPI: `.github/workflows/publis
 
 ```bash
 # 0. Start from a clean, up-to-date main
-export VERSION=0.9.1          # the NEW version, no leading "v"
+export VERSION=0.10.0         # the NEW version, no leading "v"
 git checkout main
 git pull origin main
 git status
@@ -248,7 +248,7 @@ git status
 pixi run -e dev pytest -q
 
 # 3. Commit, tag, push (the commit command adds the "v$VERSION: " prefix)
-export COMMIT_MESSAGE='PostgreSQL, lookups, remotes/config.yaml, numeric latest'
+export COMMIT_MESSAGE='code review fixes: remote cookies, safer SQL building, auth caching'
 git add -A
 git commit -m "v$VERSION: $COMMIT_MESSAGE"
 git tag "v$VERSION"
@@ -259,19 +259,32 @@ git push origin main "v$VERSION"
 gh release create "v$VERSION" \
   --title "v$VERSION" \
   --notes "$(cat <<'EOF'
+**Upgrading:** a remote now receives only the cookies its `cookies:` setting allows (none without it). A remote that relied on the browser's cookies being passed through needs `cookies: [<name>]`, or `cookies: true` for all of them. Configs that set `action`, an unknown version `schema:`, non-boolean `add_trailing_slash`/`follow_redirects`, or a bad `timeout` now stop at startup.
+
 * new features
-    - PostgreSQL tables (`pip install 'api_dock[postgres]'`): named `connections` in `databases/config.yaml` and `{connection, table}` tables. A route runs natively on PostgreSQL when all its tables are on one connection (one pool per connection, read-only transactions, statement timeout), otherwise on DuckDB with PostgreSQL attached read-only, so unions and joins can mix PostgreSQL and Parquet. Route `engine: postgres|duckdb` checks or forces the choice; 503 when a database is unavailable
-    - Lookups: named queries (SQL over any configured table, or an HTTP API) run at startup, every `refresh` and on demand. `from:` entries turn rows into database/versions (with inline schemas) or remote versions, `{{lookup.<name>.<column>}}` fills single values, and `databases: [- from: <lookup>]` serves what they generate. New rows are checked before use; values used as URIs must match `allow:` prefixes. Optional token-protected refresh endpoint (`settings.lookups`) and `api-dock lookups` CLI
-    - `remotes/config.yaml`: define remotes inline (`version`, `versions` or unversioned); mixes with remote files, files win
-    - Slugs can define their schema inline: `schema: {name, tables}`
-    - Database values convert to JSON recursively, including UUIDs, network addresses, intervals and arrays
+    - `api-dock describe` builds the API like `start` (lookups, startup checks) and prints every database/version with expanded route SQL, plus each remote's url
+    - `api-dock init --force` replaces existing files; the whole example tree is copied
+    - `gcp` extra (`pip install 'api_dock[gcp]'`) for GCP Secret Manager authentication
+    - Startup warning when an `authentication` block would be ignored by remote routes
 * bug fixes
-    - `latest` and version lists compare versions numerically (`0.10` > `0.9`, `0.10.0` > `0.9.0`) for remotes and databases; they used to compare as floats or text
+    - Remote cookies: the client's raw `Cookie` header is no longer forwarded; the upstream `Cookie` header is built from the remote's `cookies` setting, so filtering and injected cookies work even when the client sends cookies
+    - Several upstream `Set-Cookie` headers reach the client separately instead of merged into one (new `ProxyResponse.set_cookies`)
+    - Query-param filters join the base query's top-level `WHERE` (strings, comments, CTEs and subqueries ignored), parenthesized and before a trailing `GROUP BY`/`ORDER BY`/`LIMIT`: fixes `WHERE a OR b` letting rows past filters, CTE-only `WHERE`s and base queries ending in `ORDER BY`
+    - `[[table]]` is a table source only right after `FROM`/`JOIN` or a `FROM`-list comma (was any `FROM`/`JOIN` in the previous 20 characters, which broke `ON [[a]].id = [[b]].id`)
+    - `sql_append` values are limited to integers and column names (with `ASC`/`DESC`, `NULLS FIRST/LAST`); the unimplemented `action` (which echoed request values, including cookies) is refused
+    - Authentication providers are built once per config instead of on every request (no secret-store/KMS call per request); `refresh_interval` now refreshes, keeping the last values if a refresh fails; tokens compared in constant time; `aws_tokens_file` works (`aws_key_id` optional)
+    - Remote route mapping fills `{{route_name}}` and `{{cookies.x}}` in `remote_route`, and keeps a query string written there
+    - Include/exclude and listing filters compare versions part by part (`1.10` no longer matches `1.1`)
+    - Values in DuckDB secret SQL (S3 region, GCS keys, HTTP headers) are quoted; a second GCS `service_account` no longer overwrites the process-wide one
+    - A main config that is missing (explicit path), invalid YAML or not a mapping stops startup instead of serving an empty API; settings are validated at startup
+    - An explicit encryption `key_file` must exist (only the default key file falls back to `API_DOCK_ENCRYPTION_KEY`); `env_key` reads only its variable
+    - Remote error responses no longer include internal error text (it's logged); `map_route_sync` no longer leaks event loops
 * cleanup / other improvements
-    - Database queries go through a `DatabaseBackend` interface (`DuckDBBackend`, `PostgresBackend`); the SQL builder takes the backend's bound-value marker
-    - Startup checks also cover PostgreSQL connections, every route's engine, `remotes/config.yaml` and lookup-generated config
-    - Slim README; detailed docs moved to the wiki (https://github.com/SchmidtDSE/api_dock/wiki), including new Concepts, PostgreSQL, Lookups and Developer Guide pages
-    - Test suite grew from 373 to 626 tests (a throwaway PostgreSQL server runs the PostgreSQL tests when available)
+    - `map_database_route` split into named steps; one version-resolution helper for remotes and databases
+    - A remote request reads only that remote's config file (was every remote file, twice)
+    - Removed unused internal functions; shared YAML-loading and version-matching helpers; `follow_protocol_downgrades` (never implemented) removed
+    - FastAPI app reports the package version; classifiers match Python 3.11+; style fixes
+    - Tests grew from 626 to 760, including the first tests for authentication, encryption, config discovery and storage credentials
 EOF
 )"
 
