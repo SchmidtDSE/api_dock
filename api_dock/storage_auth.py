@@ -12,6 +12,8 @@ License: BSD 3-Clause
 #
 # IMPORTS
 #
+import logging
+import os
 import re
 from typing import Any, Dict, List, Optional, Set
 
@@ -26,6 +28,11 @@ S3_PATTERN = re.compile(r'^s3[a]?://', re.IGNORECASE)
 GCS_PATTERN = re.compile(r'^gs://', re.IGNORECASE)
 AZURE_PATTERN = re.compile(r'^az[ure]*://', re.IGNORECASE)
 HTTP_PATTERN = re.compile(r'^https?://', re.IGNORECASE)
+
+# DuckDB reads a GCS service account file from this (process-wide) variable.
+GOOGLE_CREDENTIALS_ENV: str = "GOOGLE_APPLICATION_CREDENTIALS"
+
+logger = logging.getLogger(__name__)
 
 # Storage backend types
 BACKEND_S3 = 's3'
@@ -293,6 +300,18 @@ def _secret_scope(uri: str) -> str:
     return uri[:uri.rfind('/', 0, cut) + 1]
 
 
+def _sql_string(value: Any) -> str:
+    """Write a value as a DuckDB string literal (single quotes doubled).
+
+    Args:
+        value: The value.
+
+    Returns:
+        The quoted literal.
+    """
+    return "'" + str(value).replace("'", "''") + "'"
+
+
 def _s3_secret_sql(options: List[str], secret_name: Optional[str], scope: Optional[str]) -> str:
     """Build a CREATE OR REPLACE SECRET statement for S3.
 
@@ -338,7 +357,6 @@ def _setup_s3_auth(
         True if setup succeeded, False if it failed (but query may still work with public files).
     """
     try:
-        import os
 
         if metadata is None:
             metadata = {}
@@ -359,7 +377,7 @@ def _setup_s3_auth(
             os.environ.get('AWS_REGION')
         )
 
-        region_options = [f"REGION '{aws_region}'"] if aws_region else []
+        region_options = [f"REGION {_sql_string(aws_region)}"] if aws_region else []
 
         # For public buckets, try anonymous access first
         if is_public:
@@ -410,7 +428,6 @@ def _setup_gcs_auth(conn: Any, metadata: Optional[Dict[str, Any]] = None) -> boo
         True if setup succeeded, False if it failed (but query may still work with public files).
     """
     try:
-        import os
 
         if metadata is None:
             metadata = {}
@@ -429,8 +446,17 @@ def _setup_gcs_auth(conn: Any, metadata: Optional[Dict[str, Any]] = None) -> boo
         # 1. Metadata service_account path
         # 2. GOOGLE_APPLICATION_CREDENTIALS env var
         if service_account:
-            # Set environment variable for this session
-            os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = service_account
+            # DuckDB reads the service account only from the process-wide
+            # environment, so one server can use one: set it if unset, and warn
+            # (keeping the first) if a table asks for another.
+            current = os.environ.get(GOOGLE_CREDENTIALS_ENV)
+            if current is None:
+                os.environ[GOOGLE_CREDENTIALS_ENV] = str(service_account)
+            elif current != str(service_account):
+                logger.warning(
+                    "Table service_account %s ignored: %s is already %s (one service account "
+                    "per server)", service_account, GOOGLE_CREDENTIALS_ENV, current
+                )
 
         # Check if this is explicitly marked as public access
         is_public = metadata.get('public', False)
@@ -448,12 +474,12 @@ def _setup_gcs_auth(conn: Any, metadata: Optional[Dict[str, Any]] = None) -> boo
             # Use explicit HMAC credentials from config
             secret_parts = [
                 "TYPE gcs",
-                f"KEY_ID '{key_id}'",
-                f"SECRET '{secret}'"
+                f"KEY_ID {_sql_string(key_id)}",
+                f"SECRET {_sql_string(secret)}",
             ]
 
             if endpoint:
-                secret_parts.append(f"ENDPOINT '{endpoint}'")
+                secret_parts.append(f"ENDPOINT {_sql_string(endpoint)}")
 
             secret_sql = f"CREATE OR REPLACE SECRET ({', '.join(secret_parts)});"
             conn.execute(secret_sql)
@@ -557,7 +583,9 @@ def _setup_http_support(conn: Any, metadata: Optional[Dict[str, Any]] = None) ->
         # Create HTTP secret with headers if any are configured
         if headers:
             # Convert dict to DuckDB MAP format
-            headers_str = ', '.join([f"'{k}': '{v}'" for k, v in headers.items()])
+            headers_str = ', '.join(
+                f"{_sql_string(k)}: {_sql_string(v)}" for k, v in headers.items()
+            )
             conn.execute(f"""
                 CREATE OR REPLACE SECRET http_auth (
                     TYPE http,
