@@ -116,7 +116,6 @@ EXCLUDED_REQUEST_HEADERS: frozenset = frozenset({
 BASE_PATH_KEY: str = "base_path"
 
 
-
 #
 # PUBLIC
 #
@@ -955,38 +954,6 @@ class RouteMapper:
                 "call `await mapper.start()` (the FastAPI app does this in its lifespan)"
             )
         return self._postgres.backend(connection)
-
-    def _is_remote_filename(self, filename: str) -> bool:
-        """Check if a filename corresponds to a remote config file.
-
-        Args:
-            filename: Potential remote filename.
-
-        Returns:
-            True if filename matches a remote config file.
-        """
-        remotes = self.config.get("remotes", [])
-        for remote in remotes:
-            if isinstance(remote, str) and remote == filename:
-                return True
-        return False
-
-    def _get_remote_name_by_filename(self, filename: str) -> Optional[str]:
-        """Get the actual remote name for a given filename.
-
-        Args:
-            filename: Remote config filename.
-
-        Returns:
-            Actual remote name or None if not found.
-        """
-        from api_dock.config import get_remote_mapping
-
-        mapping = get_remote_mapping(self.config, self.config_dir)
-        for remote_name, config_path in mapping.items():
-            if config_path and filename in config_path:
-                return remote_name
-        return None
 
 
 #
