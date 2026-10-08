@@ -237,7 +237,7 @@ Publishing a GitHub Release is what publishes to PyPI: `.github/workflows/publis
 
 ```bash
 # 0. Start from a clean, up-to-date main
-export VERSION=0.9.0          # the NEW version, no leading "v"
+export VERSION=0.9.1          # the NEW version, no leading "v"
 git checkout main
 git pull origin main
 git status
@@ -248,7 +248,7 @@ git status
 pixi run -e dev pytest -q
 
 # 3. Commit, tag, push (the commit command adds the "v$VERSION: " prefix)
-export COMMIT_MESSAGE='bound SQL parameters (fix SQL injection) and startup config checks'
+export COMMIT_MESSAGE='PostgreSQL, lookups, remotes/config.yaml, numeric latest'
 git add -A
 git commit -m "v$VERSION: $COMMIT_MESSAGE"
 git tag "v$VERSION"
@@ -260,17 +260,18 @@ gh release create "v$VERSION" \
   --title "v$VERSION" \
   --notes "$(cat <<'EOF'
 * new features
-    - Request values are sent to DuckDB as bound parameters, separately from the SQL, so they can never run as SQL. Write variables without quotes (`UPPER(name) = UPPER({{name}})`); a string that is exactly one variable (`'{{name}}'`) still works, and patterns like `'%{{name}}%'` become `'%' || {{name}} || '%'`
-    - Startup checks: API Dock refuses to start, naming the database, version, route and template, if a config has a quoted or commented variable, a template ending in a comment, a malformed route, an invalid shared `databases/config.yaml`, a `[[table]]` / `[[schema.table]]` / union reference that doesn't resolve, or invalid `source_columns`. Each version is checked as requests see it (shared routes/query_params, include/exclude, slugs)
-    - Database and remote configs are read from the folder that holds the main config file
+    - PostgreSQL tables (`pip install 'api_dock[postgres]'`): named `connections` in `databases/config.yaml` and `{connection, table}` tables. A route runs natively on PostgreSQL when all its tables are on one connection (one pool per connection, read-only transactions, statement timeout), otherwise on DuckDB with PostgreSQL attached read-only, so unions and joins can mix PostgreSQL and Parquet. Route `engine: postgres|duckdb` checks or forces the choice; 503 when a database is unavailable
+    - Lookups: named queries (SQL over any configured table, or an HTTP API) run at startup, every `refresh` and on demand. `from:` entries turn rows into database/versions (with inline schemas) or remote versions, `{{lookup.<name>.<column>}}` fills single values, and `databases: [- from: <lookup>]` serves what they generate. New rows are checked before use; values used as URIs must match `allow:` prefixes. Optional token-protected refresh endpoint (`settings.lookups`) and `api-dock lookups` CLI
+    - `remotes/config.yaml`: define remotes inline (`version`, `versions` or unversioned); mixes with remote files, files win
+    - Slugs can define their schema inline: `schema: {name, tables}`
+    - Database values convert to JSON recursively, including UUIDs, network addresses, intervals and arrays
 * bug fixes
-    - SQL injection: query/path/cookie values were pasted into SQL and only quoted when the SQL fragment happened to contain words like SELECT/WHERE/AND/OR, so filters like `confidence >= {{confidence}}` accepted raw SQL (`?confidence=0 OR 1=1`, `UNION SELECT ... read_csv(...)`)
-    - `response:` bodies are filled in as plain text (they no longer get SQL quotes)
-    - Importing api_dock (or running `api-dock --help`) no longer builds an app from the current directory's config; the default `app`/`fastapi_app`/`flask_app` are built on first use
+    - `latest` and version lists compare versions numerically (`0.10` > `0.9`, `0.10.0` > `0.9.0`) for remotes and databases; they used to compare as floats or text
 * cleanup / other improvements
-    - Removed unused `build_sql_query_legacy` / `_substitute_parameters`; `build_sql_query` returns `(sql, values)` and `build_sql_query_with_tables` returns `(sql, values, tables)`
-    - New `sql_template_check` module and `check_table_references`; README sections "How values reach the database" and "Startup checks"
-    - Test suite grew from 253 to 373 tests
+    - Database queries go through a `DatabaseBackend` interface (`DuckDBBackend`, `PostgresBackend`); the SQL builder takes the backend's bound-value marker
+    - Startup checks also cover PostgreSQL connections, every route's engine, `remotes/config.yaml` and lookup-generated config
+    - Slim README; detailed docs moved to the wiki (https://github.com/SchmidtDSE/api_dock/wiki), including new Concepts, PostgreSQL, Lookups and Developer Guide pages
+    - Test suite grew from 373 to 626 tests (a throwaway PostgreSQL server runs the PostgreSQL tests when available)
 EOF
 )"
 
