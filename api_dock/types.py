@@ -33,7 +33,8 @@ class PreparedRequest:
         headers: Request headers to forward upstream.
         params: Filtered query parameters to forward. A value may be a list to
             forward a repeated key (e.g. ?id=1&id=2).
-        cookies: Filtered cookies to forward.
+        cookies: The cookies sent upstream (allowed by the remote's `cookies` setting);
+            already written into the Cookie header in headers.
         body: Request body bytes, or None for non-body methods.
         follow_redirects: Whether httpx should follow 3xx automatically.
         timeout: httpx request timeout in seconds, or None for no timeout.
