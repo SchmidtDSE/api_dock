@@ -225,10 +225,22 @@ class TestStartupShapeCheck:
         with pytest.raises(ValueError, match="ghost_db"):
             RouteMapper(config_path)
 
-    def test_missing_main_config_falls_back(self, tmp_path: Path) -> None:
-        """A missing main config still falls back to defaults."""
-        route_mapper = RouteMapper(str(tmp_path / "missing.yaml"))
-        assert route_mapper.database_names == []
+    def test_missing_main_config_stops_startup(self, tmp_path: Path) -> None:
+        """An explicitly given main config that doesn't exist is an error (not an empty API)."""
+        with pytest.raises(ValueError, match="Main config not found"):
+            RouteMapper(str(tmp_path / "missing.yaml"))
+
+    @pytest.mark.parametrize("text, message", [
+        ("name: [unclosed", "isn't valid YAML"),
+        ("- a\n- b\n", "must be a mapping"),
+    ])
+    def test_unreadable_main_config_stops_startup(
+            self, tmp_path: Path, text: str, message: str) -> None:
+        """A main config that isn't a YAML mapping stops startup with its path."""
+        path = tmp_path / "config.yaml"
+        path.write_text(text)
+        with pytest.raises(ValueError, match=message):
+            RouteMapper(str(path))
 
 
 class TestConfigDirectory:
