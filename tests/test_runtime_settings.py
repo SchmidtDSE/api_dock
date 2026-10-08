@@ -114,7 +114,7 @@ class TestRequestHeaderFilter:
         mapper.remote_names, mapper.database_names, mapper.settings = ["core"], [], {}
         mapper.config, mapper.config_dir = {"remotes": ["core"]}, "api_dock_config"
         with patch("api_dock.route_mapper.is_versioned_remote", return_value=False), \
-             patch("api_dock.route_mapper.is_route_allowed", return_value=True), \
+             patch("api_dock.route_mapper.route_allowed_by_config", return_value=True), \
              patch("api_dock.route_mapper.find_remote_config",
                    return_value={"url": "https://api.example.com"}), \
              patch("api_dock.route_mapper.filter_remote_query_params",
