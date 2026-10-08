@@ -14,7 +14,9 @@ url: https://api.example.com
 #     method: delete              # Block DELETE on all routes
 #   - admin/*                     # Block all routes under admin/
 
-# Forward specific cookies from the incoming client request to the upstream API.
+# Cookies sent upstream: only what `cookies` allows (none if it isn't set; the
+# client's own Cookie header is never forwarded as-is). Forward specific client
+# cookies by name, or all of them with `cookies: true`.
 # cookies: [session_id, auth_token]
 
 # Inject a server-side cookie into every upstream request.
