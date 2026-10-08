@@ -101,7 +101,7 @@ class TestStartup:
     def test_invalid_rows_stop_startup(self, tmp_path: Path) -> None:
         bad_run = ("perch", "8.0", "missing", "r3", ["d"])
         _setup(tmp_path, schema_by_name=True, runs=RUNS[:1] + [bad_run])
-        with pytest.raises(ValueError, match="perch.*detections"):
+        with pytest.raises(ValueError, match="perch.*schema: 'missing' isn't a schema"):
             RouteMapper(str(tmp_path / "config.yaml"))
 
 
