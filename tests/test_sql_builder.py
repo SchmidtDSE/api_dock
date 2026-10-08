@@ -119,8 +119,8 @@ class TestBuildSqlQueryMultivalue:
         )
         expected = (
             "SELECT detections.* FROM 'data/detections.parquet' AS detections "
-            "WHERE detections.recording_id in (?, ?) "
-            "AND detections.scientific_name = ?"
+            "WHERE (detections.recording_id in (?, ?)) "
+            "AND (detections.scientific_name = ?)"
         )
         assert sql == expected
         assert values == ["4", "1", "Gryllus fultoni"]
@@ -134,7 +134,7 @@ class TestBuildSqlQueryMultivalue:
         )
         expected = (
             "SELECT detections.* FROM 'data/detections.parquet' AS detections "
-            "WHERE detections.recording_id == ?"
+            "WHERE (detections.recording_id == ?)"
         )
         assert sql == expected
         assert values == ["4"]
