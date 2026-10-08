@@ -82,11 +82,13 @@ class LocalKeyEncryption(EncryptionProvider):
     """Local key encryption using Fernet symmetric encryption."""
 
     def __init__(self, key_source: Optional[str] = None):
-        """Initialize with key from file or environment variable.
+        """Initialize with a key file.
 
         Args:
-            key_source: Path to key file or environment variable name.
-                       If None, uses default key file.
+            key_source: Path to the key file. If None, the default key file is
+                used, and when it doesn't exist the key is read from the
+                ``API_DOCK_ENCRYPTION_KEY`` environment variable. A key file
+                given explicitly must exist (so a mistyped path is an error).
 
         Raises:
             EncryptionError: If cryptography package not available or key cannot be loaded.
@@ -95,6 +97,7 @@ class LocalKeyEncryption(EncryptionProvider):
             raise EncryptionError("cryptography package is required for local key encryption")
 
         self.key_source = key_source or DEFAULT_KEY_FILE
+        self._env_fallback = key_source is None or key_source == DEFAULT_KEY_FILE
         self._fernet = self._load_key()
 
     def encrypt(self, plaintext: str) -> str:
@@ -115,32 +118,25 @@ class LocalKeyEncryption(EncryptionProvider):
             raise EncryptionError(f"Failed to decrypt data: {str(e)}")
 
     def _load_key(self) -> 'Fernet':
-        """Load encryption key from file or environment."""
-        key_data = None
+        """Load the key from the key file (or the default environment variable).
 
-        # Try as file path first
+        Returns:
+            A Fernet instance.
+
+        Raises:
+            EncryptionError: If the key can't be found, read or used.
+        """
         if os.path.isfile(self.key_source):
             try:
                 with open(self.key_source, 'rb') as f:
                     key_data = f.read()
             except Exception as e:
                 raise EncryptionError(f"Failed to read key file '{self.key_source}': {str(e)}")
-
-        # Try as environment variable
-        elif self.key_source in os.environ:
-            key_data = os.environ[self.key_source].encode('utf-8')
-
-        # Try default environment variable
-        elif DEFAULT_ENV_KEY in os.environ:
+        elif self._env_fallback and DEFAULT_ENV_KEY in os.environ:
             key_data = os.environ[DEFAULT_ENV_KEY].encode('utf-8')
-
         else:
-            raise EncryptionError(f"Encryption key not found: {self.key_source}")
-
-        try:
-            return Fernet(key_data)
-        except Exception as e:
-            raise EncryptionError(f"Invalid encryption key: {str(e)}")
+            raise EncryptionError(f"Encryption key file not found: {self.key_source}")
+        return _fernet(key_data)
 
     @staticmethod
     def generate_key() -> bytes:
@@ -162,12 +158,21 @@ class EnvKeyEncryption(LocalKeyEncryption):
     """Environment variable encryption - alias for LocalKeyEncryption."""
 
     def __init__(self, env_var: str = DEFAULT_ENV_KEY):
-        """Initialize with environment variable.
+        """Initialize with a key read from an environment variable only.
 
         Args:
             env_var: Name of environment variable containing the key.
+
+        Raises:
+            EncryptionError: If cryptography isn't available or the variable
+                isn't set or isn't a valid key.
         """
-        super().__init__(env_var)
+        if Fernet is None:
+            raise EncryptionError("cryptography package is required for local key encryption")
+        self.key_source = env_var
+        if env_var not in os.environ:
+            raise EncryptionError(f"Encryption key environment variable not set: {env_var}")
+        self._fernet = _fernet(os.environ[env_var].encode('utf-8'))
 
 
 class AWSKMSEncryption(EncryptionProvider):
@@ -339,3 +344,24 @@ def decrypt_value_if_needed(value: str, encrypted: bool = True, encryption_confi
 
     provider = create_encryption_provider(encryption_config)
     return provider.decrypt(value)
+
+
+#
+# INTERNAL
+#
+def _fernet(key_data: bytes) -> 'Fernet':
+    """Build a Fernet instance from key bytes.
+
+    Args:
+        key_data: The key.
+
+    Returns:
+        The Fernet instance.
+
+    Raises:
+        EncryptionError: If the key is invalid.
+    """
+    try:
+        return Fernet(key_data.strip())
+    except Exception as e:
+        raise EncryptionError(f"Invalid encryption key: {str(e)}")
