@@ -720,7 +720,8 @@ def get_database_versions(database_name: str, config_dir: Optional[str] = None) 
 
     Returns:
         List of version strings (e.g., ["0.1", "0.2", "1.2"]) from version
-        files and the shared config's ``slugs``, without duplicates.
+        files and the shared config's ``slugs``, without duplicates, lowest
+        first (see ``api_dock.config.sort_versions``).
         Returns empty list if database is not versioned.
 
     Raises:
@@ -744,7 +745,8 @@ def get_database_versions(database_name: str, config_dir: Optional[str] = None) 
     slug_versions = get_slug_configs(config_dir).get(database_name, {})
     versions.update(v for v in slug_versions if v is not None)
 
-    return sorted(versions)
+    from api_dock.config import sort_versions
+    return sort_versions(versions)
 
 
 def get_slug_configs(config_dir: Optional[str] = None) -> Dict[str, Dict[Optional[str], Dict[str, Any]]]:
@@ -822,18 +824,8 @@ def resolve_latest_database_version(versions: List[str]) -> Optional[str]:
     Returns:
         The latest version string, or None if list is empty.
     """
-    if not versions:
-        return None
-
-    # Try to sort as floats
-    try:
-        float_versions = [(float(v), v) for v in versions]
-        float_versions.sort(key=lambda x: x[0], reverse=True)
-        return float_versions[0][1]
-    except ValueError:
-        # Fall back to string sorting
-        sorted_versions = sorted(versions, reverse=True)
-        return sorted_versions[0]
+    from api_dock.config import resolve_latest_version
+    return resolve_latest_version(versions)
 
 
 def find_database_route(path: str, database_config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
