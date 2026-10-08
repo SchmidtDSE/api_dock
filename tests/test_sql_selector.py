@@ -217,7 +217,7 @@ class TestSelectorComposition:
         expected = (
             "SELECT detections.common_name, detections.scientific_name, COUNT(*) AS count "
             "FROM 'data/detections.parquet' AS detections "
-            "WHERE detections.recording_id = ? "
+            "WHERE (detections.recording_id = ?) "
             "GROUP BY detections.common_name, detections.scientific_name"
         )
         assert sql == expected
@@ -238,7 +238,7 @@ class TestSelectorComposition:
         )
         expected = (
             "SELECT detections.* FROM 'data/detections.parquet' AS detections "
-            "WHERE detections.recording_id = ?"
+            "WHERE (detections.recording_id = ?)"
         )
         assert sql == expected
         assert values == ["1"]
