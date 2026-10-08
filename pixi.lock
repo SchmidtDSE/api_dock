@@ -3736,6 +3736,7 @@ packages:
   - pytest>=9.0.2,<10 ; extra == 'dev'
   - psycopg[binary]>=3.3.6,<4 ; extra == 'postgres'
   - psycopg-pool>=3.3.2,<4 ; extra == 'postgres'
+  - google-cloud-secret-manager>=2,<3 ; extra == 'gcp'
   requires_python: '>=3.11'
 - pypi: https://files.pythonhosted.org/packages/02/dc/c7043cab6fed8ae159fc1923ce829ada35c4dbd797d408a43858ffaf9639/tornado-6.5.7-cp39-abi3-macosx_10_9_universal2.whl
   name: tornado
