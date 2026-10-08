@@ -29,7 +29,7 @@ import yaml
 
 from api_dock.auth import validate_authentication
 from api_dock.config import DEFAULT_CONFIG_DIR, filter_cookies_by_config, filter_remote_query_params, find_remote_config, find_route_mapping, get_authentication_config, get_database_names, get_inline_remote_configs, get_remote_names, get_remote_versions, get_settings, is_route_allowed, is_versioned_remote, load_main_config, merge_inherited_config, resolve_latest_version
-from api_dock.database_config import apply_shared_definitions, check_database_config, check_table_definitions, find_database_route, get_database_versions, get_local_table_references, get_schema_sources, is_versioned_database, load_database_config, load_shared_config, merge_query_params, resolve_latest_database_version, SCHEMA_GROUPS_KEY, SHARED_CONFIG_KEY, SHARED_CONNECTIONS_KEY
+from api_dock.database_config import apply_shared_definitions, check_database_config, check_table_definitions, find_database_route, get_database_versions, get_local_table_references, get_schema_sources, is_versioned_database, load_database_config, load_shared_config, merge_query_params, resolve_latest_database_version, DATABASE_SCHEMA_KEY, SCHEMA_GROUPS_KEY, SHARED_CONFIG_KEY, SHARED_CONNECTIONS_KEY, SHARED_SCHEMA_KEY
 from api_dock.database_backends import DatabaseLifecycleError, DatabaseUnavailableError, DUCKDB_SETTINGS_KEY, DuckDBBackend
 from api_dock.listings import build_listing, resolve_listing_specs
 from api_dock.lookups import (
@@ -1148,6 +1148,11 @@ def _check_database(
             )
 
         try:
+            schema_name = database_config.get(DATABASE_SCHEMA_KEY)
+            if schema_name and schema_name not in (shared_database.get(SHARED_SCHEMA_KEY) or {}):
+                raise ValueError(
+                    f"schema: '{schema_name}' isn't a schema in databases/config.yaml"
+                )
             check_table_definitions(database_config.get("tables") or {}, shared_database, "tables")
             check_database_config(database_config, check_tables)
             for index, route_config in enumerate(database_config.get("routes") or []):
