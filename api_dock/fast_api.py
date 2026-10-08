@@ -12,6 +12,7 @@ License: BSD 3-Clause
 # IMPORTS
 #
 import asyncio
+import importlib.metadata
 import json
 import warnings
 from contextlib import asynccontextmanager
@@ -73,7 +74,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     app = FastAPI(
         title=metadata.get("name", "API Dock"),
         description=metadata.get("description", "API wrapper using configuration files"),
-        version="0.1.0",
+        version=_package_version(),
         lifespan=lifespan,
     )
 
@@ -393,6 +394,18 @@ async def _stream_upstream(prepared: PreparedRequest) -> Response:
     for cookie in upstream.headers.get_list(SET_COOKIE_HEADER):
         response.headers.append(SET_COOKIE_HEADER, cookie)
     return response
+
+
+def _package_version() -> str:
+    """The installed api_dock version (shown in the OpenAPI docs).
+
+    Returns:
+        The version, or "unknown" if the package metadata isn't available.
+    """
+    try:
+        return importlib.metadata.version("api_dock")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
 
 
 def _default_app() -> Any:
