@@ -14,7 +14,7 @@ License: BSD 3-Clause
 import os
 import shutil
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 
 #
@@ -55,7 +55,9 @@ def find_config(config_name: Optional[str] = None) -> Optional[str]:
     # Fall back to bundled package examples
     try:
         import importlib.resources as pkg_resources
-        package_config = Path(pkg_resources.files("api_dock") / "example_api_dock_config" / f"{config_name}.yaml")
+        package_config = Path(
+            pkg_resources.files("api_dock") / "example_api_dock_config" / f"{config_name}.yaml"
+        )
         if package_config.exists():
             return str(package_config)
     except Exception:
@@ -64,60 +66,41 @@ def find_config(config_name: Optional[str] = None) -> Optional[str]:
     return None
 
 
-def init_config() -> bool:
-    """Initialize local configuration directory.
+def init_config(overwrite: bool = False) -> Optional[List[str]]:
+    """Initialize the local configuration directory from the bundled example.
 
-    This function:
-    1. Creates api_dock_config/ directory
-    2. Creates api_dock_config/remotes/ subdirectory
-    3. Creates api_dock_config/databases/ subdirectory
-    4. Copies package default config files to api_dock_config/
+    Creates api_dock_config/ (with remotes/ and databases/) and copies every
+    ``.yaml`` file of the bundled example config into it, keeping its folder
+    layout (so versioned folders are copied too).
+
+    Args:
+        overwrite: Replace files that already exist (``init --force``). Without
+            it, existing files are left alone.
 
     Returns:
-        True if successful, False on error.
+        The paths written (relative to api_dock_config/), or None on error.
     """
     try:
-        # Step 1: Create main config directory
         local_dir = Path(LOCAL_CONFIG_DIR)
-        local_dir.mkdir(exist_ok=True)
+        for folder in (local_dir, local_dir / "remotes", local_dir / "databases"):
+            folder.mkdir(parents=True, exist_ok=True)
 
-        # Step 2: Create subdirectories
-        (local_dir / "remotes").mkdir(exist_ok=True)
-        (local_dir / "databases").mkdir(exist_ok=True)
-
-        # Step 3: Copy example configs from package
         package_dir = _get_package_config_dir()
         if not package_dir:
-            return False
+            return None
 
-        # Copy main config.yaml
-        src_config = package_dir / "config.yaml"
-        dst_config = local_dir / "config.yaml"
-        if src_config.exists() and not dst_config.exists():
-            shutil.copy(src_config, dst_config)
-
-        # Copy remotes directory
-        src_remotes = package_dir / "remotes"
-        dst_remotes = local_dir / "remotes"
-        if src_remotes.exists():
-            for remote_file in src_remotes.glob("*.yaml"):
-                dst_file = dst_remotes / remote_file.name
-                if not dst_file.exists():
-                    shutil.copy(remote_file, dst_file)
-
-        # Copy databases directory
-        src_databases = package_dir / "databases"
-        dst_databases = local_dir / "databases"
-        if src_databases.exists():
-            for db_file in src_databases.glob("*.yaml"):
-                dst_file = dst_databases / db_file.name
-                if not dst_file.exists():
-                    shutil.copy(db_file, dst_file)
-
-        return True
-
-    except Exception:
-        return False
+        written = []
+        for source in sorted(package_dir.rglob("*.yaml")):
+            relative = source.relative_to(package_dir)
+            target = local_dir / relative
+            if target.exists() and not overwrite:
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(source, target)
+            written.append(str(relative))
+        return written
+    except OSError:
+        return None
 
 
 #
