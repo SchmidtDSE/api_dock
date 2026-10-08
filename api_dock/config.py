@@ -123,53 +123,6 @@ def find_remote_config(remote_name: str, main_config: Dict[str, Any], config_dir
     raise FileNotFoundError(f"No config file or remotes/config.yaml entry for remote '{remote_name}'")
 
 
-def find_remote_config_with_inheritance(remote_name: str, main_config: Dict[str, Any], config_dir: Optional[str] = None, version: Optional[str] = None) -> Dict[str, Any]:
-    """Find and load remote configuration with cookie/authentication inheritance.
-
-    Args:
-        remote_name: Name of the remote (from the name field in YAML).
-        main_config: Main configuration dictionary for inheritance.
-        config_dir: Base config directory. If None, uses default.
-        version: Version string for versioned remotes.
-
-    Returns:
-        Dictionary containing remote configuration data with inheritance applied.
-
-    Raises:
-        FileNotFoundError: If remote config file doesn't exist.
-        yaml.YAMLError: If config file is invalid YAML.
-    """
-    # Load the remote config
-    remote_config = find_remote_config(remote_name, main_config, config_dir, version)
-
-    # Apply inheritance from main config
-    merged_config = merge_inherited_config(remote_config, main_config)
-
-    return merged_config
-
-
-def find_remote_config_by_filename(remote_filename: str, config_dir: Optional[str] = None) -> Dict[str, Any]:
-    """Find and load configuration for a specific remote API by filename (legacy).
-
-    Args:
-        remote_filename: Filename of the remote (e.g., "remote_1234").
-        config_dir: Base config directory. If None, uses default.
-
-    Returns:
-        Dictionary containing remote configuration data.
-
-    Raises:
-        FileNotFoundError: If remote config file doesn't exist.
-        yaml.YAMLError: If config file is invalid YAML.
-    """
-    if config_dir is None:
-        config_dir = DEFAULT_CONFIG_DIR
-
-    remote_config_path = os.path.join(config_dir, REMOTES_DIR, f"{remote_filename}.yaml")
-
-    return _load_yaml_file(remote_config_path)
-
-
 def get_remote_mapping(config: Dict[str, Any], config_dir: Optional[str] = None) -> Dict[str, str]:
     """Create mapping from remote names to config file paths.
 
