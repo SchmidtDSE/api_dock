@@ -28,9 +28,48 @@ import httpx
 import yaml
 
 from api_dock.auth import validate_authentication
-from api_dock.config import DEFAULT_CONFIG_DIR, filter_cookies_by_config, filter_remote_query_params, find_remote_config, find_route_mapping, get_authentication_config, get_database_names, get_inline_remote_configs, get_remote_names, get_remote_versions, get_settings, is_versioned_remote, load_main_config, merge_inherited_config, resolve_latest_version, route_allowed_by_config
-from api_dock.database_config import apply_shared_definitions, check_database_config, check_table_definitions, find_database_route, get_database_versions, get_local_table_references, get_schema_sources, is_versioned_database, load_database_config, load_shared_config, merge_query_params, resolve_latest_database_version, DATABASE_SCHEMA_KEY, SCHEMA_GROUPS_KEY, SHARED_CONFIG_KEY, SHARED_CONNECTIONS_KEY, SHARED_SCHEMA_KEY
-from api_dock.database_backends import DatabaseLifecycleError, DatabaseUnavailableError, DUCKDB_SETTINGS_KEY, DuckDBBackend
+from api_dock.config import (
+    DEFAULT_CONFIG_DIR,
+    filter_cookies_by_config,
+    filter_remote_query_params,
+    find_remote_config,
+    find_route_mapping,
+    get_authentication_config,
+    get_database_names,
+    get_inline_remote_configs,
+    get_remote_names,
+    get_remote_versions,
+    get_settings,
+    is_versioned_remote,
+    load_main_config,
+    merge_inherited_config,
+    resolve_latest_version,
+    route_allowed_by_config,
+)
+from api_dock.database_config import (
+    apply_shared_definitions,
+    check_database_config,
+    check_table_definitions,
+    DATABASE_SCHEMA_KEY,
+    find_database_route,
+    get_database_versions,
+    get_local_table_references,
+    get_schema_sources,
+    is_versioned_database,
+    load_database_config,
+    load_shared_config,
+    merge_query_params,
+    SCHEMA_GROUPS_KEY,
+    SHARED_CONFIG_KEY,
+    SHARED_CONNECTIONS_KEY,
+    SHARED_SCHEMA_KEY,
+)
+from api_dock.database_backends import (
+    DatabaseLifecycleError,
+    DatabaseUnavailableError,
+    DUCKDB_SETTINGS_KEY,
+    DuckDBBackend,
+)
 from api_dock.listings import build_listing, resolve_listing_specs
 from api_dock.lookups import (
     check_endpoint_token,
@@ -39,7 +78,16 @@ from api_dock.lookups import (
     LookupContext,
     parse_lookup_settings,
 )
-from api_dock.sql_builder import build_sql_query_with_tables, check_table_references, route_engine, route_tables, extract_path_parameters, process_query_parameters, SOURCE_COLUMNS_KEY, SqlSelectionError
+from api_dock.sql_builder import (
+    build_sql_query_with_tables,
+    check_table_references,
+    extract_path_parameters,
+    process_query_parameters,
+    route_engine,
+    route_tables,
+    SOURCE_COLUMNS_KEY,
+    SqlSelectionError,
+)
 from api_dock.types import PreparedRequest, ProxyResponse, SqlContext
 
 
@@ -449,7 +497,7 @@ class RouteMapper:
             query_params: Optional[Dict[str, str]] = None,
             cookies: Optional[Dict[str, str]] = None,
             multi_query_params: Optional[Dict[str, List[str]]] = None
-            ) -> Union[ProxyResponse, PreparedRequest]:
+    ) -> Union[ProxyResponse, PreparedRequest]:
         """Validate and resolve a remote request without executing the HTTP call.
 
         Performs all route validation, version resolution, config loading,
@@ -480,34 +528,14 @@ class RouteMapper:
         if remote_name not in self.remote_names:
             return _error_response(404, f"Remote '{remote_name}' not found")
 
-        is_versioned = is_versioned_remote(remote_name, self.config, self.config_dir)
-
-        path_parts = path.split("/") if path else []
-        version = None
-        actual_path = path
-
-        if is_versioned and path_parts:
-            potential_version = path_parts[0]
-            available_versions = get_remote_versions(remote_name, self.config, self.config_dir)
-
-            if potential_version == "latest":
-                version = resolve_latest_version(available_versions)
-                if version is None:
-                    return _error_response(404, f"No versions found for remote '{remote_name}'")
-                actual_path = "/".join(path_parts[1:])
-            elif potential_version in available_versions:
-                version = potential_version
-                actual_path = "/".join(path_parts[1:])
-            elif not path:
-                return _json_response({"versions": available_versions})
-            else:
-                return _error_response(404, f"Configuration for remote '{remote_name}' not found")
-        elif is_versioned and not path:
-            available_versions = get_remote_versions(remote_name, self.config, self.config_dir)
-            return _json_response({"versions": available_versions})
-
-        if not actual_path:
-            actual_path = ""
+        versions = (
+            get_remote_versions(remote_name, self.config, self.config_dir)
+            if is_versioned_remote(remote_name, self.config, self.config_dir) else None
+        )
+        resolved = _split_version("remote", remote_name, path, versions)
+        if isinstance(resolved, ProxyResponse):
+            return resolved
+        version, actual_path = resolved
 
         # Load the remote's config once; the allow-list check uses it too.
         try:
@@ -517,7 +545,9 @@ class RouteMapper:
         except FileNotFoundError:
             remote_config = None
         if not route_allowed_by_config(actual_path, self.config, remote_config, method):
-            return _error_response(403, f"Route '{actual_path}' not allowed for remote '{remote_name}'")
+            return _error_response(
+                403, f"Route '{actual_path}' not allowed for remote '{remote_name}'"
+            )
         if remote_config is None:
             return _error_response(404, f"Configuration for remote '{remote_name}' not found")
 
@@ -685,48 +715,92 @@ class RouteMapper:
         Returns:
             ProxyResponse with JSON content. error_message is set on failure.
         """
-        if query_params is None:
-            query_params = {}
-        if cookies is None:
-            cookies = {}
-        if multi_query_params is None:
-            multi_query_params = {}
+        query_params = query_params or {}
+        cookies = cookies or {}
+        multi_query_params = multi_query_params or {}
 
         if database_name not in self.database_names:
             return _error_response(404, f"Database '{database_name}' not found")
 
+        resolved = self._resolve_database_version(database_name, path)
+        if isinstance(resolved, ProxyResponse):
+            return resolved
+        version, actual_path = resolved
+
+        loaded = self._load_database(database_name, version)
+        if isinstance(loaded, ProxyResponse):
+            return loaded
+        database_config, shared_file = loaded
+
+        filtered_cookies = filter_cookies_by_config(cookies, database_config)
+        denied = _check_database_authentication(database_config, filtered_cookies)
+        if denied is not None:
+            return denied
+
+        if not actual_path:
+            routes = database_config.get("routes", [])
+            return _json_response({"routes": [
+                r.get("route", "") for r in routes if isinstance(r, dict)
+            ]})
+
+        route_config = find_database_route(actual_path, database_config)
+        if route_config is None:
+            return _error_response(
+                404, f"Route '{actual_path}' not found in database '{database_name}'"
+            )
+        route_config = merge_query_params(route_config, database_config)
+        path_params = extract_path_parameters(actual_path, route_config.get("route", ""))
+
+        early = _early_query_param_response(route_config, query_params, path_params, cookies)
+        if early is not None:
+            return early
+
+        built = await self._build_database_query(
+            database_name, version, route_config, database_config, shared_file, path_params,
+            query_params, filtered_cookies, multi_query_params,
+        )
+        if isinstance(built, ProxyResponse):
+            return built
+        return await _run_database_query(*built, database_config, shared_file)
+
+    def _resolve_database_version(
+            self, database_name: str, path: str) -> Union[ProxyResponse, Tuple[Optional[str], str]]:
+        """Split a database path into its version and the route path.
+
+        Args:
+            database_name: Database name.
+            path: Path after the database name.
+
+        Returns:
+            ``(version, route path)``, or a ProxyResponse (the version listing,
+            a 404, or a 500 for a malformed shared config).
+        """
         # Versions come from version files and the shared config's `slugs`, so
         # a malformed shared config surfaces here.
         try:
-            is_versioned = is_versioned_database(database_name, self.config_dir)
-            available_versions = (
-                get_database_versions(database_name, self.config_dir) if is_versioned else []
+            versions = (
+                get_database_versions(database_name, self.config_dir)
+                if is_versioned_database(database_name, self.config_dir) else None
             )
         except (ValueError, yaml.YAMLError):
             return _error_response(500, "Shared database configuration error")
+        return _split_version("database", database_name, path, versions)
 
-        path_parts = path.split("/") if path else []
-        version = None
-        actual_path = path
+    def _load_database(
+            self, database_name: str, version: Optional[str]
+    ) -> Union[ProxyResponse, Tuple[Dict[str, Any], Dict[str, Any]]]:
+        """Load a database/version's config as requests see it.
 
-        if is_versioned and path_parts:
-            potential_version = path_parts[0]
+        Merged with the main config (inherited cookies/authentication) and the
+        shared routes/query params that apply to it.
 
-            if potential_version == "latest":
-                version = resolve_latest_database_version(available_versions)
-                if version is None:
-                    return _error_response(404, f"No versions found for database '{database_name}'")
-                actual_path = "/".join(path_parts[1:])
-            elif potential_version in available_versions:
-                version = potential_version
-                actual_path = "/".join(path_parts[1:])
-            elif not path:
-                return _json_response({"versions": available_versions})
-            else:
-                return _error_response(404, f"Configuration for database '{database_name}' not found")
-        elif is_versioned and not path:
-            return _json_response({"versions": available_versions})
+        Args:
+            database_name: Database name.
+            version: Version, or None.
 
+        Returns:
+            ``(database config, shared config file)``, or an error ProxyResponse.
+        """
         try:
             database_config = load_database_config(
                 database_name, self.config_dir, version=version
@@ -737,62 +811,44 @@ class RouteMapper:
             return _error_response(500, "Shared database configuration error")
 
         database_config = merge_inherited_config(database_config, self.config)
-
         try:
             shared_file = load_shared_config(self.config_dir)
-            shared_config = shared_file.get(SHARED_CONFIG_KEY, {})
             database_config = apply_shared_definitions(
                 database_config, shared_file, database_name, version
             )
         except Exception:
             return _error_response(500, "Shared database configuration error")
+        return database_config, shared_file
 
-        filtered_cookies = filter_cookies_by_config(cookies, database_config)
+    async def _build_database_query(
+            self,
+            database_name: str,
+            version: Optional[str],
+            route_config: Dict[str, Any],
+            database_config: Dict[str, Any],
+            shared_file: Dict[str, Any],
+            path_params: Dict[str, str],
+            query_params: Dict[str, str],
+            cookies: Dict[str, str],
+            multi_query_params: Dict[str, List[str]],
+    ) -> Union[ProxyResponse, Tuple[Any, str, List[Optional[str]], List[Any]]]:
+        """Choose the engine and build the SQL for a database route.
 
-        auth_config = get_authentication_config(database_config)
-        if auth_config:
-            try:
-                is_valid, status_code, response_body = validate_authentication(filtered_cookies, auth_config)
-                if not is_valid:
-                    content = json.dumps(response_body).encode() if response_body else b'{"error": "Authentication failed"}'
-                    return ProxyResponse(
-                        status_code=status_code,
-                        content=content,
-                        content_type="application/json",
-                        error_message="Authentication failed",
-                    )
-            except Exception:
-                return _error_response(500, "Authentication error")
+        Args:
+            database_name: Database name.
+            version: Version, or None.
+            route_config: The route, merged with top-level query params.
+            database_config: The version's config.
+            shared_file: The shared config file.
+            path_params: Values from the path.
+            query_params: Query values (one per key).
+            cookies: Cookies allowed by the config.
+            multi_query_params: Every value of repeated query keys.
 
-        if not actual_path or actual_path == "":
-            routes = database_config.get("routes", [])
-            route_list = [r.get("route", "") for r in routes if isinstance(r, dict)]
-            return _json_response({"routes": route_list})
-
-        route_config = find_database_route(actual_path, database_config)
-        if route_config is None:
-            return _error_response(404, f"Route '{actual_path}' not found in database '{database_name}'")
-
-        route_config = merge_query_params(route_config, database_config)
-
-        route_pattern = route_config.get("route", "")
-        path_params = extract_path_parameters(actual_path, route_pattern)
-
-        try:
-            should_return_early, response_data, status_code, error_message = process_query_parameters(
-                route_config, query_params, path_params, cookies
-            )
-            if should_return_early:
-                content = json.dumps(response_data).encode() if response_data is not None else b""
-                return ProxyResponse(
-                    status_code=status_code,
-                    content=content,
-                    content_type="application/json",
-                    error_message=error_message,
-                )
-        except Exception:
-            return _error_response(500, "Query parameter processing error")
-
+        Returns:
+            ``(backend, sql, values, table references)``, or an error ProxyResponse.
+        """
+        shared_config = shared_file.get(SHARED_CONFIG_KEY, {})
         try:
             # Schema -> name/version lookups load every database config, so only
             # do them when the route asks for source columns.
@@ -820,7 +876,7 @@ class RouteMapper:
                 )
             sql_query, sql_values, table_refs = build_sql_query_with_tables(
                 route_config, database_config, path_params, query_params,
-                filtered_cookies, multi_query_params, shared_config, context, backend.marker
+                cookies, multi_query_params, shared_config, context, backend.marker
             )
         except SqlSelectionError as e:
             return ProxyResponse(
@@ -835,23 +891,7 @@ class RouteMapper:
             return _error_response(503, "Database unavailable")
         except (ValueError, yaml.YAMLError):
             return _error_response(500, "SQL query error")
-
-        # Authenticate every local table plus any shared tables the query
-        # references, then expose [[schema.table]] refs as views.
-        auth_tables = get_local_table_references(database_config, shared_config)
-        local_names = {table.sql_name for table in auth_tables}
-        auth_tables += [ref for ref in table_refs if ref.sql_name not in local_names]
-
-        try:
-            columns, rows = await backend.execute(sql_query, sql_values, auth_tables)
-        except DatabaseUnavailableError:
-            return _error_response(503, "Database unavailable")
-        except Exception:
-            return _error_response(500, "Database query error")
-        return _json_response([
-            {column: _make_json_safe(value) for column, value in zip(columns, row)}
-            for row in rows
-        ])
+        return backend, sql_query, sql_values, table_refs
 
     def is_remote_name(self, name: str) -> bool:
         """Check if a given name is a configured remote name.
@@ -958,6 +998,130 @@ class RouteMapper:
 #
 # INTERNAL
 #
+def _split_version(
+        kind: str, name: str, path: str,
+        versions: Optional[List[str]]) -> Union[ProxyResponse, Tuple[Optional[str], str]]:
+    """Split ``<version or latest>/<route path>`` for a versioned remote or database.
+
+    Args:
+        kind: "remote" or "database" (for messages).
+        name: Remote or database name.
+        path: Path after the name.
+        versions: Available versions, or None if it isn't versioned.
+
+    Returns:
+        ``(version, route path)`` (version None if unversioned), or a
+        ProxyResponse: the version listing for the bare name, or a 404 for an
+        unknown version.
+    """
+    if versions is None:
+        return None, path or ""
+    if not path:
+        return _json_response({"versions": versions})
+    first, _, rest = path.partition("/")
+    if first == DEFAULT_VERSION:
+        version = resolve_latest_version(versions)
+        if version is None:
+            return _error_response(404, f"No versions found for {kind} '{name}'")
+        return version, rest
+    if first in versions:
+        return first, rest
+    return _error_response(404, f"Configuration for {kind} '{name}' not found")
+
+
+def _check_database_authentication(
+        database_config: Dict[str, Any], cookies: Dict[str, str]) -> Optional[ProxyResponse]:
+    """Check a database's ``authentication`` against the request's cookies.
+
+    Args:
+        database_config: The database/version config.
+        cookies: Cookies allowed by its config.
+
+    Returns:
+        None if allowed (or no authentication is configured), else the
+        failure ProxyResponse.
+    """
+    auth_config = get_authentication_config(database_config)
+    if not auth_config:
+        return None
+    try:
+        is_valid, status_code, response_body = validate_authentication(cookies, auth_config)
+    except Exception:
+        return _error_response(500, "Authentication error")
+    if is_valid:
+        return None
+    content = (
+        json.dumps(response_body).encode() if response_body
+        else b'{"error": "Authentication failed"}'
+    )
+    return ProxyResponse(status_code=status_code, content=content,
+                         content_type="application/json", error_message="Authentication failed")
+
+
+def _early_query_param_response(
+        route_config: Dict[str, Any], query_params: Dict[str, str],
+        path_params: Dict[str, str], cookies: Dict[str, str]) -> Optional[ProxyResponse]:
+    """A response decided by query params alone (``response``, ``required``, ...).
+
+    Args:
+        route_config: The route, merged with top-level query params.
+        query_params: Query values.
+        path_params: Path values.
+        cookies: Request cookies.
+
+    Returns:
+        The response, or None to go on and run the query.
+    """
+    try:
+        returns_early, data, status_code, error_message = process_query_parameters(
+            route_config, query_params, path_params, cookies
+        )
+    except Exception:
+        return _error_response(500, "Query parameter processing error")
+    if not returns_early:
+        return None
+    return ProxyResponse(
+        status_code=status_code,
+        content=json.dumps(data).encode() if data is not None else b"",
+        content_type="application/json",
+        error_message=error_message,
+    )
+
+
+async def _run_database_query(
+        backend: Any, sql: str, values: List[Optional[str]], table_refs: List[Any],
+        database_config: Dict[str, Any], shared_file: Dict[str, Any]) -> ProxyResponse:
+    """Run a built query and return its rows as JSON.
+
+    Args:
+        backend: The DatabaseBackend to run on.
+        sql: SQL with markers.
+        values: Bound values.
+        table_refs: Tables the query references.
+        database_config: The version's config (its tables get storage access).
+        shared_file: The shared config file.
+
+    Returns:
+        200 with the rows, 503 if the database is unavailable, 500 on errors.
+    """
+    shared_config = shared_file.get(SHARED_CONFIG_KEY, {})
+    # Authenticate every local table plus any shared tables the query
+    # references, then expose [[schema.table]] refs as views.
+    auth_tables = get_local_table_references(database_config, shared_config)
+    local_names = {table.sql_name for table in auth_tables}
+    auth_tables += [ref for ref in table_refs if ref.sql_name not in local_names]
+    try:
+        columns, rows = await backend.execute(sql, values, auth_tables)
+    except DatabaseUnavailableError:
+        return _error_response(503, "Database unavailable")
+    except Exception:
+        return _error_response(500, "Database query error")
+    return _json_response([
+        {column: _make_json_safe(value) for column, value in zip(columns, row)}
+        for row in rows
+    ])
+
+
 def _load_main_config_or_raise(config_path: Optional[str]) -> Dict[str, Any]:
     """Load the main config, failing loudly instead of serving an empty API.
 
