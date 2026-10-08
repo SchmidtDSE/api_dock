@@ -71,7 +71,7 @@ def load_main_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     if config_path is None:
         config_path = os.path.join(DEFAULT_CONFIG_DIR, DEFAULT_CONFIG_FILE)
 
-    return _load_yaml_file(config_path)
+    return load_yaml_file(config_path)
 
 
 def find_remote_config(remote_name: str, main_config: Dict[str, Any], config_dir: Optional[str] = None, version: Optional[str] = None) -> Dict[str, Any]:
@@ -101,7 +101,7 @@ def find_remote_config(remote_name: str, main_config: Dict[str, Any], config_dir
         # A version file wins over an entry in remotes/config.yaml
         config_path = os.path.join(config_dir, REMOTES_DIR, remote_name, f"{version}.yaml")
         if os.path.isfile(config_path):
-            return _fill_lookup_values(_load_yaml_file(config_path), config_path, config_dir)
+            return _fill_lookup_values(load_yaml_file(config_path), config_path, config_dir)
         inline_versions = get_inline_remote_configs(config_dir).get(remote_name, {})
         if str(version) in inline_versions:
             return inline_versions[str(version)]
@@ -116,7 +116,7 @@ def find_remote_config(remote_name: str, main_config: Dict[str, Any], config_dir
     config_path = remote_mapping[remote_name]
 
     if config_path is not None and os.path.isfile(config_path):
-        return _fill_lookup_values(_load_yaml_file(config_path), config_path, config_dir)
+        return _fill_lookup_values(load_yaml_file(config_path), config_path, config_dir)
     inline_versions = get_inline_remote_configs(config_dir).get(remote_name, {})
     if None in inline_versions:
         return inline_versions[None]
@@ -150,7 +150,7 @@ def get_remote_mapping(config: Dict[str, Any], config_dir: Optional[str] = None)
 
             # Try to load the config to get the actual name
             try:
-                remote_config = _load_yaml_file(config_path)
+                remote_config = load_yaml_file(config_path)
                 actual_name = remote_config.get("name", filename)
                 remote_mapping[actual_name] = config_path
             except (FileNotFoundError, Exception):
@@ -587,7 +587,7 @@ def load_static_remote_config(config_dir: Optional[str] = None) -> Dict[str, Any
     if not os.path.isfile(shared_path):
         return {}
 
-    contents = _load_yaml_file(shared_path) or {}
+    contents = load_yaml_file(shared_path) or {}
     if not isinstance(contents, dict):
         raise ValueError(f"{shared_path} must contain a mapping")
     remotes = contents.get(REMOTE_CONFIGS_KEY) or {}
@@ -700,6 +700,50 @@ def sort_versions(versions: Any) -> List[str]:
         The versions as a sorted list.
     """
     return sorted(versions, key=version_sort_key)
+
+
+def load_yaml_file(file_path: str, kind: str = "Configuration") -> Any:
+    """Load a YAML file (an empty file loads as an empty mapping).
+
+    Args:
+        file_path: Path to the YAML file.
+        kind: What the file is, for the not-found message.
+
+    Returns:
+        The file's contents.
+
+    Raises:
+        FileNotFoundError: If the file doesn't exist.
+        yaml.YAMLError: If the file is invalid YAML.
+    """
+    try:
+        with open(file_path, 'r') as file:
+            return yaml.safe_load(file) or {}
+    except FileNotFoundError:
+        raise FileNotFoundError(f"{kind} file not found: {file_path}")
+    except yaml.YAMLError as error:
+        raise yaml.YAMLError(f"Invalid YAML in {file_path}: {error}")
+
+
+def versions_equal(version: Any, spec: Any) -> bool:
+    """Whether two version values name the same version.
+
+    Compared part by part with numbers as numbers, ignoring trailing ``.0``
+    parts, so "3", "3.0" and a YAML ``3.0`` match, while "1.10" and "1.1" don't.
+
+    Args:
+        version: A version (e.g. a file name stem).
+        spec: A configured version (string or YAML number).
+
+    Returns:
+        True if they name the same version.
+    """
+    def parts(value: Any) -> tuple:
+        tokens = list(version_sort_key(str(value).strip())[0][:-1])
+        while tokens and tokens[-1] == (2, 0, ""):
+            tokens.pop()
+        return tuple(tokens)
+    return str(version).strip() == str(spec).strip() or parts(version) == parts(spec)
 
 
 def resolve_latest_version(versions: List[str]) -> Optional[str]:
@@ -954,28 +998,6 @@ def _fill_lookup_values(config: Any, label: str, config_dir: Optional[str]) -> A
     """
     from api_dock.database_config import fill_lookup_values
     return fill_lookup_values(config, label, config_dir)
-
-
-def _load_yaml_file(file_path: str) -> Dict[str, Any]:
-    """Load a YAML file and return its contents.
-
-    Args:
-        file_path: Path to the YAML file.
-
-    Returns:
-        Dictionary containing YAML data.
-
-    Raises:
-        FileNotFoundError: If file doesn't exist.
-        yaml.YAMLError: If file is invalid YAML.
-    """
-    try:
-        with open(file_path, 'r') as file:
-            return yaml.safe_load(file) or {}
-    except FileNotFoundError:
-        raise FileNotFoundError(f"Configuration file not found: {file_path}")
-    except yaml.YAMLError as e:
-        raise yaml.YAMLError(f"Invalid YAML in {file_path}: {e}")
 
 
 def _route_matches_patterns(route: str, patterns: List[Union[str, dict]], method: Optional[str] = None) -> bool:
