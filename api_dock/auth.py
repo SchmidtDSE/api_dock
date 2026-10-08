@@ -11,12 +11,16 @@ License: BSD 3-Clause
 #
 # IMPORTS
 #
+import hmac
 import json
+import logging
+import os
+import threading
 import time
-from abc import ABC, abstractmethod
+from abc import ABC
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from api_dock.encryption import create_encryption_provider, decrypt_value_if_needed, EncryptionError
+from api_dock.encryption import decrypt_value_if_needed, EncryptionError
 
 
 #
@@ -24,6 +28,24 @@ from api_dock.encryption import create_encryption_provider, decrypt_value_if_nee
 #
 DEFAULT_CACHE_TTL: int = 300  # 5 minutes
 DEFAULT_STATUS_CODE: int = 401
+
+# Keys that choose the authentication method; exactly one must be present.
+# (`aws_key_id` is an optional detail of the KMS methods, not a method.)
+METHOD_KEYS: Tuple[str, ...] = (
+    "value", "values", "filepath", "aws_secret_name", "aws_tokens", "aws_tokens_file",
+    "gcp_project_id",
+)
+
+# Settings that name a file whose contents a provider reads at creation.
+FILE_KEYS: Tuple[str, ...] = ("filepath", "aws_tokens_file")
+
+# At most this many providers are cached (one per distinct auth config).
+PROVIDER_CACHE_SIZE: int = 64
+
+logger = logging.getLogger(__name__)
+
+_PROVIDERS: Dict[str, "AuthenticationProvider"] = {}
+_PROVIDERS_LOCK = threading.Lock()
 
 
 #
@@ -40,20 +62,28 @@ class AuthenticationProvider(ABC):
         """
         self.failed_response_config = failed_response or {}
 
-
     def validate(self, token: str) -> bool:
-        """Validate token against a set of valid tokens with string normalization.
+        """Check a token against the expected values, in constant time per value.
 
         Args:
             token: Token to validate.
-            valid_tokens: Set of valid tokens.
 
         Returns:
             True if token is valid, False otherwise.
         """
-        normalized_tokens = self._normalize_token_set(self.expected_values)
-        return str(token) in normalized_tokens
+        candidate = str(token).encode()
+        matched = False
+        for expected in self._normalize_token_set(self.current_values()):
+            matched |= hmac.compare_digest(candidate, expected.encode())
+        return matched
 
+    def current_values(self) -> set:
+        """The values tokens are checked against (secret stores refresh them).
+
+        Returns:
+            The expected values.
+        """
+        return set(self.expected_values)
 
     def get_failed_response(self) -> Tuple[int, Any]:
         """Get the response to return when authentication fails.
@@ -85,7 +115,9 @@ class AuthenticationProvider(ABC):
 class FixedValueAuth(AuthenticationProvider):
     """Authentication using a single fixed value."""
 
-    def __init__(self, value: str, encrypted: bool = True, encryption_config: Optional[Dict[str, Any]] = None, failed_response: Optional[Dict[str, Any]] = None):
+    def __init__(self, value: str, encrypted: bool = True,
+                 encryption_config: Optional[Dict[str, Any]] = None,
+                 failed_response: Optional[Dict[str, Any]] = None):
         """Initialize fixed value authentication.
 
         Args:
@@ -108,7 +140,9 @@ class FixedValueAuth(AuthenticationProvider):
 class ListValueAuth(AuthenticationProvider):
     """Authentication using a list of allowed values."""
 
-    def __init__(self, values: List[Union[str, Dict[str, Any]]], encrypted: bool = True, encryption_config: Optional[Dict[str, Any]] = None, failed_response: Optional[Dict[str, Any]] = None):
+    def __init__(self, values: List[Union[str, Dict[str, Any]]], encrypted: bool = True,
+                 encryption_config: Optional[Dict[str, Any]] = None,
+                 failed_response: Optional[Dict[str, Any]] = None):
         """Initialize list value authentication.
 
         Args:
@@ -134,7 +168,9 @@ class ListValueAuth(AuthenticationProvider):
                     # Dict format with individual encryption setting
                     value_str = value_item.get("value", "")
                     value_encrypted = value_item.get("encrypted", encrypted)
-                    decrypted = decrypt_value_if_needed(value_str, value_encrypted, encryption_config)
+                    decrypted = decrypt_value_if_needed(
+                        value_str, value_encrypted, encryption_config
+                    )
                     self.expected_values.add(str(decrypted))
                 else:
                     raise AuthenticationError(f"Invalid value format: {type(value_item)}")
@@ -145,7 +181,9 @@ class ListValueAuth(AuthenticationProvider):
 class FileAuth(AuthenticationProvider):
     """Authentication using values from a text file (one value per line)."""
 
-    def __init__(self, filepath: str, encrypted: bool = True, encryption_config: Optional[Dict[str, Any]] = None, failed_response: Optional[Dict[str, Any]] = None):
+    def __init__(self, filepath: str, encrypted: bool = True,
+                 encryption_config: Optional[Dict[str, Any]] = None,
+                 failed_response: Optional[Dict[str, Any]] = None):
         """Initialize file-based authentication.
 
         Args:
@@ -171,7 +209,9 @@ class FileAuth(AuthenticationProvider):
                         decrypted = decrypt_value_if_needed(line, encrypted, encryption_config)
                         self.expected_values.add(str(decrypted))
                     except EncryptionError as e:
-                        raise AuthenticationError(f"Failed to decrypt value on line {line_num} in '{filepath}': {str(e)}")
+                        raise AuthenticationError(
+                            f"Failed to decrypt value on line {line_num} in '{filepath}': {e}"
+                        )
         except FileNotFoundError:
             raise AuthenticationError(f"Authentication file not found: {filepath}")
         except IOError as e:
@@ -181,7 +221,9 @@ class FileAuth(AuthenticationProvider):
 class AWSSecretsAuth(AuthenticationProvider):
     """Authentication using AWS Secrets Manager."""
 
-    def __init__(self, secret_name: str, region: str = "us-west-2", cache_ttl: int = DEFAULT_CACHE_TTL, failed_response: Optional[Dict[str, Any]] = None):
+    def __init__(self, secret_name: str, region: str = "us-west-2",
+                 cache_ttl: int = DEFAULT_CACHE_TTL,
+                 failed_response: Optional[Dict[str, Any]] = None):
         """Initialize AWS Secrets authentication.
 
         Args:
@@ -218,6 +260,22 @@ class AWSSecretsAuth(AuthenticationProvider):
         self._cache_time = 0
         self.expected_values = self._get_cached_tokens()
 
+    def current_values(self) -> set:
+        """The secret's values, re-read once ``refresh_interval`` has passed.
+
+        A failed refresh keeps the last values (and is logged), so a secret
+        store outage doesn't lock everyone out.
+
+        Returns:
+            The expected values.
+        """
+        try:
+            self.expected_values = self._get_cached_tokens()
+        except AuthenticationError as error:
+            logger.warning("Refreshing authentication values failed; using the last ones: %s",
+                           error)
+            self._cache_time = time.time()
+        return set(self.expected_values)
 
     def _get_cached_tokens(self) -> set:
         """Get authentication tokens from cache or refresh from AWS."""
@@ -268,13 +326,17 @@ class AWSSecretsAuth(AuthenticationProvider):
 class AWSKMSAuth(AuthenticationProvider):
     """Authentication using AWS KMS for encrypted tokens."""
 
-    def __init__(self, tokens: Optional[List[str]] = None, aws_tokens_file: Optional[str] = None, aws_key_id: str = None, aws_region: str = "us-west-2", failed_response: Optional[Dict[str, Any]] = None):
+    def __init__(self, tokens: Optional[List[str]] = None,
+                 aws_tokens_file: Optional[str] = None, aws_key_id: Optional[str] = None,
+                 aws_region: str = "us-west-2",
+                 failed_response: Optional[Dict[str, Any]] = None):
         """Initialize AWS KMS authentication.
 
         Args:
             tokens: List of encrypted tokens (for inline configuration).
             aws_tokens_file: Path to file containing encrypted tokens (one per line).
-            aws_key_id: AWS KMS key ID or ARN.
+            aws_key_id: AWS KMS key ID or ARN (optional: KMS finds the key from
+                the ciphertext; kept for reference).
             aws_region: AWS region.
             failed_response: Custom response for failed authentication.
 
@@ -342,7 +404,6 @@ class AWSKMSAuth(AuthenticationProvider):
         except IOError as e:
             raise AuthenticationError(f"Failed to read AWS KMS tokens file '{filepath}': {str(e)}")
 
-
     def _decrypt_token(self, encrypted_token: str) -> str:
         """Decrypt a single token using AWS KMS."""
         try:
@@ -363,7 +424,9 @@ class AWSKMSAuth(AuthenticationProvider):
 class GCPSecretsAuth(AuthenticationProvider):
     """Authentication using GCP Secret Manager."""
 
-    def __init__(self, project_id: str, secret_name: str, version: str = "latest", cache_ttl: int = DEFAULT_CACHE_TTL, failed_response: Optional[Dict[str, Any]] = None):
+    def __init__(self, project_id: str, secret_name: str, version: str = "latest",
+                 cache_ttl: int = DEFAULT_CACHE_TTL,
+                 failed_response: Optional[Dict[str, Any]] = None):
         """Initialize GCP Secrets authentication.
 
         Args:
@@ -380,7 +443,9 @@ class GCPSecretsAuth(AuthenticationProvider):
             from google.cloud import secretmanager
             from google.auth.exceptions import DefaultCredentialsError
         except ImportError:
-            raise AuthenticationError("google-cloud-secret-manager package is required for GCP Secrets authentication")
+            raise AuthenticationError(
+                "google-cloud-secret-manager package is required for GCP Secrets authentication"
+            )
 
         super().__init__(failed_response)
 
@@ -405,6 +470,22 @@ class GCPSecretsAuth(AuthenticationProvider):
         self._cache_time = 0
         self.expected_values = self._get_cached_tokens()
 
+    def current_values(self) -> set:
+        """The secret's values, re-read once ``refresh_interval`` has passed.
+
+        A failed refresh keeps the last values (and is logged), so a secret
+        store outage doesn't lock everyone out.
+
+        Returns:
+            The expected values.
+        """
+        try:
+            self.expected_values = self._get_cached_tokens()
+        except AuthenticationError as error:
+            logger.warning("Refreshing authentication values failed; using the last ones: %s",
+                           error)
+            self._cache_time = time.time()
+        return set(self.expected_values)
 
     def _get_cached_tokens(self) -> set:
         """Get authentication tokens from cache or refresh from GCP."""
@@ -442,7 +523,9 @@ class GCPSecretsAuth(AuthenticationProvider):
             return self._cached_values
 
         except Exception as e:
-            raise AuthenticationError(f"Failed to retrieve GCP secret '{self.secret_name}': {str(e)}")
+            raise AuthenticationError(
+                f"Failed to retrieve GCP secret '{self.secret_name}': {e}"
+            )
 
 
 class AuthenticationError(Exception):
@@ -467,28 +550,21 @@ def create_authentication_provider(config: Dict[str, Any]) -> AuthenticationProv
     encryption_config = config.get("encryption")
     encrypted = config.get("encrypted", True)
 
-    # Identify authentication method keys
-    method_keys = []
-    if "value" in config:
-        method_keys.append("value")
-    if "values" in config:
-        method_keys.append("values")
-    if "filepath" in config:
-        method_keys.append("filepath")
-    if "aws_secret_name" in config:
-        method_keys.append("aws_secret_name")
-    if "aws_key_id" in config:
-        method_keys.append("aws_key_id")
-    if "aws_tokens_file" in config:
-        method_keys.append("aws_tokens_file")
-    if "gcp_project_id" in config:
-        method_keys.append("gcp_project_id")
-
-    # Validate exactly one method key is present
-    if len(method_keys) == 0:
-        raise AuthenticationError("Authentication configuration must specify exactly one of: value, values, filepath, aws_secret_name, aws_key_id, aws_tokens_file, or gcp_project_id")
-    elif len(method_keys) > 1:
-        raise AuthenticationError(f"Authentication configuration has conflicting method keys: {', '.join(method_keys)}. Only one is allowed.")
+    method_keys = [key for key in METHOD_KEYS if key in config]
+    if not method_keys:
+        if "aws_key_id" in config:
+            raise AuthenticationError(
+                "AWS KMS authentication needs 'aws_tokens' (a list) or 'aws_tokens_file' "
+                "alongside 'aws_key_id'"
+            )
+        raise AuthenticationError(
+            f"Authentication configuration must specify exactly one of: {', '.join(METHOD_KEYS)}"
+        )
+    if len(method_keys) > 1:
+        raise AuthenticationError(
+            f"Authentication configuration has conflicting method keys: "
+            f"{', '.join(method_keys)}. Only one is allowed."
+        )
 
     method_key = method_keys[0]
 
@@ -513,29 +589,28 @@ def create_authentication_provider(config: Dict[str, Any]) -> AuthenticationProv
         cache_ttl = config.get("refresh_interval", DEFAULT_CACHE_TTL)
         return AWSSecretsAuth(secret_name, region, cache_ttl, failed_response)
 
-    elif method_key == "aws_key_id":
-        aws_key_id = config.get("aws_key_id")
+    elif method_key == "aws_tokens":
         tokens = config.get("aws_tokens")
         if not tokens or not isinstance(tokens, list):
-            raise AuthenticationError("AWS KMS authentication requires both 'aws_key_id' and 'aws_tokens' list")
-
+            raise AuthenticationError("'aws_tokens' must be a non-empty list of encrypted tokens")
         region = config.get("aws_region", "us-west-2")
-        return AWSKMSAuth(tokens=tokens, aws_key_id=aws_key_id, aws_region=region, failed_response=failed_response)
+        return AWSKMSAuth(tokens=tokens, aws_key_id=config.get("aws_key_id"), aws_region=region,
+                          failed_response=failed_response)
 
     elif method_key == "aws_tokens_file":
         aws_key_id = config.get("aws_key_id")
-        if not aws_key_id:
-            raise AuthenticationError("AWS KMS file authentication requires both 'aws_tokens_file' and 'aws_key_id'")
-
         aws_tokens_file = config.get("aws_tokens_file")
         region = config.get("aws_region", "us-west-2")
-        return AWSKMSAuth(aws_tokens_file=aws_tokens_file, aws_key_id=aws_key_id, aws_region=region, failed_response=failed_response)
+        return AWSKMSAuth(aws_tokens_file=aws_tokens_file, aws_key_id=aws_key_id,
+                          aws_region=region, failed_response=failed_response)
 
     elif method_key == "gcp_project_id":
         project_id = config.get("gcp_project_id")
         secret_name = config.get("gcp_secret_name")
         if not secret_name:
-            raise AuthenticationError("GCP Secrets authentication requires both 'gcp_project_id' and 'gcp_secret_name'")
+            raise AuthenticationError(
+                "GCP Secrets authentication requires both 'gcp_project_id' and 'gcp_secret_name'"
+            )
 
         version = config.get("gcp_version", "latest")
         cache_ttl = config.get("refresh_interval", DEFAULT_CACHE_TTL)
@@ -545,7 +620,40 @@ def create_authentication_provider(config: Dict[str, Any]) -> AuthenticationProv
         raise AuthenticationError(f"Unknown authentication method key: {method_key}")
 
 
-def validate_authentication(cookies: Dict[str, str], auth_config: Dict[str, Any]) -> Tuple[bool, Optional[int], Optional[Any]]:
+def get_authentication_provider(config: Dict[str, Any]) -> AuthenticationProvider:
+    """The provider for an auth config, built once and then reused.
+
+    Providers are cached by the config's contents (and the modification time
+    of a token file it names), so secret-store and KMS lookups happen when a
+    provider is built (and on its refresh interval), not on every request. A
+    changed config or token file builds a new provider.
+
+    Args:
+        config: Authentication configuration dictionary.
+
+    Returns:
+        The provider.
+
+    Raises:
+        AuthenticationError: If the configuration is invalid or the provider
+            can't be built.
+    """
+    key = _provider_cache_key(config)
+    with _PROVIDERS_LOCK:
+        provider = _PROVIDERS.get(key)
+    if provider is not None:
+        return provider
+    provider = create_authentication_provider(config)
+    with _PROVIDERS_LOCK:
+        if len(_PROVIDERS) >= PROVIDER_CACHE_SIZE:
+            _PROVIDERS.clear()
+        _PROVIDERS[key] = provider
+    return provider
+
+
+def validate_authentication(
+        cookies: Dict[str, str],
+        auth_config: Dict[str, Any]) -> Tuple[bool, Optional[int], Optional[Any]]:
     """Validate authentication using cookies and configuration.
 
     Args:
@@ -565,16 +673,12 @@ def validate_authentication(cookies: Dict[str, str], auth_config: Dict[str, Any]
         auth_key = auth_config.get("key")
         if not auth_key:
             raise AuthenticationError("Authentication configuration missing 'key' field")
-        # Get the token from cookies
+        provider = get_authentication_provider(auth_config)
         auth_token = cookies.get(auth_key)
         if not auth_token:
-            # Token not provided - create provider to get proper error response
-            provider = create_authentication_provider(auth_config)
             status_code, response_body = provider.get_failed_response()
             return (False, status_code, response_body)
 
-        # Create authentication provider and validate
-        provider = create_authentication_provider(auth_config)
         is_valid = provider.validate(auth_token)
 
         if is_valid:
@@ -586,3 +690,26 @@ def validate_authentication(cookies: Dict[str, str], auth_config: Dict[str, Any]
         raise
     except Exception as e:
         raise AuthenticationError(f"Authentication validation failed: {str(e)}")
+
+
+#
+# INTERNAL
+#
+def _provider_cache_key(config: Dict[str, Any]) -> str:
+    """A cache key for an auth config: its contents plus named files' mtimes.
+
+    Args:
+        config: Authentication configuration dictionary.
+
+    Returns:
+        The key.
+    """
+    files = {}
+    for key in FILE_KEYS:
+        path = config.get(key)
+        if isinstance(path, str):
+            try:
+                files[key] = os.stat(path).st_mtime_ns
+            except OSError:
+                files[key] = None
+    return json.dumps({"config": config, "files": files}, sort_keys=True, default=str)
