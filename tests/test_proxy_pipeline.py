@@ -131,7 +131,7 @@ class TestRouteMapperProxyIssues:
         remote_cfg = {"url": "https://api.example.com", "name": "core"}
         patches = [
             patch("api_dock.route_mapper.is_versioned_remote", return_value=False),
-            patch("api_dock.route_mapper.is_route_allowed", return_value=True),
+            patch("api_dock.route_mapper.route_allowed_by_config", return_value=True),
             patch("api_dock.route_mapper.find_remote_config", return_value=remote_cfg),
             patch("api_dock.route_mapper.filter_remote_query_params", side_effect=lambda qp, *a, **kw: qp),
             patch("api_dock.route_mapper.find_route_mapping", return_value=None),
@@ -373,7 +373,7 @@ class TestApiDockLevelErrors:
         rm.settings = {}
 
         with patch("api_dock.route_mapper.is_versioned_remote", return_value=False), \
-             patch("api_dock.route_mapper.is_route_allowed", return_value=False), \
+             patch("api_dock.route_mapper.route_allowed_by_config", return_value=False), \
              patch("api_dock.route_mapper.find_remote_config", return_value={"url": "http://x.com"}), \
              patch("api_dock.route_mapper.filter_remote_query_params", side_effect=lambda qp, *a, **kw: qp), \
              patch("api_dock.route_mapper.filter_cookies_by_config", return_value={}):
@@ -400,7 +400,7 @@ class TestApiDockLevelErrors:
 
         remote_cfg = {"url": "https://api.example.com", "name": "core"}
         with patch("api_dock.route_mapper.is_versioned_remote", return_value=False), \
-             patch("api_dock.route_mapper.is_route_allowed", return_value=True), \
+             patch("api_dock.route_mapper.route_allowed_by_config", return_value=True), \
              patch("api_dock.route_mapper.find_remote_config", return_value=remote_cfg), \
              patch("api_dock.route_mapper.filter_remote_query_params", side_effect=lambda qp, *a, **kw: qp), \
              patch("api_dock.route_mapper.find_route_mapping", return_value=None), \
@@ -474,7 +474,7 @@ class TestPrepareRemoteRequest:
         remote_cfg = {"url": "https://api.example.com", "name": "core"}
         return [
             patch("api_dock.route_mapper.is_versioned_remote", return_value=False),
-            patch("api_dock.route_mapper.is_route_allowed", return_value=True),
+            patch("api_dock.route_mapper.route_allowed_by_config", return_value=True),
             patch("api_dock.route_mapper.find_remote_config", return_value=remote_cfg),
             patch(
                 "api_dock.route_mapper.filter_remote_query_params",
