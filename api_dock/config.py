@@ -12,6 +12,7 @@ License: BSD 3-Clause
 # IMPORTS
 #
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -25,6 +26,11 @@ DEFAULT_CONFIG_DIR: str = "api_dock_config"
 DEFAULT_CONFIG_FILE: str = "config.yaml"
 REMOTES_DIR: str = "remotes"
 DATABASES_DIR: str = "databases"
+REMOTES_SHARED_FILE: str = "config.yaml"
+REMOTE_CONFIGS_KEY: str = "remotes"
+REMOTE_VERSION_KEY: str = "version"
+REMOTE_VERSIONS_KEY: str = "versions"
+VERSION_TOKEN_PATTERN: str = r"\d+|[A-Za-z]+"
 
 # Default settings
 DEFAULT_SETTINGS: Dict[str, Any] = {
@@ -84,9 +90,14 @@ def find_remote_config(remote_name: str, main_config: Dict[str, Any], config_dir
         if version is None:
             raise FileNotFoundError(f"Remote '{remote_name}' is versioned - version parameter required")
 
-        # Load versioned config
+        # A version file wins over an entry in remotes/config.yaml
         config_path = os.path.join(config_dir, REMOTES_DIR, remote_name, f"{version}.yaml")
-        return _load_yaml_file(config_path)
+        if os.path.isfile(config_path):
+            return _load_yaml_file(config_path)
+        inline_versions = get_inline_remote_configs(config_dir).get(remote_name, {})
+        if str(version) in inline_versions:
+            return inline_versions[str(version)]
+        raise FileNotFoundError(f"Remote '{remote_name}' has no version '{version}'")
 
     # Non-versioned remote - use the regular mapping
     remote_mapping = get_remote_mapping(main_config, config_dir)
@@ -96,11 +107,12 @@ def find_remote_config(remote_name: str, main_config: Dict[str, Any], config_dir
 
     config_path = remote_mapping[remote_name]
 
-    if config_path is None:
-        # Handle inline configs (if we add support for them later)
-        raise FileNotFoundError(f"Inline remote configs not yet supported for '{remote_name}'")
-
-    return _load_yaml_file(config_path)
+    if config_path is not None and os.path.isfile(config_path):
+        return _load_yaml_file(config_path)
+    inline_versions = get_inline_remote_configs(config_dir).get(remote_name, {})
+    if None in inline_versions:
+        return inline_versions[None]
+    raise FileNotFoundError(f"No config file or remotes/config.yaml entry for remote '{remote_name}'")
 
 
 def find_remote_config_with_inheritance(remote_name: str, main_config: Dict[str, Any], config_dir: Optional[str] = None, version: Optional[str] = None) -> Dict[str, Any]:
@@ -158,7 +170,10 @@ def get_remote_mapping(config: Dict[str, Any], config_dir: Optional[str] = None)
         config_dir: Base config directory. If None, uses default.
 
     Returns:
-        Dictionary mapping remote names to their config file paths.
+        Dictionary mapping remote names to their config file paths. A remote
+        without a file (defined only in ``remotes/config.yaml``) maps to the
+        path its file would have; ``find_remote_config`` falls back to the
+        inline entry when that file is missing.
     """
     if config_dir is None:
         config_dir = DEFAULT_CONFIG_DIR
@@ -492,13 +507,19 @@ def is_versioned_remote(remote_name: str, main_config: Dict[str, Any], config_di
         config_dir: Base config directory. If None, uses default.
 
     Returns:
-        True if remote has versioned configs (is a directory), False otherwise.
+        True if the remote has a config directory or versioned entries in
+        ``remotes/config.yaml``, False otherwise.
+
+    Raises:
+        ValueError: If ``remotes/config.yaml`` is malformed.
     """
     if config_dir is None:
         config_dir = DEFAULT_CONFIG_DIR
 
     remote_dir = os.path.join(config_dir, REMOTES_DIR, remote_name)
-    return os.path.isdir(remote_dir)
+    if os.path.isdir(remote_dir):
+        return True
+    return any(v is not None for v in get_inline_remote_configs(config_dir).get(remote_name, {}))
 
 
 def get_remote_versions(remote_name: str, main_config: Dict[str, Any], config_dir: Optional[str] = None) -> List[str]:
@@ -510,8 +531,12 @@ def get_remote_versions(remote_name: str, main_config: Dict[str, Any], config_di
         config_dir: Base config directory. If None, uses default.
 
     Returns:
-        List of version strings (e.g., ["0.1", "0.2", "1.2"]).
-        Returns empty list if remote is not versioned.
+        Version strings from version files and ``remotes/config.yaml``, without
+        duplicates, lowest first (see ``sort_versions``). Returns an empty list
+        if the remote is not versioned.
+
+    Raises:
+        ValueError: If ``remotes/config.yaml`` is malformed.
     """
     if config_dir is None:
         config_dir = DEFAULT_CONFIG_DIR
@@ -520,14 +545,136 @@ def get_remote_versions(remote_name: str, main_config: Dict[str, Any], config_di
         return []
 
     remote_dir = os.path.join(config_dir, REMOTES_DIR, remote_name)
-    versions = []
+    versions = set()
 
-    for filename in os.listdir(remote_dir):
-        if filename.endswith('.yaml'):
-            version = filename[:-5]  # Remove .yaml extension
-            versions.append(version)
+    if os.path.isdir(remote_dir):
+        for filename in os.listdir(remote_dir):
+            if filename.endswith('.yaml'):
+                versions.add(filename[:-5])  # Remove .yaml extension
 
-    return sorted(versions)
+    inline_versions = get_inline_remote_configs(config_dir).get(remote_name, {})
+    versions.update(v for v in inline_versions if v is not None)
+
+    return sort_versions(versions)
+
+
+def load_shared_remote_config(config_dir: Optional[str] = None) -> Dict[str, Any]:
+    """Load the optional shared remote config (``remotes/config.yaml``).
+
+    Args:
+        config_dir: Base config directory. If None, uses default.
+
+    Returns:
+        The file's contents with ``remotes`` normalized to a mapping, or an
+        empty dict if the file doesn't exist.
+
+    Raises:
+        yaml.YAMLError: If the file exists but is invalid YAML.
+        ValueError: If the file or its ``remotes`` key has the wrong type.
+    """
+    if config_dir is None:
+        config_dir = DEFAULT_CONFIG_DIR
+
+    shared_path = os.path.join(config_dir, REMOTES_DIR, REMOTES_SHARED_FILE)
+    if not os.path.isfile(shared_path):
+        return {}
+
+    contents = _load_yaml_file(shared_path) or {}
+    if not isinstance(contents, dict):
+        raise ValueError(f"{shared_path} must contain a mapping")
+    remotes = contents.get(REMOTE_CONFIGS_KEY) or {}
+    if not isinstance(remotes, dict):
+        raise ValueError(f"'{REMOTE_CONFIGS_KEY}' in {shared_path} must be a mapping of name -> config")
+    return {**contents, REMOTE_CONFIGS_KEY: remotes}
+
+
+def get_inline_remote_configs(config_dir: Optional[str] = None) -> Dict[str, Dict[Optional[str], Dict[str, Any]]]:
+    """Build remote configs from the ``remotes`` mapping in ``remotes/config.yaml``.
+
+    Each key is a remote name and each value a remote config (url, description,
+    routes, restricted, cookies, ...) with one of:
+      - ``version: <v>``: one versioned config;
+      - ``versions: [{version: <v>, ...}, ...]``: several versions, where the
+        entry's other keys are defaults each version's keys override;
+      - neither: an unversioned remote.
+
+    Args:
+        config_dir: Base config directory. If None, uses default.
+
+    Returns:
+        Mapping of remote name -> {version string (None if unversioned) ->
+        remote config dict}. Versions are strings (YAML ``1.0`` -> "1.0").
+
+    Raises:
+        ValueError: If an entry is malformed, uses both ``version`` and
+            ``versions``, or defines the same version twice.
+    """
+    remotes = load_shared_remote_config(config_dir).get(REMOTE_CONFIGS_KEY) or {}
+    configs: Dict[str, Dict[Optional[str], Dict[str, Any]]] = {}
+
+    for raw_name, entry in remotes.items():
+        name = str(raw_name)
+        label = f"remotes/{REMOTES_SHARED_FILE}: '{name}'"
+        if not isinstance(entry, dict):
+            raise ValueError(f"{label} must be a mapping")
+        if REMOTE_VERSION_KEY in entry and REMOTE_VERSIONS_KEY in entry:
+            raise ValueError(f"{label} uses both '{REMOTE_VERSION_KEY}' and '{REMOTE_VERSIONS_KEY}'")
+
+        defaults = {
+            k: v for k, v in entry.items() if k not in (REMOTE_VERSION_KEY, REMOTE_VERSIONS_KEY)
+        }
+        if REMOTE_VERSIONS_KEY in entry:
+            version_entries = entry[REMOTE_VERSIONS_KEY]
+            if not isinstance(version_entries, list) or not version_entries:
+                raise ValueError(f"{label} '{REMOTE_VERSIONS_KEY}' must be a non-empty list")
+        else:
+            version_entries = [{REMOTE_VERSION_KEY: entry.get(REMOTE_VERSION_KEY)}]
+
+        versions = configs.setdefault(name, {})
+        for version_entry in version_entries:
+            if not isinstance(version_entry, dict):
+                raise ValueError(f"{label} has an invalid version entry: {version_entry!r}")
+            raw_version = version_entry.get(REMOTE_VERSION_KEY)
+            if REMOTE_VERSIONS_KEY in entry and raw_version is None:
+                raise ValueError(f"{label} has a version entry without a version")
+            version = None if raw_version is None else str(raw_version).strip()
+            if version in versions:
+                raise ValueError(f"{label} version {version} is defined twice")
+            own = {k: v for k, v in version_entry.items() if k != REMOTE_VERSION_KEY}
+            versions[version] = {"name": name, **defaults, **own}
+
+    return configs
+
+
+def version_sort_key(version: str) -> tuple:
+    """Sort key that orders version strings the way people read them.
+
+    Digit runs compare as numbers and letter runs as text, with text lower
+    than numbers, so "0.10" > "0.9", "1.0.0" > "1.0", "2.0" > "2.0rc1" and
+    "v10" > "v9". Separators are ignored; the full string breaks ties.
+
+    Args:
+        version: A version string (e.g. "0.5.0").
+
+    Returns:
+        A tuple usable as a sort key.
+    """
+    tokens = re.findall(VERSION_TOKEN_PATTERN, str(version))
+    # Ranks: text (pre-release) < end of version < number
+    parts = tuple((2, int(t), "") if t.isdigit() else (0, 0, t.lower()) for t in tokens)
+    return parts + ((1, 0, ""),), str(version)
+
+
+def sort_versions(versions: Any) -> List[str]:
+    """Sort version strings lowest first, using ``version_sort_key``.
+
+    Args:
+        versions: An iterable of version strings.
+
+    Returns:
+        The versions as a sorted list.
+    """
+    return sorted(versions, key=version_sort_key)
 
 
 def resolve_latest_version(versions: List[str]) -> Optional[str]:
@@ -537,20 +684,12 @@ def resolve_latest_version(versions: List[str]) -> Optional[str]:
         versions: List of version strings.
 
     Returns:
-        The latest version string, or None if list is empty.
+        The latest version string (see ``version_sort_key``), or None if the
+        list is empty.
     """
     if not versions:
         return None
-
-    # Try to sort as floats
-    try:
-        float_versions = [(float(v), v) for v in versions]
-        float_versions.sort(key=lambda x: x[0], reverse=True)
-        return float_versions[0][1]
-    except ValueError:
-        # Fall back to string sorting
-        sorted_versions = sorted(versions, reverse=True)
-        return sorted_versions[0]
+    return max(versions, key=version_sort_key)
 
 
 def is_route_allowed(route: str, config: Dict[str, Any], remote_name: Optional[str] = None, version: Optional[str] = None, method: Optional[str] = None, config_dir: Optional[str] = None) -> bool:
