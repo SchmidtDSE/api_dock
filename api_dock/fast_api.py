@@ -24,6 +24,7 @@ from api_dock.route_mapper import (
     collect_multi_query_params,
     HOP_BY_HOP_HEADERS,
     RouteMapper,
+    SET_COOKIE_HEADER,
     strip_base_path,
 )
 from api_dock.types import PreparedRequest, ProxyResponse
@@ -358,14 +359,14 @@ async def _stream_upstream(prepared: PreparedRequest) -> Response:
     except httpx.RequestError as exc:
         await client.aclose()
         return Response(
-            content=json.dumps({"error": f"Error connecting to remote API: {str(exc)}"}).encode(),
+            content=json.dumps({"error": "Error connecting to remote API"}).encode(),
             status_code=502,
             media_type="application/json",
         )
     except Exception as exc:
         await client.aclose()
         return Response(
-            content=json.dumps({"error": f"Internal server error: {str(exc)}"}).encode(),
+            content=json.dumps({"error": "Internal server error"}).encode(),
             status_code=500,
             media_type="application/json",
         )
@@ -378,13 +379,21 @@ async def _stream_upstream(prepared: PreparedRequest) -> Response:
             await upstream.aclose()
             await client.aclose()
 
-    headers = _filter_streaming_response_headers(dict(upstream.headers))
-    return StreamingResponse(
+    headers = {
+        key: value
+        for key, value in _filter_streaming_response_headers(dict(upstream.headers)).items()
+        if key.lower() != SET_COOKIE_HEADER
+    }
+    response = StreamingResponse(
         _generate(),
         status_code=upstream.status_code,
         headers=headers,
         media_type=upstream.headers.get("content-type", "application/octet-stream"),
     )
+    # One Set-Cookie header per cookie (a dict would merge them into one).
+    for cookie in upstream.headers.get_list(SET_COOKIE_HEADER):
+        response.headers.append(SET_COOKIE_HEADER, cookie)
+    return response
 
 
 def _default_app() -> Any:
