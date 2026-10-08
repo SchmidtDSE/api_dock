@@ -16,7 +16,7 @@ import os
 import socket
 import sys
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import click
 import uvicorn
@@ -24,11 +24,24 @@ import yaml
 
 from api_dock.config import load_main_config
 from api_dock.config_discovery import find_config, init_config
-from api_dock.database_config import load_database_config
+from api_dock.config import find_remote_config, get_remote_versions, is_versioned_remote
+from api_dock.database_config import (
+    apply_shared_definitions,
+    get_database_versions,
+    get_schema_sources,
+    is_versioned_database,
+    load_database_config,
+    load_shared_config,
+    merge_query_params,
+    SCHEMA_GROUPS_KEY,
+    SHARED_CONFIG_KEY,
+)
 from api_dock.fast_api import create_app as create_fastapi_app
 from api_dock.flask_api import create_app as create_flask_app
 from api_dock.lookups import load_lookup_specs, LookupContext, run_lookup
-from api_dock.sql_builder import build_sql_query
+from api_dock.route_mapper import RouteMapper
+from api_dock.sql_builder import build_sql_query, VARIABLE_PATTERN
+from api_dock.types import SqlContext
 
 
 #
@@ -57,7 +70,8 @@ def cli(ctx: click.Context) -> None:
 
 
 @cli.command()
-@click.option("--force", "-f", is_flag=True, help="Overwrite existing files")
+@click.option("--force", "-f", is_flag=True,
+              help="Run even if the folder has configs, replacing files from the example")
 def init(force: bool) -> None:
     """Initialize api_dock_config/ directory with default configurations.
 
@@ -76,15 +90,15 @@ def init(force: bool) -> None:
     # Initialize configuration
     click.echo(f"Initializing {config_dir}/...")
 
-    if init_config():
-        click.echo(f"✓ Created {config_dir}/")
-        click.echo(f"✓ Created {config_dir}/remotes/")
-        click.echo(f"✓ Created {config_dir}/databases/")
-        click.echo("✓ Copied default configuration files")
-        click.echo(f"\nConfiguration initialized in {config_dir}/")
-    else:
+    written = init_config(overwrite=force)
+    if written is None:
         click.echo("Error: Failed to initialize configuration", err=True)
         sys.exit(1)
+    for path in written:
+        click.echo(f"✓ {config_dir}/{path}")
+    if not written:
+        click.echo("All example files already exist (use --force to replace them).")
+    click.echo(f"\nConfiguration initialized in {config_dir}/")
 
 
 @cli.command()
@@ -164,7 +178,10 @@ def describe(config_name: Optional[str]) -> None:
 
     CONFIG_NAME: Optional config name (default: config.yaml)
 
-    Displays formatted configuration with expanded SQL queries.
+    Builds the API as the server would (lookups, startup checks), then shows
+    each remote/version with its url and each database/version with its schema,
+    its own tables and every route's SQL with [[table]] references expanded
+    (`?` marks a bound request value).
 
     Examples:
       api-dock describe              # Describe config.yaml
@@ -181,98 +198,53 @@ def describe(config_name: Optional[str]) -> None:
         sys.exit(1)
 
     try:
-        # Load main configuration
-        config = load_main_config(config_path)
-
-        click.echo("=" * 60)
-        click.echo(f"API Dock Configuration: {config_path}")
-        click.echo("=" * 60)
-        click.echo()
-
-        # Display basic info
-        click.echo(f"Name: {config.get('name', 'N/A')}")
-        click.echo(f"Description: {config.get('description', 'N/A')}")
-
-        authors = config.get('authors', [])
-        if authors:
-            # Handle both string authors and dict authors (with name/email)
-            author_strings = []
-            for author in authors:
-                if isinstance(author, dict):
-                    name = author.get('name', 'Unknown')
-                    email = author.get('email')
-                    if email:
-                        author_strings.append(f"{name} <{email}>")
-                    else:
-                        author_strings.append(name)
-                else:
-                    author_strings.append(str(author))
-            click.echo(f"Authors: {', '.join(author_strings)}")
-
-        click.echo()
-
-        # Display remotes
-        remotes = config.get('remotes', [])
-        if remotes:
-            click.echo("Remotes:")
-            for remote in remotes:
-                click.echo(f"  - {remote}")
-            click.echo()
-
-        # Display databases with expanded SQL
-        databases = config.get('databases', [])
-        if databases:
-            click.echo("Databases:")
-            for db_name in databases:
-                click.echo(f"\n  {db_name}:")
-                try:
-                    db_config = load_database_config(db_name)
-
-                    # Display tables
-                    tables = db_config.get('tables', {})
-                    if tables:
-                        click.echo("    Tables:")
-                        for table_name, table_path in tables.items():
-                            click.echo(f"      {table_name}: {table_path}")
-
-                    # Display routes with expanded SQL
-                    routes = db_config.get('routes', [])
-                    if routes:
-                        click.echo("\n    Routes:")
-                        for route_config in routes:
-                            route_path = route_config.get('route', '')
-                            sql = route_config.get('sql', '')
-
-                            # Expand SQL query
-                            try:
-                                expanded_sql = build_sql_query(sql, db_config)
-                                # Format SQL for display
-                                expanded_sql = expanded_sql.replace('\n', '\n        ')
-                                click.echo(f"      {route_path}:")
-                                click.echo(f"        {expanded_sql}")
-                            except Exception:
-                                # If expansion fails, show original
-                                click.echo(f"      {route_path}:")
-                                click.echo(f"        {sql}")
-
-                except Exception as e:
-                    click.echo(f"    Error loading database config: {e}")
-            click.echo()
-
-        # Display endpoints
-        endpoints = config.get('endpoints', [])
-        if endpoints:
-            click.echo("Endpoints:")
-            for endpoint in endpoints:
-                click.echo(f"  - {endpoint}")
-            click.echo()
-
-        click.echo("=" * 60)
-
-    except Exception as e:
-        click.echo(f"Error loading configuration: {e}", err=True)
+        mapper = RouteMapper(config_path)
+    except Exception as error:
+        click.echo(f"Error loading configuration: {error}", err=True)
         sys.exit(1)
+    config = mapper.config
 
+    click.echo("=" * 60)
+    click.echo(f"API Dock Configuration: {config_path}")
+    click.echo("=" * 60)
+    click.echo()
+    click.echo(f"Name: {config.get('name', 'N/A')}")
+    click.echo(f"Description: {config.get('description', 'N/A')}")
+    authors = config.get('authors', [])
+    if authors:
+        click.echo(f"Authors: {', '.join(_author_text(author) for author in authors)}")
+    click.echo()
+
+    if mapper.remote_names:
+        click.echo("Remotes:")
+        for name in mapper.remote_names:
+            for version in _versions(is_versioned_remote(name, config, mapper.config_dir),
+                                     lambda: get_remote_versions(name, config, mapper.config_dir)):
+                label = name if version is None else f"{name}/{version}"
+                try:
+                    remote = find_remote_config(name, config, mapper.config_dir, version=version)
+                    click.echo(f"  - {label}: {remote.get('url', '(no url)')}")
+                except FileNotFoundError as error:
+                    click.echo(f"  - {label}: error: {error}")
+        click.echo()
+
+    if mapper.database_names:
+        click.echo("Databases:")
+        shared_file = load_shared_config(mapper.config_dir)
+        for name in mapper.database_names:
+            versions = _versions(is_versioned_database(name, mapper.config_dir),
+                                 lambda: get_database_versions(name, mapper.config_dir))
+            for version in versions:
+                _describe_database(name, version, mapper, shared_file)
+        click.echo()
+
+    endpoints = config.get('endpoints', [])
+    if endpoints:
+        click.echo("Endpoints:")
+        for endpoint in endpoints:
+            click.echo(f"  - {endpoint}")
+        click.echo()
+    click.echo("=" * 60)
 
 @cli.command()
 @click.argument("plaintext")
@@ -503,6 +475,84 @@ def main() -> None:
 #
 # INTERNAL
 #
+def _author_text(author: Any) -> str:
+    """Format an author entry (a string, or a mapping with name/email).
+
+    Args:
+        author: The author entry.
+
+    Returns:
+        Display text.
+    """
+    if isinstance(author, dict):
+        name = author.get('name') or author.get('url') or 'Unknown'
+        email = author.get('email')
+        return f"{name} <{email}>" if email else str(name)
+    return str(author)
+
+
+def _versions(versioned: bool, versions: Any) -> list:
+    """The versions to describe: the listed ones, or [None] when unversioned.
+
+    Args:
+        versioned: Whether the remote/database is versioned.
+        versions: Callable returning its versions.
+
+    Returns:
+        List of versions (None for an unversioned one).
+    """
+    return list(versions()) if versioned else [None]
+
+
+def _describe_database(name: str, version: Optional[str], mapper: RouteMapper,
+                       shared_file: dict) -> None:
+    """Print one database/version: schema, own tables and expanded route SQL.
+
+    Args:
+        name: Database name.
+        version: Version, or None if unversioned.
+        mapper: The route mapper (for config and its directory).
+        shared_file: The shared database config.
+    """
+    label = name if version is None else f"{name}/{version}"
+    click.echo(f"\n  {label}:")
+    try:
+        db_config = load_database_config(name, mapper.config_dir, version)
+        db_config = apply_shared_definitions(db_config, shared_file, name, version)
+    except (FileNotFoundError, ValueError, yaml.YAMLError) as error:
+        click.echo(f"    Error loading database config: {error}")
+        return
+    if db_config.get('schema'):
+        click.echo(f"    Schema: {db_config['schema']}")
+    tables = db_config.get('tables') or {}
+    if tables:
+        click.echo("    Tables:")
+        for table_name, table in tables.items():
+            click.echo(f"      {table_name}: {table}")
+    shared = shared_file.get(SHARED_CONFIG_KEY) or {}
+    context = SqlContext(name=name, version=version,
+                         schema_groups=shared_file.get(SCHEMA_GROUPS_KEY) or {},
+                         schema_sources=get_schema_sources(mapper.database_names,
+                                                           mapper.config_dir))
+    routes = [r for r in db_config.get('routes') or [] if isinstance(r, dict)]
+    if routes:
+        click.echo("    Routes:")
+    for route_config in routes:
+        click.echo(f"      {route_config.get('route', '')}:")
+        # Stand-in values for the route's variables; values are bound, so they
+        # show as markers either way.
+        names = set(VARIABLE_PATTERN.findall(json.dumps(route_config)))
+        path_values = {n: n for n in names if not n.startswith(("cookies.", "self."))}
+        cookie_values = {n[len("cookies."):]: n for n in names if n.startswith("cookies.")}
+        try:
+            sql, _ = build_sql_query(merge_query_params(route_config, db_config), db_config,
+                                     path_params=path_values, cookies=cookie_values,
+                                     shared_config=shared, context=context)
+        except Exception as error:  # e.g. a selector that needs request values
+            sql = f"{route_config.get('sql')}\n        (not expanded: {error})"
+        click.echo("        " + str(sql).replace('\n', '\n        '))
+
+
 def _server_lookups(url: str, token: Optional[str], refresh: bool, names: list) -> int:
     """Show or refresh lookups on a running server.
 
