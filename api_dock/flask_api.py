@@ -37,8 +37,17 @@ def create_app(config_path: Optional[str] = None) -> Flask:
 
     Returns:
         Configured Flask application.
+
+    Raises:
+        ValueError: If PostgreSQL connections are configured; they need the
+            FastAPI server, whose single event loop can share connection pools.
     """
     route_mapper = RouteMapper(config_path)
+    if route_mapper.connections:
+        raise ValueError(
+            "PostgreSQL connections (database.connections) need the FastAPI server; "
+            "start api-dock without --backbone flask"
+        )
 
     app = Flask(__name__)
 

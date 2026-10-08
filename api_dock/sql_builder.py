@@ -22,6 +22,7 @@ from api_dock.database_config import (
     IDENTIFIER_PATTERN,
     resolve_schema_union,
     resolve_table_reference,
+    route_templates,
     SCHEMA_SEPARATOR,
 )
 from api_dock.sql_template_check import QUOTED_VARIABLE_PATTERN
@@ -57,6 +58,17 @@ SOURCE_COLUMN_DEFAULTS: Dict[str, str] = {
     "name": "name",
     "version": "version",
 }
+
+# Route key choosing the query engine, and its values. A route's engine is
+# inferred from its tables (see route_engine); `engine` checks or forces it.
+ENGINE_KEY: str = "engine"
+DUCKDB_ENGINE: str = "duckdb"
+POSTGRES_ENGINE: str = "postgres"
+ENGINES: frozenset = frozenset({DUCKDB_ENGINE, POSTGRES_ENGINE})
+
+# Catalog name a PostgreSQL connection is attached under when DuckDB runs a
+# query that reads PostgreSQL tables: api_dock_pg_<connection>.
+POSTGRES_CATALOG_PREFIX: str = "api_dock_pg_"
 
 # {{self.<fact>}} placeholders for the database/version being queried.
 SELF_PARAM_PREFIX: str = "self."
@@ -101,7 +113,8 @@ def build_sql_query(
         cookies: Optional[Dict[str, str]] = None,
         multi_query_params: Optional[Dict[str, List[str]]] = None,
         shared_config: Optional[Dict[str, Any]] = None,
-        context: Optional[SqlContext] = None) -> Tuple[str, List[Optional[str]]]:
+        context: Optional[SqlContext] = None,
+        marker: str = SQL_MARKER) -> Tuple[str, List[Optional[str]]]:
     """Build SQL query text and the values to bind to its markers.
 
     Each ``{{var}}`` in the base SQL, named queries, and WHERE fragments is
@@ -123,6 +136,7 @@ def build_sql_query(
             ``databases/config.yaml`` (schemas, global tables, meta), or None.
         context: Request context (database name/version, schema groups and
             sources) for unions, ``source_columns`` and ``{{self.*}}``.
+        marker: Text written for each bound value (the backend's marker).
 
     Returns:
         Tuple of ``(sql, values)``: the SQL text with ``?`` markers and the
@@ -136,7 +150,7 @@ def build_sql_query(
     """
     sql_query, values, _ = build_sql_query_with_tables(
         route_config, database_config, path_params, query_params, cookies,
-        multi_query_params, shared_config, context
+        multi_query_params, shared_config, context, marker
     )
     return sql_query, values
 
@@ -149,7 +163,8 @@ def build_sql_query_with_tables(
         cookies: Optional[Dict[str, str]] = None,
         multi_query_params: Optional[Dict[str, List[str]]] = None,
         shared_config: Optional[Dict[str, Any]] = None,
-        context: Optional[SqlContext] = None
+        context: Optional[SqlContext] = None,
+        marker: str = SQL_MARKER
 ) -> Tuple[str, List[Optional[str]], List[TableReference]]:
     """Build a SQL query, its bound values, and the tables it references.
 
@@ -167,6 +182,7 @@ def build_sql_query_with_tables(
         shared_config: The shared ``database`` mapping, or None.
         context: Request context for unions, ``source_columns`` and
             ``{{self.*}}`` placeholders, or None.
+        marker: Text written for each bound value (the backend's marker).
 
     Returns:
         Tuple of (sql_query, values, table_references): the SQL with ``?``
@@ -217,15 +233,18 @@ def build_sql_query_with_tables(
     # Each piece is bound on its own and pieces are joined in the order they
     # appear in the final SQL, so the value list stays in marker order.
     # Strip whitespace/newlines from base SQL (YAML block scalars add trailing \n)
-    sql_query, values = _bind_variables(expand_tables(sql_template).strip(), params)
+    sql_query, values = _bind_variables(
+        expand_tables(sql_template).strip(), params, marker=marker
+    )
 
     where_fragments = build_where_clause_from_params(
-        route_config, query_params, path_params, multi_query_params, cookies, self_params
+        route_config, query_params, path_params, multi_query_params, cookies, self_params,
+        marker
     )
     sql_query, values = _add_where_fragments(sql_query, values, where_fragments, expand_tables)
 
     post_where = _post_where_clauses(
-        route_config, branch_appends, query_params, path_params, params, expand_tables
+        route_config, branch_appends, query_params, path_params, params, expand_tables, marker
     )
     if post_where:
         sql_query += ' ' + ' '.join(post_where)
@@ -257,9 +276,36 @@ def build_schema_view_statements(table_refs: List[TableReference]) -> List[str]:
             schemas_created.add(reference.schema)
         statements.append(
             f"CREATE OR REPLACE VIEW {reference.sql_name} AS "
-            f"SELECT * FROM {_escape_sql_value(reference.uri)}"
+            f"SELECT * FROM {duckdb_table_source(reference)}"
         )
     return statements
+
+
+def duckdb_table_source(reference: TableReference) -> str:
+    """What DuckDB reads a table from: a quoted file URI or an attached PostgreSQL table.
+
+    Args:
+        reference: The resolved table.
+
+    Returns:
+        ``'<uri>'`` for a file table, or ``api_dock_pg_<connection>.<schema>.<table>``
+        for a PostgreSQL table (see postgres_catalog).
+    """
+    if reference.is_postgres:
+        return f"{postgres_catalog(reference.connection)}.{reference.uri}"
+    return _escape_sql_value(reference.uri)
+
+
+def postgres_catalog(connection: str) -> str:
+    """The DuckDB catalog a PostgreSQL connection is attached under.
+
+    Args:
+        connection: Connection name (a lower-case identifier).
+
+    Returns:
+        ``api_dock_pg_<connection>``.
+    """
+    return f"{POSTGRES_CATALOG_PREFIX}{connection}"
 
 
 def check_table_references(
@@ -289,11 +335,121 @@ def check_table_references(
     stripped = template.strip()
     if _is_named_query_reference(stripped, database_config):
         return
+    collect_table_references(
+        stripped, database_config, shared_config, schema_groups, source_columns
+    )
+
+
+def collect_table_references(
+        template: str,
+        database_config: Dict[str, Any],
+        shared_config: Optional[Dict[str, Any]] = None,
+        schema_groups: Optional[Dict[str, List[str]]] = None,
+        source_columns: Any = None) -> List[TableReference]:
+    """Resolve every ``[[...]]`` reference in a template to its tables.
+
+    A template that is exactly a named query reference is resolved through
+    that query's SQL. Union references contribute every member table.
+
+    Args:
+        template: SQL template.
+        database_config: The version database configuration.
+        shared_config: The shared ``database`` mapping, or None.
+        schema_groups: The shared ``schema_groups`` mapping, or None.
+        source_columns: The route's ``source_columns`` value, or None.
+
+    Returns:
+        The referenced tables, unique by SQL name.
+
+    Raises:
+        ValueError: If a reference doesn't resolve (see check_table_references).
+    """
+    stripped = template.strip()
+    if _is_named_query_reference(stripped, database_config):
+        stripped = _resolve_named_query(stripped, database_config).strip()
+    collected: Dict[str, TableReference] = {}
     _substitute_table_references(
-        stripped, database_config, shared_config, None,
+        stripped, database_config, shared_config, collected,
         SqlContext(schema_groups=schema_groups or {}),
         _normalize_source_columns(source_columns),
     )
+    return list(collected.values())
+
+
+def route_tables(
+        route_config: Dict[str, Any],
+        database_config: Dict[str, Any],
+        shared_config: Optional[Dict[str, Any]] = None,
+        schema_groups: Optional[Dict[str, List[str]]] = None) -> List[TableReference]:
+    """Every table a route's templates can reference (every branch and query param).
+
+    Args:
+        route_config: Route configuration, merged with top-level query_params.
+        database_config: The version database configuration.
+        shared_config: The shared ``database`` mapping, or None.
+        schema_groups: The shared ``schema_groups`` mapping, or None.
+
+    Returns:
+        The tables, including union members (duplicates possible).
+
+    Raises:
+        ValueError: If a reference doesn't resolve.
+    """
+    tables: List[TableReference] = []
+    for template in route_templates(route_config):
+        tables.extend(collect_table_references(
+            template, database_config, shared_config, schema_groups,
+            route_config.get(SOURCE_COLUMNS_KEY),
+        ))
+    return tables
+
+
+def route_engine(
+        route_config: Dict[str, Any],
+        database_config: Dict[str, Any],
+        shared_config: Optional[Dict[str, Any]] = None,
+        schema_groups: Optional[Dict[str, List[str]]] = None) -> Optional[str]:
+    """Choose the engine a route's queries run on.
+
+    A route runs natively on a PostgreSQL connection when every table its
+    templates can reference (every selector branch and query param, union
+    members included) is on that one connection; otherwise it runs on DuckDB,
+    which also reads PostgreSQL tables (mixing them with files, or with tables
+    on other connections). A route's ``engine`` setting checks the choice
+    (``postgres``) or forces DuckDB (``duckdb``).
+
+    Args:
+        route_config: Route configuration, merged with top-level query_params.
+        database_config: The version database configuration.
+        shared_config: The shared ``database`` mapping, or None.
+        schema_groups: The shared ``schema_groups`` mapping, or None.
+
+    Returns:
+        The PostgreSQL connection name for a native PostgreSQL route, or None
+        for DuckDB.
+
+    Raises:
+        ValueError: If ``engine`` is unknown, or ``engine: postgres`` is set on
+            a route that can't run natively on one PostgreSQL connection, or a
+            reference doesn't resolve.
+    """
+    engine = route_config.get(ENGINE_KEY)
+    if engine is not None and engine not in ENGINES:
+        raise ValueError(f"{ENGINE_KEY} must be one of {sorted(ENGINES)}, got {engine!r}")
+
+    tables = route_tables(route_config, database_config, shared_config, schema_groups)
+    connections = {table.connection for table in tables}
+    native = connections and None not in connections and len(connections) == 1
+    connection = next(iter(connections)) if native else None
+
+    if engine == DUCKDB_ENGINE:
+        return None
+    if engine == POSTGRES_ENGINE and connection is None:
+        raise ValueError(
+            f"{ENGINE_KEY}: {POSTGRES_ENGINE} needs every table the route uses to be on one "
+            "PostgreSQL connection"
+        )
+    return connection
 
 
 def resolve_route_sql(
@@ -440,7 +596,8 @@ def build_where_clause_from_params(
         path_params: Dict[str, str],
         multi_query_params: Optional[Dict[str, List[str]]] = None,
         cookies: Optional[Dict[str, str]] = None,
-        extra_params: Optional[Dict[str, Optional[str]]] = None
+        extra_params: Optional[Dict[str, Optional[str]]] = None,
+        marker: str = SQL_MARKER
 ) -> List[Tuple[str, List[Optional[str]]]]:
     """Build WHERE clause fragments, with their bound values, from parameter configurations.
 
@@ -456,6 +613,7 @@ def build_where_clause_from_params(
         cookies: Dictionary of cookie values, available as ``{{cookies.<name>}}``.
         extra_params: Additional values fragments may reference (e.g. the
             ``{{self.*}}`` placeholders).
+        marker: Text written for each bound value (the backend's marker).
 
     Returns:
         List of ``(fragment, values)`` pairs in config order. Fragments are to be
@@ -502,7 +660,7 @@ def build_where_clause_from_params(
             _append_bound_fragment(
                 where_fragments, param_config['multivalue_sql'], all_params,
                 {param_name: param_values}
-            )
+            , marker=marker)
             continue
 
         # Handle conditional parameters that have SQL
@@ -511,7 +669,9 @@ def build_where_clause_from_params(
             if param_value in conditional_config and 'sql' in conditional_config[param_value]:
                 sql_fragment = conditional_config[param_value]['sql']
                 if sql_fragment:  # Skip empty SQL fragments
-                    _append_bound_fragment(where_fragments, sql_fragment, all_params)
+                    _append_bound_fragment(
+                        where_fragments, sql_fragment, all_params, marker=marker
+                    )
             continue
 
         # Handle regular SQL parameters
@@ -523,11 +683,13 @@ def build_where_clause_from_params(
                 # Use provided value or default
                 effective_value = param_value if param_value is not None else param_config['default']
                 effective_params = {**all_params, param_name: str(effective_value)}
-                _append_bound_fragment(where_fragments, sql_fragment, effective_params)
+                _append_bound_fragment(
+                    where_fragments, sql_fragment, effective_params, marker=marker
+                )
 
             # Handle optional parameters (only include if provided)
             elif param_value is not None:
-                _append_bound_fragment(where_fragments, sql_fragment, all_params)
+                _append_bound_fragment(where_fragments, sql_fragment, all_params, marker=marker)
 
     return where_fragments
 
@@ -736,10 +898,14 @@ def _substitute_table_references(
         if collected is not None:
             collected.setdefault(reference.sql_name, reference)
 
+        if context is not None and context.connection is not None:
+            return _postgres_table_sql(reference, in_from_clause)
         if in_from_clause:
             # Full reference for FROM/JOIN clauses
             if reference.qualified:
                 return reference.sql_name
+            if reference.is_postgres:
+                return f"{duckdb_table_source(reference)} AS {reference.name}"
             return f"'{reference.uri}' AS {reference.name}"
         else:
             # Just the table name (alias) for other contexts like SELECT
@@ -747,6 +913,29 @@ def _substitute_table_references(
 
     result_sql = re.sub(table_pattern, replace_table_reference, sql)
     return result_sql
+
+
+def _postgres_table_sql(reference: TableReference, in_from_clause: bool) -> str:
+    """Write a table reference for a query running natively on PostgreSQL.
+
+    After FROM/JOIN an unqualified ``[[table]]`` becomes the quoted PostgreSQL
+    name with its alias (``"public"."recordings" AS "recordings"``) and the
+    quoted alias elsewhere. A qualified ``[[schema.table]]`` gets no alias, so
+    an alias written after it works, and elsewhere becomes the quoted
+    PostgreSQL table name, by which PostgreSQL also knows it.
+
+    Args:
+        reference: The resolved PostgreSQL table.
+        in_from_clause: Whether the reference follows FROM/JOIN.
+
+    Returns:
+        SQL text for the reference.
+    """
+    parts = reference.uri.split('.')
+    if in_from_clause:
+        source = '.'.join(f'"{part}"' for part in parts)
+        return source if reference.qualified else f'{source} AS "{reference.name}"'
+    return f'"{parts[-1]}"' if reference.qualified else f'"{reference.name}"'
 
 
 def _resolve_union(
@@ -813,6 +1002,8 @@ def _render_union(
     """
     self_schema = database_config.get(DATABASE_SCHEMA_KEY)
     selected = [m for m in members if not (exclude_self and m.schema == self_schema)]
+    if context is not None and context.connection is not None:
+        return _render_postgres_union(members, selected, context, source_columns)
 
     selects = [f"({_union_member_select(m, context, source_columns)})" for m in selected]
     if not selects:
@@ -821,6 +1012,79 @@ def _render_union(
     elif len(selects) == 1 and source_columns:
         selects.append(f"({_union_member_select(selected[0], context, source_columns)} LIMIT 0)")
     return ("(" + " UNION ALL BY NAME ".join(selects) + ")", selected)
+
+
+def _render_postgres_union(
+        members: List[TableReference],
+        selected: List[TableReference],
+        context: SqlContext,
+        source_columns: List[Tuple[str, str]]) -> Tuple[str, List[TableReference]]:
+    """Render a union natively on PostgreSQL, lining columns up by name.
+
+    PostgreSQL has no ``UNION ALL BY NAME``, so every member lists every column
+    of the union (in order of first appearance), with a typed NULL for columns
+    it lacks, then the source columns. If ``!`` removed every member, the first
+    member is read with ``WHERE false`` so the result has its columns but no rows.
+
+    Args:
+        members: All member tables (PostgreSQL tables on one connection).
+        selected: The members left after ``!`` excluded the current schema.
+        context: Request context with each member's columns.
+        source_columns: (fact, column) pairs to add to each row.
+
+    Returns:
+        Tuple of (SQL subquery text without an alias, the members it reads).
+
+    Raises:
+        ValueError: If a member's columns are unknown or a source column has
+            the same name as a real column.
+    """
+    rows_from = selected or [members[0]]
+    columns: Dict[str, str] = {}
+    for member in rows_from:
+        if member.uri not in context.columns:
+            raise ValueError(f"Columns of PostgreSQL table '{member.uri}' are unknown")
+        for name, data_type in context.columns[member.uri]:
+            columns.setdefault(name, data_type)
+    clashes = sorted({column for _, column in source_columns} & set(columns))
+    if clashes:
+        raise ValueError(f"source column(s) {clashes} clash with table columns")
+
+    selects = []
+    for member in rows_from:
+        own = {name for name, _ in context.columns[member.uri]}
+        parts = [
+            f'"{name}"' if name in own else f'NULL::{data_type} AS "{name}"'
+            for name, data_type in columns.items()
+        ]
+        parts += [
+            f'{_sql_literal_or_null(value)} AS "{column}"'
+            for column, value in _source_values(member, context, source_columns)
+        ]
+        source = '.'.join(f'"{part}"' for part in member.uri.split('.'))
+        where = "" if selected else " WHERE false"
+        selects.append(f"(SELECT {', '.join(parts)} FROM {source}{where})")
+    return ("(" + " UNION ALL ".join(selects) + ")", rows_from)
+
+
+def _source_values(
+        member: TableReference,
+        context: Optional[SqlContext],
+        source_columns: List[Tuple[str, str]]) -> List[Tuple[str, Optional[str]]]:
+    """The (column, value) pairs a union member adds for ``source_columns``.
+
+    Args:
+        member: The member table.
+        context: Request context (schema sources), or None.
+        source_columns: (fact, column) pairs to add.
+
+    Returns:
+        (column name, value or None) pairs, in order.
+    """
+    sources = context.schema_sources if context is not None else {}
+    source_name, source_version = sources.get(member.schema, (None, None))
+    values = {"schema": member.schema, "name": source_name, "version": source_version}
+    return [(column, values[fact]) for fact, column in source_columns]
 
 
 def _union_member_select(
@@ -837,12 +1101,9 @@ def _union_member_select(
     Returns:
         ``SELECT *[, <value> AS <column> ...] FROM schema.table``.
     """
-    sources = context.schema_sources if context is not None else {}
-    source_name, source_version = sources.get(member.schema, (None, None))
-    values = {"schema": member.schema, "name": source_name, "version": source_version}
-
     columns = "".join(
-        f", {_sql_literal_or_null(values[fact])} AS {column}" for fact, column in source_columns
+        f", {_sql_literal_or_null(value)} AS {column}"
+        for column, value in _source_values(member, context, source_columns)
     )
     return f"SELECT *{columns} FROM {member.sql_name}"
 
@@ -1028,7 +1289,8 @@ def _post_where_clauses(
         query_params: Dict[str, str],
         path_params: Dict[str, str],
         params: Dict[str, Optional[str]],
-        expand_tables: Callable[[str], str]) -> List[str]:
+        expand_tables: Callable[[str], str],
+        marker: str = SQL_MARKER) -> List[str]:
     """Build the clauses that follow WHERE, in the order they are written.
 
     Branch appends from the sql selector come before route-level sql_append
@@ -1042,6 +1304,7 @@ def _post_where_clauses(
         path_params: Dictionary of path parameters.
         params: All substitution values (see _substitution_params).
         expand_tables: Expands [[table]] references (see build_sql_query_with_tables).
+        marker: The backend's marker (literal ``%`` is doubled for ``%s``).
 
     Returns:
         SQL clauses to append after the WHERE clause.
@@ -1057,13 +1320,16 @@ def _post_where_clauses(
         expand_tables(clause)
         for clause in build_append_clause_from_params(route_config, query_params, path_params)
     ]
-    return branch + route
+    # Values here passed the allowed-character check (no %), so only config text
+    # has literal % to double.
+    return [_escape_percent(clause, marker) for clause in branch + route]
 
 
 def _bind_variables(
         template: str,
         params: Dict[str, Optional[str]],
-        list_params: Optional[Dict[str, List[str]]] = None) -> Tuple[str, List[Optional[str]]]:
+        list_params: Optional[Dict[str, List[str]]] = None,
+        marker: str = SQL_MARKER) -> Tuple[str, List[Optional[str]]]:
     """Replace each {{variable}} in an SQL template with a marker and collect its value.
 
     The template is read in one pass, so a value is never scanned for further
@@ -1076,6 +1342,7 @@ def _bind_variables(
         params: Dictionary of parameter values.
         list_params: Parameters whose placeholder becomes a parenthesized list
             with one marker per value, for use with ``IN``.
+        marker: Text written for each bound value.
 
     Returns:
         Tuple of the SQL text with markers and the values in marker order.
@@ -1086,29 +1353,45 @@ def _bind_variables(
     if list_params is None:
         list_params = {}
     values: List[Optional[str]] = []
-    template = QUOTED_VARIABLE_PATTERN.sub(r'{{\1}}', template)
+    template = _escape_percent(QUOTED_VARIABLE_PATTERN.sub(r'{{\1}}', template), marker)
 
     def replace_variable(match: re.Match[str]) -> str:
         """Return the marker(s) for one placeholder and record its value(s)."""
         name = match.group(1)
         if name in list_params:
             values.extend(str(value) for value in list_params[name])
-            return "(" + ", ".join(SQL_MARKER for _ in list_params[name]) + ")"
+            return "(" + ", ".join(marker for _ in list_params[name]) + ")"
         if name not in params:
             raise ValueError(f"No value for SQL variable '{name}'")
         value = params[name]
         values.append(None if value is None else str(value))
-        return SQL_MARKER
+        return marker
 
     sql = VARIABLE_PATTERN.sub(replace_variable, template)
     return sql, values
+
+
+def _escape_percent(template: str, marker: str) -> str:
+    """Double each literal ``%`` for drivers whose marker uses ``%`` (psycopg's ``%s``).
+
+    Apply once per config template, before markers are written.
+
+    Args:
+        template: SQL template text.
+        marker: The backend's marker.
+
+    Returns:
+        The template, with ``%`` doubled if the marker contains ``%``.
+    """
+    return template.replace('%', '%%') if '%' in marker else template
 
 
 def _append_bound_fragment(
         fragments: List[Tuple[str, List[Optional[str]]]],
         template: str,
         params: Dict[str, Optional[str]],
-        list_params: Optional[Dict[str, List[str]]] = None) -> None:
+        list_params: Optional[Dict[str, List[str]]] = None,
+        marker: str = SQL_MARKER) -> None:
     """Bind a WHERE fragment template and append it unless it is empty.
 
     Args:
@@ -1116,8 +1399,9 @@ def _append_bound_fragment(
         template: SQL fragment template with {{variable}} placeholders.
         params: Dictionary of parameter values.
         list_params: Parameters to expand to a marker list (see _bind_variables).
+        marker: Text written for each bound value.
     """
-    sql, values = _bind_variables(template, params, list_params)
+    sql, values = _bind_variables(template, params, list_params, marker)
     sql = sql.strip()
     if sql:
         fragments.append((sql, values))

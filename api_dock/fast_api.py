@@ -13,10 +13,11 @@ License: BSD 3-Clause
 #
 import json
 import warnings
+from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from typing import Any, Callable, Dict, Optional
+from typing import Any, AsyncIterator, Callable, Dict, Optional
 
 from api_dock.route_mapper import (
     collect_multi_query_params,
@@ -58,10 +59,20 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
 
     metadata = route_mapper.get_config_metadata()
 
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        """Open PostgreSQL connection pools at startup and close them at shutdown."""
+        await route_mapper.start()
+        try:
+            yield
+        finally:
+            await route_mapper.aclose()
+
     app = FastAPI(
         title=metadata.get("name", "API Dock"),
         description=metadata.get("description", "API wrapper using configuration files"),
-        version="0.1.0"
+        version="0.1.0",
+        lifespan=lifespan,
     )
 
     app.state.route_mapper = route_mapper

@@ -12,20 +12,24 @@ License: BSD 3-Clause
 # IMPORTS
 #
 import asyncio
+import base64
+import ipaddress
 import json
 import os
-import re
-import threading
+from datetime import date, datetime, timedelta
+from decimal import Decimal
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+from uuid import UUID
+
 import httpx
 import yaml
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 from api_dock.auth import validate_authentication
 from api_dock.config import DEFAULT_CONFIG_DIR, filter_cookies_by_config, filter_remote_query_params, find_remote_config, find_route_mapping, get_authentication_config, get_database_names, get_remote_names, get_remote_versions, get_settings, is_route_allowed, is_versioned_remote, load_main_config, merge_inherited_config, resolve_latest_version
-from api_dock.database_config import apply_shared_definitions, check_database_config, find_database_route, get_database_versions, get_local_table_references, get_schema_sources, is_versioned_database, load_database_config, load_shared_config, merge_query_params, resolve_latest_database_version, SCHEMA_GROUPS_KEY, SHARED_CONFIG_KEY
+from api_dock.database_config import apply_shared_definitions, check_database_config, check_table_definitions, find_database_route, get_database_versions, get_local_table_references, get_schema_sources, is_versioned_database, load_database_config, load_shared_config, merge_query_params, resolve_latest_database_version, SCHEMA_GROUPS_KEY, SHARED_CONFIG_KEY, SHARED_CONNECTIONS_KEY
+from api_dock.database_backends import DatabaseLifecycleError, DatabaseUnavailableError, DUCKDB_SETTINGS_KEY, DuckDBBackend
 from api_dock.listings import build_listing, resolve_listing_specs
-from api_dock.sql_builder import build_schema_view_statements, build_sql_query_with_tables, check_table_references, extract_path_parameters, process_query_parameters, SOURCE_COLUMNS_KEY, SqlSelectionError
-from api_dock.storage_auth import setup_table_storage_authentication
+from api_dock.sql_builder import build_sql_query_with_tables, check_table_references, route_engine, route_tables, extract_path_parameters, process_query_parameters, SOURCE_COLUMNS_KEY, SqlSelectionError
 from api_dock.types import PreparedRequest, ProxyResponse, SqlContext
 
 
@@ -37,6 +41,13 @@ DEFAULT_VERSION: str = "latest"
 # Default upstream request timeout in seconds. Override with the `timeout`
 # setting; set it to null/false to disable the timeout entirely.
 DEFAULT_TIMEOUT: float = 10.0
+
+# Network address types that are written to JSON as their string form.
+IP_ADDRESS_TYPES: Tuple[type, ...] = (
+    ipaddress.IPv4Address, ipaddress.IPv6Address,
+    ipaddress.IPv4Interface, ipaddress.IPv6Interface,
+    ipaddress.IPv4Network, ipaddress.IPv6Network,
+)
 
 # Headers excluded from upstream→client forwarding.
 # Hop-by-hop headers (RFC 7230 §6.1) must not be forwarded by proxies.
@@ -74,18 +85,10 @@ EXCLUDED_REQUEST_HEADERS: frozenset = frozenset({
     "upgrade",
 })
 
-# `settings.duckdb` options. Every key is applied to each query's DuckDB
-# connection as `SET <key> = <value>` (memory_limit, threads, temp_directory,
-# ...), except max_concurrent_queries, which caps how many database queries run
-# at once in this process (others wait their turn).
-DUCKDB_SETTINGS_KEY: str = "duckdb"
-MAX_CONCURRENT_QUERIES_KEY: str = "max_concurrent_queries"
-
 # `settings.base_path`: an optional URL prefix (e.g. "/dock") the API is also
 # served under, for when a proxy/CDN forwards a path prefix unchanged.
 BASE_PATH_KEY: str = "base_path"
 
-DUCKDB_OPTION_PATTERN: re.Pattern = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 #
@@ -183,17 +186,51 @@ class RouteMapper:
             self.config, self.config_dir
         )
         self.base_path = normalize_base_path(self.settings.get(BASE_PATH_KEY))
-        self.duckdb_statements, max_queries = _duckdb_settings(
-            self.settings.get(DUCKDB_SETTINGS_KEY)
-        )
-        self._query_slots = threading.BoundedSemaphore(max_queries) if max_queries else None
-
         try:
             shared_file = load_shared_config(self.config_dir)
         except (ValueError, yaml.YAMLError) as error:
             raise ValueError(f"Shared database config (databases/config.yaml): {error}") from error
         for database_name in self.database_names:
             _check_database(database_name, self.config, self.config_dir, shared_file)
+
+        # PostgreSQL connections are fixed at startup; their pools open in start().
+        self.connections: Dict[str, Any] = (
+            shared_file.get(SHARED_CONFIG_KEY, {}).get(SHARED_CONNECTIONS_KEY) or {}
+        )
+        self._postgres: Any = None
+        self.duckdb_backend = DuckDBBackend(
+            self.settings.get(DUCKDB_SETTINGS_KEY), self.connections
+        )
+
+    async def start(self) -> None:
+        """Open a connection pool for each PostgreSQL connection.
+
+        Needed only when ``database.connections`` is configured; the FastAPI app
+        calls it (and aclose) in its lifespan. Use the mapper on the event loop
+        that started it.
+
+        Raises:
+            RuntimeError: If the PostgreSQL packages aren't installed.
+            ValueError: If a connection's settings are invalid (e.g. an unset
+                ``env:`` variable).
+        """
+        if not self.connections or self._postgres is not None:
+            return
+        try:
+            from api_dock.postgres_backend import PostgresPools
+        except ImportError as error:
+            raise RuntimeError(
+                "PostgreSQL connections are configured; install them with "
+                "`pip install 'api_dock[postgres]'`"
+            ) from error
+        pools = PostgresPools(self.connections)
+        await pools.start()
+        self._postgres = pools
+
+    async def aclose(self) -> None:
+        """Close the PostgreSQL connection pools (if any). Safe to call more than once."""
+        if self._postgres is not None:
+            await self._postgres.aclose()
 
     def get_config_metadata(self) -> Dict[str, Any]:
         """Get API metadata from configuration.
@@ -581,9 +618,22 @@ class RouteMapper:
                     if route_config.get(SOURCE_COLUMNS_KEY) else {}
                 ),
             )
+            context.connection = route_engine(
+                route_config, database_config, shared_config, context.schema_groups
+            )
+            backend = self._backend(context.connection)
+            if context.connection is not None:
+                # Native PostgreSQL unions list every column, so they need each
+                # table's columns (cached after the first request per table).
+                tables = route_tables(
+                    route_config, database_config, shared_config, context.schema_groups
+                )
+                context.columns = await self._postgres.columns(
+                    context.connection, sorted({table.uri for table in tables})
+                )
             sql_query, sql_values, table_refs = build_sql_query_with_tables(
                 route_config, database_config, path_params, query_params,
-                filtered_cookies, multi_query_params, shared_config, context
+                filtered_cookies, multi_query_params, shared_config, context, backend.marker
             )
         except SqlSelectionError as e:
             return ProxyResponse(
@@ -592,6 +642,10 @@ class RouteMapper:
                 content_type="application/json",
                 error_message=str(e.response.get("error")) if e.response.get("error") else None,
             )
+        except DatabaseLifecycleError as error:
+            return _error_response(500, str(error))
+        except DatabaseUnavailableError:
+            return _error_response(503, "Database unavailable")
         except (ValueError, yaml.YAMLError):
             return _error_response(500, "SQL query error")
 
@@ -602,15 +656,15 @@ class RouteMapper:
         auth_tables += [ref for ref in table_refs if ref.sql_name not in local_names]
 
         try:
-            # DuckDB calls block; run them in a worker thread so one slow query
-            # doesn't stall every other request (and health checks) meanwhile.
-            response_data = await asyncio.to_thread(
-                self._run_query, sql_query, sql_values, auth_tables,
-                build_schema_view_statements(table_refs),
-            )
+            columns, rows = await backend.execute(sql_query, sql_values, auth_tables)
+        except DatabaseUnavailableError:
+            return _error_response(503, "Database unavailable")
         except Exception:
             return _error_response(500, "Database query error")
-        return _json_response(response_data)
+        return _json_response([
+            {column: _make_json_safe(value) for column, value in zip(columns, row)}
+            for row in rows
+        ])
 
     def is_remote_name(self, name: str) -> bool:
         """Check if a given name is a configured remote name.
@@ -688,53 +742,28 @@ class RouteMapper:
         except Exception as e:
             return _error_response(500, f"Sync wrapper error: {str(e)}")
 
-    def _run_query(
-            self,
-            sql_query: str,
-            sql_values: List[Optional[str]],
-            auth_tables: List[Any],
-            view_statements: List[str]) -> List[Dict[str, Any]]:
-        """Execute a database query on a fresh DuckDB connection (blocking).
-
-        Applies the ``settings.duckdb`` options, storage authentication and
-        schema views, then runs the query. Honors max_concurrent_queries.
+    def _backend(self, connection: Optional[str]) -> Any:
+        """The backend a route runs on: DuckDB, or a PostgreSQL connection's pool.
 
         Args:
-            sql_query: The SQL to run, with a ``?`` marker per bound value.
-            sql_values: Values for the markers, in order (sent separately from
-                the SQL, so they are never parsed as SQL).
-            auth_tables: TableReferences to set up storage authentication for.
-            view_statements: CREATE SCHEMA/VIEW statements to run first.
+            connection: PostgreSQL connection name (from route_engine), or None.
 
         Returns:
-            Result rows as JSON-safe dicts.
+            A DatabaseBackend.
+
+        Raises:
+            DatabaseLifecycleError: For a PostgreSQL connection before start()
+                (or after aclose(), or from another event loop).
         """
-        import duckdb
-
         # getattr: RouteMappers built without __init__ (e.g. in tests) have neither.
-        slots = getattr(self, '_query_slots', None)
-        if slots is not None:
-            slots.acquire()
-        try:
-            conn = duckdb.connect(database=':memory:')
-            try:
-                for statement in getattr(self, 'duckdb_statements', []):
-                    conn.execute(statement)
-                setup_table_storage_authentication(conn, auth_tables)
-                for statement in view_statements:
-                    conn.execute(statement)
-                result = conn.execute(sql_query, sql_values).fetchall()
-                columns = [desc[0] for desc in conn.description] if conn.description else []
-            finally:
-                conn.close()
-        finally:
-            if slots is not None:
-                slots.release()
-
-        return [
-            {column: _make_json_safe(value) for column, value in zip(columns, row)}
-            for row in result
-        ]
+        if connection is None:
+            return getattr(self, "duckdb_backend", None) or DuckDBBackend()
+        if getattr(self, "_postgres", None) is None:
+            raise DatabaseLifecycleError(
+                "PostgreSQL connections are configured but the route mapper wasn't started; "
+                "call `await mapper.start()` (the FastAPI app does this in its lifespan)"
+            )
+        return self._postgres.backend(connection)
 
     def _is_remote_filename(self, filename: str) -> bool:
         """Check if a filename corresponds to a remote config file.
@@ -830,49 +859,17 @@ def _check_database(
             )
 
         try:
+            check_table_definitions(database_config.get("tables") or {}, shared_database, "tables")
             check_database_config(database_config, check_tables)
+            for index, route_config in enumerate(database_config.get("routes") or []):
+                merged = merge_query_params(route_config, database_config)
+                try:
+                    route_engine(merged, database_config, shared_database, schema_groups)
+                except ValueError as error:
+                    route_name = route_config.get("route", f"routes[{index}]")
+                    raise ValueError(f"route '{route_name}': {error}") from error
         except ValueError as error:
             raise ValueError(f"{label}, {error}") from error
-
-
-def _duckdb_settings(options: Any) -> Tuple[List[str], Optional[int]]:
-    """Turn ``settings.duckdb`` into SET statements and a concurrency cap.
-
-    Args:
-        options: Mapping of DuckDB option -> value, plus optional
-            max_concurrent_queries; or None.
-
-    Returns:
-        Tuple of (SET statements, max concurrent queries or None).
-
-    Raises:
-        ValueError: If options isn't a mapping, an option name isn't a plain
-            identifier, or max_concurrent_queries isn't a positive integer.
-    """
-    if not options:
-        return ([], None)
-    if not isinstance(options, dict):
-        raise ValueError(f"settings.{DUCKDB_SETTINGS_KEY} must be a mapping")
-
-    max_queries = options.get(MAX_CONCURRENT_QUERIES_KEY)
-    if max_queries is not None and (not isinstance(max_queries, int) or max_queries < 1):
-        raise ValueError(f"settings.{DUCKDB_SETTINGS_KEY}.{MAX_CONCURRENT_QUERIES_KEY} "
-                         "must be a positive integer")
-
-    statements = []
-    for name, value in options.items():
-        if name == MAX_CONCURRENT_QUERIES_KEY:
-            continue
-        if not DUCKDB_OPTION_PATTERN.match(str(name)):
-            raise ValueError(f"settings.{DUCKDB_SETTINGS_KEY}: invalid option name '{name}'")
-        if isinstance(value, bool):
-            literal = "true" if value else "false"
-        elif isinstance(value, (int, float)):
-            literal = str(value)
-        else:
-            literal = "'" + str(value).replace("'", "''") + "'"
-        statements.append(f"SET {name} = {literal}")
-    return (statements, max_queries)
 
 
 def _filter_request_headers(headers: Dict[str, str]) -> Dict[str, str]:
@@ -964,10 +961,13 @@ def _filter_response_headers(headers: Dict[str, str]) -> Dict[str, str]:
 
 
 def _make_json_safe(value: Any) -> Any:
-    """Convert non-JSON-serializable values to JSON-safe types.
+    """Convert a database value to a value json can write.
 
-    Handles datetime objects, dates, decimals, and other common types
-    that DuckDB returns but aren't directly JSON serializable.
+    Dictionaries, lists and tuples are converted item by item; tuples become
+    lists. Dates and times become ISO strings, decimals become floats (which
+    may lose precision), bytes become base64 text, UUIDs and network addresses
+    become strings, and intervals become a number of seconds. Other values are
+    returned unchanged, so an unsupported type still fails JSON encoding.
 
     Args:
         value: Value to convert.
@@ -975,17 +975,18 @@ def _make_json_safe(value: Any) -> Any:
     Returns:
         JSON-safe version of the value.
     """
-    from datetime import date, datetime
-    from decimal import Decimal
-
-    if value is None:
-        return None
-    elif isinstance(value, (datetime, date)):
+    if isinstance(value, dict):
+        return {key: _make_json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_make_json_safe(item) for item in value]
+    if isinstance(value, (datetime, date)):
         return value.isoformat()
-    elif isinstance(value, Decimal):
+    if isinstance(value, Decimal):
         return float(value)
-    elif isinstance(value, bytes):
-        import base64
+    if isinstance(value, bytes):
         return base64.b64encode(value).decode('utf-8')
-    else:
-        return value
+    if isinstance(value, timedelta):
+        return value.total_seconds()
+    if isinstance(value, (UUID,) + IP_ADDRESS_TYPES):
+        return str(value)
+    return value

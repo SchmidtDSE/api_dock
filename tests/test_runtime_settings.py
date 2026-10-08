@@ -26,8 +26,8 @@ import yaml
 from fastapi.testclient import TestClient
 
 from api_dock import fast_api, flask_api
+from api_dock.database_backends import parse_duckdb_settings
 from api_dock.route_mapper import (
-    _duckdb_settings,
     _filter_request_headers,
     normalize_base_path,
     RouteMapper,
@@ -73,7 +73,7 @@ class TestDuckdbSettings:
     """``settings.duckdb`` parsing."""
 
     def test_statements_and_cap(self) -> None:
-        statements, cap = _duckdb_settings({
+        statements, cap = parse_duckdb_settings({
             "memory_limit": "700MB", "threads": 2, "preserve_insertion_order": False,
             "temp_directory": "/tmp/it's", "max_concurrent_queries": 3,
         })
@@ -86,14 +86,14 @@ class TestDuckdbSettings:
         assert cap == 3
 
     def test_empty(self) -> None:
-        assert _duckdb_settings(None) == ([], None)
+        assert parse_duckdb_settings(None) == ([], None)
 
     @pytest.mark.parametrize("options", [
         {"bad name": 1}, {"max_concurrent_queries": 0}, {"max_concurrent_queries": "2"}, ["x"],
     ])
     def test_invalid(self, options: Any) -> None:
         with pytest.raises(ValueError):
-            _duckdb_settings(options)
+            parse_duckdb_settings(options)
 
 
 class TestRequestHeaderFilter:
@@ -173,7 +173,7 @@ class TestQueryExecution:
             "duckdb": {"max_concurrent_queries": 1},
         })
         slots = MagicMock()
-        mapper._query_slots = slots
+        mapper.duckdb_backend._slots = slots
         await mapper.map_database_route("db", "settings")
         slots.acquire.assert_called_once()
         slots.release.assert_called_once()
@@ -186,7 +186,7 @@ class TestQueryExecution:
         })
         result = await mapper.map_database_route("db", "broken")
         assert result.status_code == 500
-        assert mapper._query_slots.acquire(blocking=False)
+        assert mapper.duckdb_backend._slots.acquire(blocking=False)
 
 
 class TestBasePathApps:

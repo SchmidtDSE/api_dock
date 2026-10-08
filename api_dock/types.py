@@ -123,13 +123,16 @@ class TableReference:
 
     Attributes:
         name: Table name (e.g. "detections").
-        uri: File path/URI the table reads from.
+        uri: For a file table, the file path/URI it reads from; for a
+            PostgreSQL table, its name in PostgreSQL (``schema.table``).
         metadata: Effective storage metadata (region, public, ...) with the
             shared ``meta`` defaults applied and the table's own keys winning.
         schema: Shared-config schema the table belongs to, if any.
         qualified: True when referenced as ``[[schema.table]]``. Qualified
             tables are exposed as DuckDB views (``schema.table``) rather than
             inlined as ``'<uri>' AS table``.
+        connection: Name of the PostgreSQL connection (``database.connections``)
+            for a PostgreSQL table; None for a file table.
     """
 
     name: str
@@ -137,6 +140,12 @@ class TableReference:
     metadata: Dict[str, Any] = field(default_factory=dict)
     schema: Optional[str] = None
     qualified: bool = False
+    connection: Optional[str] = None
+
+    @property
+    def is_postgres(self) -> bool:
+        """True for a table on a PostgreSQL connection."""
+        return self.connection is not None
 
     @property
     def sql_name(self) -> str:
@@ -161,9 +170,15 @@ class SqlContext:
         schema_sources: Schema name -> (name, version) of the single
             database/version that uses it. Schemas used by none or several are
             absent, so their ``name``/``version`` source columns are NULL.
+        connection: The PostgreSQL connection the query runs natively on, or
+            None when it runs on DuckDB. Decides how ``[[table]]`` is written.
+        columns: For native PostgreSQL queries: PostgreSQL table name ->
+            ``(column, type)`` pairs, used to line up union members.
     """
 
     name: Optional[str] = None
     version: Optional[str] = None
     schema_groups: Dict[str, List[str]] = field(default_factory=dict)
     schema_sources: Dict[str, Tuple[str, Optional[str]]] = field(default_factory=dict)
+    connection: Optional[str] = None
+    columns: Dict[str, List[Tuple[str, str]]] = field(default_factory=dict)

@@ -26,6 +26,17 @@
 #     region: us-east-1
 #     public: false
 #
+#   # named PostgreSQL connections (pip install 'api_dock[postgres]'); a table
+#   # with `table:` instead of `uri:` is a PostgreSQL table on a connection
+#   connections:
+#     warehouse:
+#       host: db.example.com
+#       dbname: warehouse
+#       user: api_dock_readonly          # a SELECT-only login
+#       password: env:WAREHOUSE_PASSWORD
+#       sslmode: verify-full
+#   orders: {connection: warehouse, table: public.orders}
+#
 #   # schemas: [[items_v1.items]] from any route, or [[items]] from a version
 #   # config that sets `schema: items_v1`
 #   schema:
