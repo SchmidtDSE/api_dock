@@ -73,6 +73,31 @@ POSTGRES_CATALOG_PREFIX: str = "api_dock_pg_"
 # {{self.<fact>}} placeholders for the database/version being queried.
 SELF_PARAM_PREFIX: str = "self."
 
+# Clauses that end a WHERE condition; query-param conditions go before them.
+TAIL_CLAUSE_PATTERN: re.Pattern = re.compile(
+    r"\b(GROUP\s+BY|HAVING|WINDOW|QUALIFY|ORDER\s+BY|LIMIT|OFFSET|FETCH)\b"
+)
+WHERE_PATTERN: re.Pattern = re.compile(r"\bWHERE\b")
+
+# A [[table]] reference is a table source when it directly follows FROM or JOIN
+# (or an opening parenthesis after them), or a comma in a FROM list.
+FROM_CONTEXT_PATTERN: re.Pattern = re.compile(r"\b(FROM|JOIN)\s*(\(\s*)*$", re.IGNORECASE)
+COMMA_CONTEXT_PATTERN: re.Pattern = re.compile(r",\s*$")
+CLAUSE_KEYWORD_PATTERN: re.Pattern = re.compile(
+    r"\b(SELECT|FROM|WHERE|ON|USING|JOIN|GROUP|ORDER|HAVING|LIMIT|SET|VALUES)\b", re.IGNORECASE
+)
+
+# sql_append values: a non-negative integer, or a comma-separated list of
+# (optionally qualified) identifiers, each optionally followed by ASC/DESC and
+# NULLS FIRST/LAST. No parentheses, quotes or operators.
+_APPEND_ITEM: str = (
+    r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*"
+    r"(\s+(ASC|DESC))?(\s+NULLS\s+(FIRST|LAST))?"
+)
+APPEND_VALUE_PATTERN: re.Pattern = re.compile(
+    rf"^\s*(\d+|{_APPEND_ITEM}(\s*,\s*{_APPEND_ITEM})*)\s*$", re.IGNORECASE
+)
+
 # Sentinel signalling that a selector rule did not fire (distinct from a rule
 # that fires but resolves to an empty base SQL).
 _NO_MATCH: Any = object()
@@ -241,7 +266,9 @@ def build_sql_query_with_tables(
         route_config, query_params, path_params, multi_query_params, cookies, self_params,
         marker
     )
-    sql_query, values = _add_where_fragments(sql_query, values, where_fragments, expand_tables)
+    sql_query, values = _add_where_fragments(
+        sql_query, values, where_fragments, expand_tables, marker
+    )
 
     post_where = _post_where_clauses(
         route_config, branch_appends, query_params, path_params, params, expand_tables, marker
@@ -558,13 +585,10 @@ def process_query_parameters(
                         response_data = _substitute_variables_in_string(response_data, all_params)
                     return (True, response_data, 200, None)
 
-                # Check for action in condition
+                # `action` was never implemented (startup checks refuse it); never
+                # echo request values back for it.
                 if 'action' in condition_config:
-                    try:
-                        action_result = execute_parameter_action(condition_config, all_params)
-                        return (True, action_result, 200, None)
-                    except Exception as e:
-                        return (True, {"error": f"Action execution failed: {str(e)}"}, 500, None)
+                    return (True, {"error": "Query parameter action is not supported"}, 500, None)
 
             # Check for default condition if param_value doesn't match any condition
             elif 'default' in conditional_config:
@@ -749,27 +773,6 @@ def build_append_clause_from_params(
     return append_fragments
 
 
-def execute_parameter_action(action_config: Dict[str, Any], all_params: Dict[str, str]) -> Any:
-    """Execute custom action defined in parameter configuration.
-
-    Args:
-        action_config: Action configuration dictionary.
-        all_params: Combined path and query parameters.
-
-    Returns:
-        Action result (JSON response, string, or other data)
-    """
-    # For now, return a placeholder response
-    # In full implementation, this would dynamically import and execute the specified method
-    action_name = action_config.get('action', 'unknown_action')
-
-    return {
-        "action_executed": action_name,
-        "message": f"Custom action '{action_name}' would be executed here",
-        "parameters": all_params
-    }
-
-
 def validate_required_parameters(
         route_config: Dict[str, Any],
         query_params: Dict[str, str]
@@ -872,11 +875,9 @@ def _substitute_table_references(
     def replace_table_reference(match):
         table_name = match.group(1)
 
-        # Check context: if preceded by FROM or JOIN, use full reference
-        # Otherwise, just use the table name (alias)
-        start_pos = match.start()
-        context_before = sql[max(0, start_pos-20):start_pos].upper()
-        in_from_clause = 'FROM' in context_before or 'JOIN' in context_before
+        # A table source after FROM/JOIN (or a comma in a FROM list); elsewhere
+        # just the table name.
+        in_from_clause = _is_table_source_position(sql[:match.start()])
 
         union = _resolve_union(table_name, database_config, shared_config, context)
         if union is not None:
@@ -1257,14 +1258,22 @@ def _add_where_fragments(
         sql: str,
         values: List[Optional[str]],
         fragments: List[Tuple[str, List[Optional[str]]]],
-        expand_tables: Callable[[str], str]) -> Tuple[str, List[Optional[str]]]:
-    """Join bound WHERE fragments onto the base SQL with AND.
+        expand_tables: Callable[[str], str],
+        marker: str = SQL_MARKER) -> Tuple[str, List[Optional[str]]]:
+    """Add bound WHERE fragments to the base SQL's top-level WHERE condition.
+
+    Each fragment is parenthesized and joined with AND. If the base query has
+    a top-level WHERE (outside strings, comments and parentheses, so not one in
+    a CTE or subquery), its condition is parenthesized and the fragments are
+    ANDed to it; otherwise a WHERE is added. Either way the condition goes
+    before any top-level GROUP BY / HAVING / ORDER BY / LIMIT / OFFSET.
 
     Args:
         sql: Bound base SQL.
         values: Values for the markers in sql.
         fragments: ``(fragment, values)`` pairs from build_where_clause_from_params.
         expand_tables: Expands [[table]] references (see build_sql_query_with_tables).
+        marker: The backend's bound-value marker (to keep values in marker order).
 
     Returns:
         Tuple of the combined SQL and its values in marker order.
@@ -1275,12 +1284,14 @@ def _add_where_fragments(
     if not fragments:
         return sql, values
 
-    joiner = ' AND ' if 'WHERE' in sql.upper() else ' WHERE '
-    clauses = [expand_tables(fragment) for fragment, _ in fragments]
-    combined_values = list(values)
-    for _, fragment_values in fragments:
-        combined_values.extend(fragment_values)
-    return sql + joiner + ' AND '.join(clauses), combined_values
+    condition = ' AND '.join(f"({expand_tables(fragment)})" for fragment, _ in fragments)
+    fragment_values: List[Optional[str]] = []
+    for _, item_values in fragments:
+        fragment_values.extend(item_values)
+
+    sql, tail_markers = _insert_where_condition(sql, condition, marker)
+    split = len(values) - tail_markers
+    return sql, list(values[:split]) + fragment_values + list(values[split:])
 
 
 def _post_where_clauses(
@@ -1451,27 +1462,125 @@ def _substitute_variables_raw(template: str, params: Dict[str, str]) -> str:
     return result
 
 
-def _sanitize_sql_identifier(value: str) -> str:
-    """Sanitize a value for use as a SQL identifier, keyword, or integer.
+def _is_table_source_position(before: str) -> bool:
+    """Whether a [[table]] reference preceded by ``before`` is a table source.
 
-    Allows: alphanumeric, underscores, dots, spaces, commas, and
-    common SQL keywords (ASC, DESC). Rejects anything else to prevent injection.
+    True right after FROM or JOIN (optionally after an opening parenthesis), or
+    after a comma whose nearest preceding clause keyword is FROM.
 
     Args:
-        value: The raw value to sanitize.
+        before: The template text before the reference.
 
     Returns:
-        Sanitized value safe for use in ORDER BY, LIMIT, OFFSET, etc.
+        True for a table source position.
+    """
+    if FROM_CONTEXT_PATTERN.search(before):
+        return True
+    if COMMA_CONTEXT_PATTERN.search(before):
+        keywords = CLAUSE_KEYWORD_PATTERN.findall(before)
+        return bool(keywords) and keywords[-1].upper() == "FROM"
+    return False
+
+
+def _top_level_masks(sql: str) -> Tuple[str, str]:
+    """Mask SQL text so clause keywords can be found by position.
+
+    Args:
+        sql: SQL text.
+
+    Returns:
+        ``(code, top_level)``: both the same length as sql. ``code`` has string
+        literals, quoted identifiers and comments replaced by spaces;
+        ``top_level`` additionally blanks everything inside parentheses.
+    """
+    code, top = list(sql), list(sql)
+    depth, i, n = 0, 0, len(sql)
+    while i < n:
+        char = sql[i]
+        if char in ("'", '"'):
+            j = i + 1
+            while j < n:
+                if sql[j] == char:
+                    if j + 1 < n and sql[j + 1] == char:
+                        j += 2
+                        continue
+                    break
+                j += 1
+            end = min(j + 1, n)
+        elif sql.startswith("--", i):
+            newline = sql.find("\n", i)
+            end = n if newline == -1 else newline
+        elif sql.startswith("/*", i):
+            close = sql.find("*/", i + 2)
+            end = n if close == -1 else close + 2
+        else:
+            if char == "(":
+                depth += 1
+            if depth > 0:
+                top[i] = " "
+            if char == ")":
+                depth = max(depth - 1, 0)
+            i += 1
+            continue
+        for k in range(i, end):
+            code[k] = top[k] = " "
+        i = end
+    return "".join(code), "".join(top)
+
+
+def _insert_where_condition(sql: str, condition: str, marker: str) -> Tuple[str, int]:
+    """Add a condition to a query's top-level WHERE, or add a WHERE.
+
+    Args:
+        sql: The query.
+        condition: Condition to AND in (already parenthesized pieces).
+        marker: The bound-value marker.
+
+    Returns:
+        ``(sql, tail_markers)``: the new SQL and how many markers come after
+        the inserted condition (in the trailing GROUP BY / ORDER BY / ... part),
+        so the caller can put the condition's values before theirs.
+    """
+    code, top = _top_level_masks(sql)
+    upper = top.upper()
+    wheres = list(WHERE_PATTERN.finditer(upper))
+    where = wheres[-1] if wheres else None
+    tail = TAIL_CLAUSE_PATTERN.search(upper, where.end() if where else 0)
+    end = tail.start() if tail else len(sql)
+    rest = sql[end:]
+    tail_markers = code[end:].count(marker)
+
+    if where is not None:
+        existing = sql[where.end():end].strip()
+        head = sql[:where.end()]
+        new_sql = f"{head} ({existing}) AND {condition}" if existing else f"{head} {condition}"
+    else:
+        new_sql = f"{sql[:end].rstrip()} WHERE {condition}"
+    if rest:
+        new_sql += " " + rest.lstrip()
+    return new_sql, tail_markers
+
+
+def _sanitize_sql_identifier(value: str) -> str:
+    """Check a value written into an sql_append fragment (ORDER BY, LIMIT, ...).
+
+    Allowed: a non-negative integer, or a comma-separated list of (optionally
+    qualified) identifiers, each optionally followed by ASC/DESC and NULLS
+    FIRST/LAST (see APPEND_VALUE_PATTERN). Anything else, such as parentheses
+    (function calls, subqueries), quotes, operators or comments, is refused.
+
+    Args:
+        value: The raw value.
+
+    Returns:
+        The value, stripped.
 
     Raises:
-        ValueError: If value contains disallowed characters.
+        ValueError: If the value isn't allowed.
     """
-    import re as _re
-    # Allow alphanumeric, underscores, dots, parens, commas, spaces, single hyphens
-    # Reject double dashes (SQL comment), semicolons, quotes, etc.
-    if '--' in value or not _re.match(r'^[a-zA-Z0-9_.(), \-]+$', value):
+    if not APPEND_VALUE_PATTERN.match(value):
         raise ValueError(f"Invalid sql_append value: {value!r}")
-    return value
+    return value.strip()
 
 
 def _apply_default_values(route_config: Dict[str, Any], params: Dict[str, str]) -> Dict[str, str]:
