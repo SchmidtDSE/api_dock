@@ -101,8 +101,8 @@ file.
 | topic | wiki page |
 |---|---|
 | main config, settings (`timeout`, `base_path`, `duckdb`, ...), multiple configs | [Configuration](https://github.com/SchmidtDSE/api_dock/wiki/Configuration) |
-| versioned remotes and databases, `latest` | [Versioning](https://github.com/SchmidtDSE/api_dock/wiki/Versioning) |
-| remote allow-lists, `restricted` patterns, route mapping | [Routing and Restrictions](https://github.com/SchmidtDSE/api_dock/wiki/Routing-and-Restrictions) |
+| versioned remotes and databases, inline versions, `latest` | [Versioning](https://github.com/SchmidtDSE/api_dock/wiki/Versioning) |
+| remote configs (files or `remotes/config.yaml`), allow-lists, `restricted` patterns, route mapping | [Routing and Restrictions](https://github.com/SchmidtDSE/api_dock/wiki/Routing-and-Restrictions) |
 | cookies, database authentication, encrypted values | [Authentication and Cookies](https://github.com/SchmidtDSE/api_dock/wiki/Authentication-and-Cookies) |
 | tables, `[[table]]` references, routes, startup checks | [SQL Database Support](https://github.com/SchmidtDSE/api_dock/wiki/SQL-Database-Support) |
 | filtering, sorting, pagination, required params | [Query Parameters](https://github.com/SchmidtDSE/api_dock/wiki/Query-Parameters) |
@@ -136,7 +136,8 @@ FastAPI backbone for those. Full reference: [Getting Started](https://github.com
 ## How it works (in brief)
 
 - **Configs.** The main `config.yaml` lists remotes and databases and is read at startup. Remote
-  files, database files and the shared `databases/config.yaml` are read again on each request, so
+  files, database files and the shared `remotes/config.yaml` and `databases/config.yaml` are read
+  again on each request, so
   route edits don't need a restart.
 - **Remotes.** A request is checked against the remote's allow/block lists, then forwarded with
   httpx. The FastAPI app streams the upstream response back.
