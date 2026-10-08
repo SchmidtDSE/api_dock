@@ -225,6 +225,19 @@ class TestStartupShapeCheck:
         with pytest.raises(ValueError, match="ghost_db"):
             RouteMapper(config_path)
 
+    def test_unknown_version_schema_stops_startup(self, tmp_path: Path) -> None:
+        """A version's `schema:` must name a schema in databases/config.yaml."""
+        (tmp_path / "databases").mkdir()
+        (tmp_path / "databases" / "config.yaml").write_text(
+            "database:\n  schema:\n    real: {t: s3://b/t.parquet}\n"
+        )
+        (tmp_path / "databases" / "db.yaml").write_text(
+            "schema: typo\nroutes:\n  - route: r\n    sql: SELECT 1\n"
+        )
+        (tmp_path / "config.yaml").write_text("name: x\ndatabases: [db]\n")
+        with pytest.raises(ValueError, match="schema: 'typo' isn't a schema"):
+            RouteMapper(str(tmp_path / "config.yaml"))
+
     def test_missing_main_config_stops_startup(self, tmp_path: Path) -> None:
         """An explicitly given main config that doesn't exist is an error (not an empty API)."""
         with pytest.raises(ValueError, match="Main config not found"):
