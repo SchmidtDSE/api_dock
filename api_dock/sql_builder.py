@@ -773,38 +773,6 @@ def build_append_clause_from_params(
     return append_fragments
 
 
-def validate_required_parameters(
-        route_config: Dict[str, Any],
-        query_params: Dict[str, str]
-) -> Optional[Tuple[Any, int]]:
-    """Validate required parameters and return error if missing.
-
-    Args:
-        route_config: Route configuration dictionary.
-        query_params: Dictionary of query parameters from URL.
-
-    Returns:
-        None if all required params present, otherwise (error_response, status_code)
-    """
-    query_param_configs = route_config.get('query_params', [])
-
-    for param_item in query_param_configs:
-        if not isinstance(param_item, dict) or len(param_item) != 1:
-            continue
-
-        param_name, param_config = next(iter(param_item.items()))
-
-        if param_config.get('required', False) and param_name not in query_params:
-            if 'missing_response' in param_config:
-                missing_response = param_config['missing_response']
-                status_code = missing_response.get('http_status', 400)
-                return (missing_response, status_code)
-            else:
-                return ({"error": f"Required parameter '{param_name}' is missing"}, 400)
-
-    return None
-
-
 def extract_path_parameters(path: str, pattern: str) -> Dict[str, str]:
     """Extract parameters from a path using a route pattern.
 
