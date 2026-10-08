@@ -11,10 +11,12 @@ License: BSD 3-Clause
 #
 # IMPORTS
 #
+import json
+import os
 import socket
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import click
 import uvicorn
@@ -25,6 +27,7 @@ from api_dock.config_discovery import find_config, init_config
 from api_dock.database_config import load_database_config
 from api_dock.fast_api import create_app as create_fastapi_app
 from api_dock.flask_api import create_app as create_flask_app
+from api_dock.lookups import load_lookup_specs, LookupContext, run_lookup
 from api_dock.sql_builder import build_sql_query
 
 
@@ -35,6 +38,8 @@ DEFAULT_HOST: str = "0.0.0.0"
 DEFAULT_PORT: int = 8000
 DEFAULT_BACKBONE: str = "fastapi"
 MAX_PORT_RETRIES: int = 4
+DEFAULT_LOOKUP_ROWS: int = 5
+ADMIN_TOKEN_ENV: str = "API_DOCK_ADMIN_TOKEN"
 
 
 #
@@ -417,6 +422,79 @@ def decrypt(ciphertext: str, method: str, key_id: Optional[str], region: str, ke
         sys.exit(1)
 
 
+@cli.command()
+@click.argument("config_name", required=False)
+@click.option("--name", "names", multiple=True, help="Lookup to run or refresh (repeatable)")
+@click.option("--rows", "max_rows", default=DEFAULT_LOOKUP_ROWS, show_default=True,
+              help="Rows to print per lookup (local runs)")
+@click.option("--url", help="Endpoint of a running server (settings.lookups.refresh_route), "
+                            "e.g. http://localhost:8000/admin/lookups")
+@click.option("--token", envvar=ADMIN_TOKEN_ENV,
+              help=f"Endpoint token (default: ${ADMIN_TOKEN_ENV})")
+@click.option("--refresh", is_flag=True, help="With --url: refresh lookups on the server")
+def lookups(config_name: Optional[str], names: Tuple[str, ...], max_rows: int,
+            url: Optional[str], token: Optional[str], refresh: bool) -> None:
+    """Run lookups locally, or show/refresh them on a running server.
+
+    CONFIG_NAME: Optional config name (default: config.yaml)
+
+    Without --url, runs each lookup in the config and prints its first rows,
+    which is handy for checking a lookup before starting the server. With
+    --url, shows the server's lookup status, or refreshes them with --refresh.
+
+    \b
+    Examples:
+      api-dock lookups                          # run every lookup locally
+      api-dock lookups --name model_runs --rows 20
+      api-dock lookups --url http://localhost:8000/admin/lookups
+      api-dock lookups --url http://localhost:8000/admin/lookups --refresh --name model_runs
+    """
+    if url:
+        sys.exit(_server_lookups(url, token, refresh, list(names)))
+    if refresh:
+        click.echo("Error: --refresh needs --url (local runs always run the lookups)", err=True)
+        sys.exit(2)
+
+    config_path = find_config(config_name)
+    if config_path is None:
+        click.echo(f"Error: Configuration '{config_name or 'config'}' not found", err=True)
+        sys.exit(1)
+    config_dir = os.path.dirname(config_path)
+    try:
+        specs = load_lookup_specs(config_dir)
+        main_config = load_main_config(config_path)
+    except (ValueError, yaml.YAMLError) as error:
+        click.echo(f"Error: {error}", err=True)
+        sys.exit(1)
+    unknown = [name for name in names if name not in specs]
+    if unknown:
+        click.echo(f"Error: unknown lookup(s): {', '.join(unknown)}", err=True)
+        sys.exit(1)
+    if not specs:
+        click.echo("No lookups defined.")
+        return
+
+    context = LookupContext(
+        config_dir, main_config, (main_config.get("settings") or {}).get("duckdb")
+    )
+    failed = False
+    for name in names or specs:
+        spec = specs[name]
+        click.echo(f"== {name} ({spec.kind}, {spec.source})")
+        try:
+            rows = run_lookup(spec, context)
+        except Exception as error:
+            failed = True
+            click.echo(f"   failed: {error}", err=True)
+            continue
+        click.echo(f"   {len(rows)} row(s)")
+        for row in rows[:max_rows]:
+            click.echo("   " + json.dumps(row, default=str))
+        if len(rows) > max_rows:
+            click.echo(f"   ... {len(rows) - max_rows} more")
+    sys.exit(1 if failed else 0)
+
+
 def main() -> None:
     """Main CLI entry point."""
     cli()
@@ -425,6 +503,38 @@ def main() -> None:
 #
 # INTERNAL
 #
+def _server_lookups(url: str, token: Optional[str], refresh: bool, names: list) -> int:
+    """Show or refresh lookups on a running server.
+
+    Args:
+        url: The server's lookup endpoint.
+        token: Bearer token.
+        refresh: POST (refresh) instead of GET (status).
+        names: Lookups to refresh (empty: all).
+
+    Returns:
+        Exit code: 0 on success, 1 otherwise.
+    """
+    import httpx
+
+    if not token:
+        click.echo(f"Error: --token (or ${ADMIN_TOKEN_ENV}) is required with --url", err=True)
+        return 1
+    try:
+        response = httpx.request(
+            "POST" if refresh else "GET", url, params=[("name", name) for name in names],
+            headers={"Authorization": f"Bearer {token}"}, timeout=None if refresh else 30,
+        )
+    except httpx.HTTPError as error:
+        click.echo(f"Error: {error}", err=True)
+        return 1
+    try:
+        click.echo(json.dumps(response.json(), indent=2))
+    except ValueError:
+        click.echo(response.text)
+    return 0 if response.status_code < 400 else 1
+
+
 def _find_available_port(start_port: int, host: str, max_retries: int = MAX_PORT_RETRIES) -> Optional[int]:
     """Find an available port starting from start_port.
 
