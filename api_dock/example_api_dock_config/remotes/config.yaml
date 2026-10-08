@@ -36,3 +36,14 @@
 #       - version: "0.1"
 #         url: https://beta.api.wolves.example.com
 #         description: Beta
+#       # plus one version per row of the `wolf_deployments` lookup
+#       - from: wolf_deployments
+#         version: "{{row.version}}"
+#         url: "{{row.url}}"
+#
+# lookups:
+#   wolf_deployments:
+#     url: https://deploy.example.com/wolves.json
+#     rows: deployments
+#     refresh: 1d
+#     allow: ["https://"]

@@ -17,6 +17,7 @@ import ipaddress
 import json
 import logging
 import os
+import threading
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
@@ -30,6 +31,13 @@ from api_dock.config import DEFAULT_CONFIG_DIR, filter_cookies_by_config, filter
 from api_dock.database_config import apply_shared_definitions, check_database_config, check_table_definitions, find_database_route, get_database_versions, get_local_table_references, get_schema_sources, is_versioned_database, load_database_config, load_shared_config, merge_query_params, resolve_latest_database_version, SCHEMA_GROUPS_KEY, SHARED_CONFIG_KEY, SHARED_CONNECTIONS_KEY
 from api_dock.database_backends import DatabaseLifecycleError, DatabaseUnavailableError, DUCKDB_SETTINGS_KEY, DuckDBBackend
 from api_dock.listings import build_listing, resolve_listing_specs
+from api_dock.lookups import (
+    check_endpoint_token,
+    get_store,
+    load_lookup_specs,
+    LookupContext,
+    parse_lookup_settings,
+)
 from api_dock.sql_builder import build_sql_query_with_tables, check_table_references, route_engine, route_tables, extract_path_parameters, process_query_parameters, SOURCE_COLUMNS_KEY, SqlSelectionError
 from api_dock.types import PreparedRequest, ProxyResponse, SqlContext
 
@@ -38,6 +46,13 @@ from api_dock.types import PreparedRequest, ProxyResponse, SqlContext
 # CONSTANTS
 #
 DEFAULT_VERSION: str = "latest"
+
+# settings.lookups: the manual refresh endpoint.
+LOOKUP_SETTINGS_KEY: str = "lookups"
+
+# Bounds on how long the background refresh sleeps between checks (seconds).
+MIN_REFRESH_WAIT: float = 1.0
+MAX_REFRESH_WAIT: float = 3600.0
 
 logger = logging.getLogger(__name__)
 
@@ -182,42 +197,42 @@ class RouteMapper:
             self.config = {"name": "api-dock", "description": "API Dock wrapper", "authors": []}
 
         self.config_dir = os.path.dirname(config_path) if config_path else DEFAULT_CONFIG_DIR
-        self.remote_names = get_remote_names(self.config, self.config_dir)
-        _check_inline_remotes(self.remote_names, self.config_dir)
-        self.database_names = get_database_names(self.config)
         self.settings = get_settings(self.config)
+        self.lookup_endpoint = parse_lookup_settings(self.settings.get(LOOKUP_SETTINGS_KEY))
+        self._start_lookups()
+        self.remote_names, self.database_names = self._check_configs()
         self.listing_specs, self.listing_warnings = resolve_listing_specs(
             self.config, self.config_dir
         )
         self.base_path = normalize_base_path(self.settings.get(BASE_PATH_KEY))
-        try:
-            shared_file = load_shared_config(self.config_dir)
-        except (ValueError, yaml.YAMLError) as error:
-            raise ValueError(f"Shared database config (databases/config.yaml): {error}") from error
-        for database_name in self.database_names:
-            _check_database(database_name, self.config, self.config_dir, shared_file)
+        shared_file = load_shared_config(self.config_dir)
 
         # PostgreSQL connections are fixed at startup; their pools open in start().
         self.connections: Dict[str, Any] = (
             shared_file.get(SHARED_CONFIG_KEY, {}).get(SHARED_CONNECTIONS_KEY) or {}
         )
         self._postgres: Any = None
+        self._refresh_task: Optional[asyncio.Task] = None
+        self._refresh_thread: Optional[threading.Thread] = None
         self.duckdb_backend = DuckDBBackend(
             self.settings.get(DUCKDB_SETTINGS_KEY), self.connections
         )
 
     async def start(self) -> None:
-        """Open a connection pool for each PostgreSQL connection.
+        """Open PostgreSQL connection pools and start refreshing lookups.
 
-        Needed only when ``database.connections`` is configured; the FastAPI app
-        calls it (and aclose) in its lifespan. Use the mapper on the event loop
-        that started it.
+        Pools are opened for each ``database.connections`` entry; lookups with a
+        ``refresh`` interval are re-run in the background. The FastAPI app calls
+        this (and aclose) in its lifespan. Use the mapper on the event loop that
+        started it.
 
         Raises:
             RuntimeError: If the PostgreSQL packages aren't installed.
             ValueError: If a connection's settings are invalid (e.g. an unset
                 ``env:`` variable).
         """
+        if self._refresh_task is None and self.lookups.seconds_until_due() is not None:
+            self._refresh_task = asyncio.create_task(self._refresh_lookups_forever())
         if not self.connections or self._postgres is not None:
             return
         try:
@@ -232,9 +247,154 @@ class RouteMapper:
         self._postgres = pools
 
     async def aclose(self) -> None:
-        """Close the PostgreSQL connection pools (if any). Safe to call more than once."""
+        """Stop refreshing lookups and close the PostgreSQL pools. Safe to call more than once."""
+        task = getattr(self, "_refresh_task", None)
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._refresh_task = None
         if self._postgres is not None:
             await self._postgres.aclose()
+
+    def refresh_lookups(self, names: Optional[List[str]] = None) -> Dict[str, Any]:
+        """Run lookups now and keep their rows if the config they produce is valid.
+
+        The new rows are checked with the startup checks first; if they fail,
+        every lookup keeps its previous rows (see LookupStore.run). Blocks while
+        lookups run, so call it from a worker thread in async code.
+
+        Args:
+            names: Lookups to run (default: all).
+
+        Returns:
+            The run report: refreshed, failed, rejected and skipped.
+
+        Raises:
+            ValueError: If a name isn't a defined lookup.
+        """
+        report = self.lookups.run(names, validate=self._check_configs)
+        if report["refreshed"]:
+            self.remote_names = get_remote_names(self.config, self.config_dir)
+            self.database_names = get_database_names(self.config, self.config_dir)
+        return report
+
+    def refresh_due_lookups(self) -> Optional[Dict[str, Any]]:
+        """Refresh the lookups whose ``refresh`` interval has passed.
+
+        Returns:
+            The run report, or None if none was due.
+        """
+        due = self.lookups.due()
+        return self.refresh_lookups(due) if due else None
+
+    def refresh_due_lookups_in_background(self) -> None:
+        """Start refreshing due lookups in a thread (for servers without a lifespan, e.g. Flask).
+
+        Does nothing if none is due or a refresh thread is already running.
+        """
+        thread = getattr(self, "_refresh_thread", None)
+        lookups = getattr(self, "lookups", None)
+        if lookups is None or (thread is not None and thread.is_alive()) or not lookups.due():
+            return
+        self._refresh_thread = threading.Thread(
+            target=self._refresh_quietly, name="api-dock-lookups", daemon=True
+        )
+        self._refresh_thread.start()
+
+    def lookup_endpoint_response(
+            self,
+            method: str,
+            authorization: Optional[str],
+            names: Optional[List[str]] = None) -> ProxyResponse:
+        """Handle a request to the ``settings.lookups.refresh_route`` endpoint.
+
+        GET returns each lookup's status; POST refreshes lookups (all, or the
+        given names) and returns the report with the new status. Requests need
+        ``Authorization: Bearer <token>``. Blocks during a refresh.
+
+        Args:
+            method: HTTP method.
+            authorization: The Authorization header, or None.
+            names: Lookups to refresh (POST), or None for all.
+
+        Returns:
+            ProxyResponse: 200 with JSON, 401 without the right token, 404 for
+            an unknown lookup, 405 for other methods.
+        """
+        if self.lookup_endpoint is None:
+            return _error_response(404, "Not found")
+        if not check_endpoint_token(authorization, self.lookup_endpoint.token):
+            return _error_response(401, "Unauthorized")
+        method = method.upper()
+        if method == "GET":
+            return _json_response({"lookups": self.lookups.status()})
+        if method != "POST":
+            return _error_response(405, "Method not allowed")
+        try:
+            report = self.refresh_lookups(names or None)
+        except ValueError as error:
+            return _error_response(404, str(error))
+        return _json_response({**report, "lookups": self.lookups.status()})
+
+    def _start_lookups(self) -> None:
+        """Load lookup definitions and run every lookup once (at startup).
+
+        Raises:
+            ValueError: If a lookup definition is invalid or a ``required``
+                lookup fails.
+        """
+        specs = load_lookup_specs(self.config_dir)
+        self.lookups = get_store(self.config_dir)
+        self.lookups.configure(specs, LookupContext(
+            self.config_dir, self.config, self.settings.get(DUCKDB_SETTINGS_KEY)
+        ))
+        if not specs:
+            return
+        report = self.lookups.run()
+        for name, message in report["failed"].items():
+            if specs[name].required:
+                raise ValueError(f"Required lookup '{name}' failed: {message}")
+            logger.warning("Lookup '%s' failed at startup; starting without its rows: %s",
+                           name, message)
+
+    def _check_configs(self) -> Tuple[List[str], List[str]]:
+        """Check every served remote and database config (the startup checks).
+
+        Returns:
+            (remote names, database names) as served.
+
+        Raises:
+            ValueError: If a config fails a check.
+        """
+        remote_names = get_remote_names(self.config, self.config_dir)
+        _check_inline_remotes(remote_names, self.config_dir)
+        try:
+            database_names = get_database_names(self.config, self.config_dir)
+            shared_file = load_shared_config(self.config_dir)
+        except (ValueError, yaml.YAMLError) as error:
+            raise ValueError(f"Shared database config (databases/config.yaml): {error}") from error
+        for database_name in database_names:
+            _check_database(database_name, self.config, self.config_dir, shared_file)
+        return remote_names, database_names
+
+    async def _refresh_lookups_forever(self) -> None:
+        """Refresh lookups as they come due, until cancelled."""
+        while True:
+            wait = self.lookups.seconds_until_due()
+            if wait is None:
+                return
+            await asyncio.sleep(min(max(wait, MIN_REFRESH_WAIT), MAX_REFRESH_WAIT))
+            await asyncio.to_thread(self._refresh_quietly)
+
+    def _refresh_quietly(self) -> None:
+        """Refresh due lookups, logging instead of raising."""
+        try:
+            self.refresh_due_lookups()
+        except Exception:
+            logger.exception("Refreshing lookups failed")
 
     def get_config_metadata(self) -> Dict[str, Any]:
         """Get API metadata from configuration.

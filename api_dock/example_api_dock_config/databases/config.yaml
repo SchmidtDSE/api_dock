@@ -64,6 +64,31 @@
 #         description: Items v2
 #         schema: items_v2
 #
+#   # one database/version per row of the `item_runs` lookup (below); list them in
+#   # the main config with `databases: [{from: item_runs}]`
+#   - from: item_runs
+#     name: "{{row.name}}"
+#     version: "{{row.version}}"
+#     schema:                       # an inline schema (also works without `from`)
+#       name: "{{row.schema}}"
+#       tables:
+#         items: {uri: "{{row.items_uri}}"}
+#
+# # lookups: queries api_dock runs at startup (and every `refresh`, or on demand);
+# # their rows fill in `from:` entries ({{row.<column>}}) and {{lookup.<name>.<column>}}
+# lookups:
+#   item_runs:
+#     sql: |
+#       SELECT name, version, replace(version, '.', 'p') AS schema, items_uri
+#       FROM [[runs_catalog]] WHERE published
+#     refresh: 7d                   # omit (or false) to run only at startup
+#     allow: ["s3://your-bucket/runs/"]   # URIs filled from rows must start with one of these
+#   # an HTTP lookup: JSON from a remote (its url and cookies) or a url
+#   # deployments:
+#   #   remote: example_remote
+#   #   path: deployments
+#   #   rows: data.items            # where the list is in the JSON
+#
 # # routes and query_params added to EVERY database/version config. A version
 # # config's own route with the same shape (or query param with the same name)
 # # replaces the shared one; its extra routes are kept.

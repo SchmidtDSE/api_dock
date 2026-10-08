@@ -20,6 +20,9 @@ settings:
   #   memory_limit: 700MB
   #   threads: 2
   #   max_concurrent_queries: 2
+  # lookups:                  # Manual lookup refresh endpoint (GET status, POST refresh)
+  #   refresh_route: /admin/lookups
+  #   token: env:API_DOCK_ADMIN_TOKEN   # requests send "Authorization: Bearer <token>"
 
 # Global route restrictions — applied to all remotes unless overridden per-remote.
 # Uncomment to block DELETE on every remote:

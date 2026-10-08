@@ -110,8 +110,56 @@ file.
 | shared tables, schemas, slugs, shared routes | [Shared Database Config](https://github.com/SchmidtDSE/api_dock/wiki/Shared-Database-Config) |
 | unions across schemas (`[[*.table]]`, schema groups) | [Cross-Schema Queries](https://github.com/SchmidtDSE/api_dock/wiki/Cross-Schema-Queries) |
 | PostgreSQL connections, engines, safety | [PostgreSQL](https://github.com/SchmidtDSE/api_dock/wiki/PostgreSQL) |
+| databases, versions and values generated from a query, refreshed on a schedule | [Lookups](https://github.com/SchmidtDSE/api_dock/wiki/Lookups) |
 | `/databases`, `/remotes`, `/sources` listings | [Catalog Endpoints](https://github.com/SchmidtDSE/api_dock/wiki/Catalog-Endpoints) |
 | `RouteMapper` in your own app, production deployment | [Python API and Deployment](https://github.com/SchmidtDSE/api_dock/wiki/Python-API-and-Deployment) |
+
+---
+
+## Example: versions from a catalog (lookups)
+
+When the list of databases/versions lives somewhere else (a table of model runs, a
+deployments API), a lookup turns its rows into config. api_dock runs it at startup, every
+`refresh` and on demand:
+
+```yaml
+# api_dock_config/databases/config.yaml
+database:
+  connections:
+    core: {host: db.example.com, dbname: catalog, user: readonly, password: env:DB_PASSWORD}
+  runs_catalog: {connection: core, table: public.model_runs}   # or {uri: s3://.../runs.parquet}
+
+lookups:
+  model_runs:
+    sql: |
+      SELECT name, version, detections_uri,
+             replace(name, '-', '_') || '_' || replace(version, '.', 'p') AS schema
+      FROM [[runs_catalog]] WHERE published
+    refresh: 7d
+    allow: ["s3://my-bucket/runs/"]        # URIs from rows must start with this
+
+slugs:
+  - from: model_runs                       # one database/version per row
+    name: "{{row.name}}"
+    version: "{{row.version}}"
+    schema:
+      name: "{{row.schema}}"
+      tables:
+        detections: {uri: "{{row.detections_uri}}"}
+```
+
+```yaml
+# api_dock_config/config.yaml
+databases:
+  - from: model_runs                       # serve every database the lookup generates
+settings:
+  lookups:                                 # optional: GET status / POST refresh
+    refresh_route: /admin/lookups
+    token: env:API_DOCK_ADMIN_TOKEN
+```
+
+Lookups can read PostgreSQL tables, Parquet/CSV files or an HTTP API, and can also
+generate remote versions or fill single values. See [Lookups](https://github.com/SchmidtDSE/api_dock/wiki/Lookups).
 
 ---
 
@@ -126,6 +174,7 @@ api-dock describe [config_name]             # print the config
 api-dock generate-key                       # local encryption key
 api-dock encrypt "secret"                   # also --method env_key|aws_kms
 api-dock decrypt "gAAAAA..."
+api-dock lookups                            # run the config's lookups and print their rows
 ```
 
 Flask responses are buffered and Flask refuses configs with PostgreSQL connections; use the default
@@ -146,6 +195,8 @@ FastAPI backbone for those. Full reference: [Getting Started](https://github.com
 - **Engines.** A route whose tables are all on one PostgreSQL connection runs natively through
   that connection's pool. Anything else runs on an in-memory DuckDB in a worker thread, with
   PostgreSQL attached read-only when needed.
+- **Lookups.** Named queries (SQL over the configured tables, or an HTTP API) run at startup
+  and on a schedule; `from:` entries turn their rows into database versions or remote versions.
 - **Startup checks.** Every database and version is checked as requests will see it (table
   references, quoted variables, unions, connections, engines); a bad config stops startup with a
   message naming the database, version and route.
@@ -161,6 +212,7 @@ api_dock/                   the package
   route_mapper.py           RouteMapper: request handling, startup checks, PostgreSQL lifecycle
   fast_api.py, flask_api.py the two app backbones
   database_config.py        database configs, shared config, versions and slugs
+  lookups.py                lookups: templates, SQL/HTTP runners, refresh
   sql_builder.py            SQL building, table references, unions, engine choice
   database_backends.py      DuckDB backend    postgres_backend.py, postgres_config.py   PostgreSQL
   storage_auth.py, auth.py, encryption.py, listings.py, sql_template_check.py, types.py
