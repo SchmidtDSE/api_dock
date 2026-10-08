@@ -245,57 +245,6 @@ def generated_database_names(lookup_name: str, config_dir: Optional[str] = None)
     return list((load_shared_config(config_dir).get(GENERATED_KEY) or {}).get(lookup_name, []))
 
 
-def get_table_definition(table_name: str, database_config: Dict[str, Any]) -> Optional[str]:
-    """Get the file path for a table from database configuration.
-
-    Supports both string URIs and dict-based definitions:
-    - String format: "table_name: s3://bucket/file.parquet"
-    - Dict format: "table_name: {uri: s3://bucket/file.parquet, region: us-east-2}"
-
-    Args:
-        table_name: Name of the table.
-        database_config: Database configuration dictionary.
-
-    Returns:
-        File path/URI for the table, or None if not found.
-    """
-    tables = database_config.get("tables", {})
-    table_def = tables.get(table_name)
-
-    # Handle both string and dict formats
-    if isinstance(table_def, str):
-        return table_def
-    elif isinstance(table_def, dict):
-        return table_def.get("uri") or table_def.get("path")
-    else:
-        return None
-
-
-def get_table_metadata(table_name: str, database_config: Dict[str, Any]) -> Dict[str, Any]:
-    """Get metadata for a table from database configuration.
-
-    Returns metadata like region, auth headers, etc. if table is defined as a dict.
-
-    Args:
-        table_name: Name of the table.
-        database_config: Database configuration dictionary.
-
-    Returns:
-        Dictionary containing table metadata (empty dict if table is string format).
-        Possible keys: region, auth_headers, method, etc.
-    """
-    tables = database_config.get("tables", {})
-    table_def = tables.get(table_name)
-
-    if isinstance(table_def, dict):
-        # Return all metadata except the URI/path itself
-        metadata = {k: v for k, v in table_def.items() if k not in ['uri', 'path']}
-        return metadata
-    else:
-        # String format has no metadata
-        return {}
-
-
 def load_shared_database_config(config_dir: Optional[str] = None) -> Dict[str, Any]:
     """Load the shared database config (``databases/config.yaml``).
 
@@ -1044,32 +993,6 @@ def check_database_config(
                 )
         except ValueError as error:
             raise ValueError(f"route '{_route_label(route_config, index)}': {error}") from error
-
-
-def load_database_config_with_inheritance(database_filename: str, main_config: Dict[str, Any], config_dir: Optional[str] = None, version: Optional[str] = None) -> Dict[str, Any]:
-    """Load a database configuration file with cookie/authentication inheritance.
-
-    Args:
-        database_filename: Name of the database config file (without .yaml extension).
-        main_config: Main configuration dictionary for inheritance.
-        config_dir: Base config directory. If None, uses default.
-        version: Version string for versioned databases.
-
-    Returns:
-        Dictionary containing database configuration data with inheritance applied.
-
-    Raises:
-        FileNotFoundError: If database config file doesn't exist.
-        yaml.YAMLError: If config file is invalid YAML.
-    """
-    # Load the database config
-    database_config = load_database_config(database_filename, config_dir, version)
-
-    # Apply inheritance from main config
-    from api_dock.config import merge_inherited_config
-    merged_config = merge_inherited_config(database_config, main_config)
-
-    return merged_config
 
 
 #
