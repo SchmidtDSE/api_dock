@@ -78,6 +78,7 @@ def http_server() -> Iterator[Any]:
     class State:
         body: Any = []
         status: int = 200
+        headers: List[Any] = []        # extra (name, value) response headers
         requests: List[Dict[str, Any]] = []
         url: str = ""
 
@@ -87,6 +88,8 @@ def http_server() -> Iterator[Any]:
             payload = State.body if isinstance(State.body, str) else json.dumps(State.body)
             self.send_response(State.status)
             self.send_header("Content-Type", "application/json")
+            for name, value in State.headers:
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write(payload.encode())
 
@@ -96,6 +99,7 @@ def http_server() -> Iterator[Any]:
     server = HTTPServer(("127.0.0.1", 0), Handler)
     State.url = f"http://127.0.0.1:{server.server_address[1]}"
     State.requests = []
+    State.headers = []
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
