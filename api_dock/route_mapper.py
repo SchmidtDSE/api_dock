@@ -15,6 +15,7 @@ import asyncio
 import base64
 import ipaddress
 import json
+import logging
 import os
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -25,7 +26,7 @@ import httpx
 import yaml
 
 from api_dock.auth import validate_authentication
-from api_dock.config import DEFAULT_CONFIG_DIR, filter_cookies_by_config, filter_remote_query_params, find_remote_config, find_route_mapping, get_authentication_config, get_database_names, get_remote_names, get_remote_versions, get_settings, is_route_allowed, is_versioned_remote, load_main_config, merge_inherited_config, resolve_latest_version
+from api_dock.config import DEFAULT_CONFIG_DIR, filter_cookies_by_config, filter_remote_query_params, find_remote_config, find_route_mapping, get_authentication_config, get_database_names, get_inline_remote_configs, get_remote_names, get_remote_versions, get_settings, is_route_allowed, is_versioned_remote, load_main_config, merge_inherited_config, resolve_latest_version
 from api_dock.database_config import apply_shared_definitions, check_database_config, check_table_definitions, find_database_route, get_database_versions, get_local_table_references, get_schema_sources, is_versioned_database, load_database_config, load_shared_config, merge_query_params, resolve_latest_database_version, SCHEMA_GROUPS_KEY, SHARED_CONFIG_KEY, SHARED_CONNECTIONS_KEY
 from api_dock.database_backends import DatabaseLifecycleError, DatabaseUnavailableError, DUCKDB_SETTINGS_KEY, DuckDBBackend
 from api_dock.listings import build_listing, resolve_listing_specs
@@ -37,6 +38,8 @@ from api_dock.types import PreparedRequest, ProxyResponse, SqlContext
 # CONSTANTS
 #
 DEFAULT_VERSION: str = "latest"
+
+logger = logging.getLogger(__name__)
 
 # Default upstream request timeout in seconds. Override with the `timeout`
 # setting; set it to null/false to disable the timeout entirely.
@@ -180,6 +183,7 @@ class RouteMapper:
 
         self.config_dir = os.path.dirname(config_path) if config_path else DEFAULT_CONFIG_DIR
         self.remote_names = get_remote_names(self.config, self.config_dir)
+        _check_inline_remotes(self.remote_names, self.config_dir)
         self.database_names = get_database_names(self.config)
         self.settings = get_settings(self.config)
         self.listing_specs, self.listing_warnings = resolve_listing_specs(
@@ -801,6 +805,34 @@ class RouteMapper:
 #
 # INTERNAL
 #
+def _check_inline_remotes(remote_names: List[str], config_dir: str) -> None:
+    """Check ``remotes/config.yaml`` at startup.
+
+    Args:
+        remote_names: Remote names listed in the main config.
+        config_dir: Base config directory.
+
+    Raises:
+        ValueError: If the file is malformed or a listed remote's entry has no
+            ``url``.
+    """
+    try:
+        inline = get_inline_remote_configs(config_dir)
+    except (ValueError, yaml.YAMLError) as error:
+        raise ValueError(f"Shared remote config (remotes/config.yaml): {error}") from error
+    for name, versions in inline.items():
+        if name not in remote_names:
+            logger.warning(
+                "remotes/config.yaml defines '%s', which isn't listed in the main config's "
+                "remotes, so it isn't served", name
+            )
+            continue
+        for version, remote_config in versions.items():
+            if not remote_config.get("url"):
+                label = name if version is None else f"{name} version {version}"
+                raise ValueError(f"remotes/config.yaml: '{label}' has no url")
+
+
 def _check_database(
         database_name: str,
         main_config: Dict[str, Any],
