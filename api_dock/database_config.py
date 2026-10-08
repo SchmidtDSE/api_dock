@@ -1096,8 +1096,8 @@ def _validate_query_param(param_item: Any) -> None:
         )
     if 'conditional' in param_config:
         _validate_conditional(param_name, param_config['conditional'])
-    if 'action' in param_config and not isinstance(param_config['action'], (str, dict)):
-        raise ValueError(f"query param '{param_name}' action must be a string or mapping")
+    if 'action' in param_config:
+        raise ValueError(f"query param '{param_name}': `action` isn't implemented; remove it")
     missing_response = param_config.get('missing_response', {})
     if not isinstance(missing_response, dict):
         raise ValueError(f"query param '{param_name}' missing_response must be a mapping")
@@ -1116,6 +1116,11 @@ def _validate_conditional(param_name: str, conditional: Any) -> None:
     if not isinstance(conditional, dict):
         raise ValueError(f"query param '{param_name}' conditional must be a mapping")
     for condition_key, condition_config in conditional.items():
+        if isinstance(condition_config, dict) and 'action' in condition_config:
+            raise ValueError(
+                f"query param '{param_name}' conditional '{condition_key}': `action` isn't "
+                "implemented; use `sql` or `response`"
+            )
         if not isinstance(condition_config, dict) or not any(
                 key in condition_config for key in CONDITION_KEYS):
             raise ValueError(
