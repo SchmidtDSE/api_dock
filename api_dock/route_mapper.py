@@ -21,6 +21,7 @@ import threading
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+from urllib.parse import parse_qsl
 from uuid import UUID
 
 import httpx
@@ -46,6 +47,10 @@ from api_dock.types import PreparedRequest, ProxyResponse, SqlContext
 # CONSTANTS
 #
 DEFAULT_VERSION: str = "latest"
+
+# Upstream Set-Cookie headers are kept apart (one value per cookie), since a
+# headers dict would merge several into one.
+SET_COOKIE_HEADER: str = "set-cookie"
 
 # settings.lookups: the manual refresh endpoint.
 LOOKUP_SETTINGS_KEY: str = "lookups"
@@ -192,12 +197,11 @@ class RouteMapper:
             config_path: Path to main config file. If None, uses default.
 
         Raises:
-            ValueError: If a listed database config is missing or fails a check.
+            ValueError: If the main config can't be read (a missing file passed
+                explicitly, invalid YAML, not a mapping), or a listed database
+                config is missing or fails a check.
         """
-        try:
-            self.config = load_main_config(config_path)
-        except (FileNotFoundError, Exception):
-            self.config = {"name": "api-dock", "description": "API Dock wrapper", "authors": []}
+        self.config = _load_main_config_or_raise(config_path)
 
         self.config_dir = os.path.dirname(config_path) if config_path else DEFAULT_CONFIG_DIR
         self.settings = get_settings(self.config)
@@ -535,6 +539,13 @@ class RouteMapper:
         full_pattern = f"{remote_name}/{actual_path}"
         mapped_route = find_route_mapping(full_pattern, method, remote_config, remote_name, cookies)
         final_path = mapped_route if mapped_route is not None else actual_path
+        # A query string in a mapped remote_route is sent as query params
+        # (before the forwarded ones), and the trailing slash goes on the path.
+        final_path, _, mapped_query = final_path.partition("?")
+        if mapped_query:
+            filtered_query_params = _merge_query_params(
+                parse_qsl(mapped_query, keep_blank_values=True), filtered_query_params
+            )
 
         if final_path:
             if self.settings.get("add_trailing_slash", True):
@@ -633,19 +644,26 @@ class RouteMapper:
                 )
 
                 content_type = response.headers.get("content-type", "application/octet-stream")
-                forwarded_headers = _filter_response_headers(dict(response.headers))
+                forwarded_headers = {
+                    key: value for key, value in _filter_response_headers(
+                        dict(response.headers)
+                    ).items() if key.lower() != SET_COOKIE_HEADER
+                }
 
                 return ProxyResponse(
                     status_code=response.status_code,
                     content=response.content,
                     content_type=content_type,
                     headers=forwarded_headers,
+                    set_cookies=response.headers.get_list(SET_COOKIE_HEADER),
                 )
 
-            except httpx.RequestError as e:
-                return _error_response(502, f"Error connecting to remote API: {str(e)}")
-            except Exception as e:
-                return _error_response(500, f"Internal server error: {str(e)}")
+            except httpx.RequestError as error:
+                logger.warning("Error connecting to %s: %s", prepared.url, error)
+                return _error_response(502, "Error connecting to remote API")
+            except Exception:
+                logger.exception("Proxying to %s failed", prepared.url)
+                return _error_response(500, "Internal server error")
 
     async def map_database_route(
             self,
@@ -897,21 +915,23 @@ class RouteMapper:
         Returns:
             ProxyResponse — same contract as map_route.
         """
-        import asyncio
-
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            result = loop.run_until_complete(
-                self.map_route(
-                    remote_name, path, method, headers, body, query_params, cookies,
-                    multi_query_params
-                )
-            )
-            loop.close()
-            return result
-        except Exception as e:
-            return _error_response(500, f"Sync wrapper error: {str(e)}")
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            logger.error("map_route_sync was called from a running event loop; "
+                         "use `await map_route(...)` there")
+            return _error_response(500, "Internal server error")
+        try:
+            # asyncio.run creates and always closes its own loop.
+            return asyncio.run(self.map_route(
+                remote_name, path, method, headers, body, query_params, cookies,
+                multi_query_params
+            ))
+        except Exception:
+            logger.exception("map_route_sync failed")
+            return _error_response(500, "Internal server error")
 
     def _backend(self, connection: Optional[str]) -> Any:
         """The backend a route runs on: DuckDB, or a PostgreSQL connection's pool.
@@ -972,6 +992,37 @@ class RouteMapper:
 #
 # INTERNAL
 #
+def _load_main_config_or_raise(config_path: Optional[str]) -> Dict[str, Any]:
+    """Load the main config, failing loudly instead of serving an empty API.
+
+    Args:
+        config_path: Path to the main config, or None for the default.
+
+    Returns:
+        The main config. Without a path and without a default config file, a
+        minimal config (no remotes or databases) is used and a warning logged.
+
+    Raises:
+        ValueError: If an explicitly given file is missing, or the file isn't
+            valid YAML or isn't a mapping.
+    """
+    label = config_path or os.path.join(DEFAULT_CONFIG_DIR, "config.yaml")
+    try:
+        config = load_main_config(config_path)
+    except FileNotFoundError as error:
+        if config_path is not None:
+            raise ValueError(f"Main config not found: {config_path}") from error
+        logger.warning("No main config at %s; serving an API with no remotes or databases", label)
+        return {"name": "api-dock", "description": "API Dock wrapper", "authors": []}
+    except yaml.YAMLError as error:
+        raise ValueError(f"Main config {label} isn't valid YAML: {error}") from error
+    if config is None:
+        return {}
+    if not isinstance(config, dict):
+        raise ValueError(f"Main config {label} must be a mapping")
+    return config
+
+
 def _warn_ignored_remote_authentication(
         remote_names: List[str], main_config: Dict[str, Any], config_dir: str) -> None:
     """Warn when an ``authentication`` setting would be ignored by remote routes.
@@ -1108,6 +1159,24 @@ def _check_database(
                     raise ValueError(f"route '{route_name}': {error}") from error
         except ValueError as error:
             raise ValueError(f"{label}, {error}") from error
+
+
+def _merge_query_params(first: List[Tuple[str, str]], params: Dict[str, Any]) -> Dict[str, Any]:
+    """Combine (name, value) pairs with a params mapping; repeated names become lists.
+
+    Args:
+        first: Pairs that come first (e.g. from a mapped route's query string).
+        params: Mapping of name -> value or list of values.
+
+    Returns:
+        Mapping of name -> value, or a list for names with several values.
+    """
+    merged: Dict[str, List[Any]] = {}
+    for name, value in first:
+        merged.setdefault(name, []).append(value)
+    for name, value in (params or {}).items():
+        merged.setdefault(name, []).extend(value if isinstance(value, list) else [value])
+    return {name: values[0] if len(values) == 1 else values for name, values in merged.items()}
 
 
 def _cookie_header(cookies: Dict[str, str]) -> str:
