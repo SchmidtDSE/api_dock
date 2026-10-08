@@ -28,7 +28,7 @@ import httpx
 import yaml
 
 from api_dock.auth import validate_authentication
-from api_dock.config import DEFAULT_CONFIG_DIR, filter_cookies_by_config, filter_remote_query_params, find_remote_config, find_route_mapping, get_authentication_config, get_database_names, get_inline_remote_configs, get_remote_names, get_remote_versions, get_settings, is_route_allowed, is_versioned_remote, load_main_config, merge_inherited_config, resolve_latest_version
+from api_dock.config import DEFAULT_CONFIG_DIR, filter_cookies_by_config, filter_remote_query_params, find_remote_config, find_route_mapping, get_authentication_config, get_database_names, get_inline_remote_configs, get_remote_names, get_remote_versions, get_settings, is_versioned_remote, load_main_config, merge_inherited_config, resolve_latest_version, route_allowed_by_config
 from api_dock.database_config import apply_shared_definitions, check_database_config, check_table_definitions, find_database_route, get_database_versions, get_local_table_references, get_schema_sources, is_versioned_database, load_database_config, load_shared_config, merge_query_params, resolve_latest_database_version, DATABASE_SCHEMA_KEY, SCHEMA_GROUPS_KEY, SHARED_CONFIG_KEY, SHARED_CONNECTIONS_KEY, SHARED_SCHEMA_KEY
 from api_dock.database_backends import DatabaseLifecycleError, DatabaseUnavailableError, DUCKDB_SETTINGS_KEY, DuckDBBackend
 from api_dock.listings import build_listing, resolve_listing_specs
@@ -509,17 +509,16 @@ class RouteMapper:
         if not actual_path:
             actual_path = ""
 
-        allowed = is_route_allowed(
-            actual_path, self.config, remote_name, version, method, self.config_dir
-        )
-        if not allowed:
-            return _error_response(403, f"Route '{actual_path}' not allowed for remote '{remote_name}'")
-
+        # Load the remote's config once; the allow-list check uses it too.
         try:
-            remote_config = find_remote_config(
+            remote_config: Optional[Dict[str, Any]] = find_remote_config(
                 remote_name, self.config, self.config_dir, version=version
             )
         except FileNotFoundError:
+            remote_config = None
+        if not route_allowed_by_config(actual_path, self.config, remote_config, method):
+            return _error_response(403, f"Route '{actual_path}' not allowed for remote '{remote_name}'")
+        if remote_config is None:
             return _error_response(404, f"Configuration for remote '{remote_name}' not found")
 
         remote_url = remote_config.get("url")
