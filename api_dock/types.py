@@ -81,6 +81,8 @@ class ProxyResponse:
         error_message: Set only for api_dock-level errors (e.g. "Remote 'x'
             not found"). None for successfully proxied responses, including
             upstream 4xx/5xx which are passed through as-is.
+        set_cookies: The upstream's Set-Cookie header values, one per cookie
+            (kept out of ``headers``, where several would be merged into one).
     """
 
     status_code: int
@@ -88,6 +90,7 @@ class ProxyResponse:
     content_type: str
     headers: Dict[str, str] = field(default_factory=dict)
     error_message: Optional[str] = None
+    set_cookies: List[str] = field(default_factory=list)
 
 
 @dataclass
