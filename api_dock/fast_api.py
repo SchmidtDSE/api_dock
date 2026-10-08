@@ -351,7 +351,6 @@ async def _stream_upstream(prepared: PreparedRequest) -> Response:
         url=prepared.url,
         headers=prepared.headers,
         params=prepared.params,
-        cookies=prepared.cookies,
         content=prepared.body,
     )
     try:
