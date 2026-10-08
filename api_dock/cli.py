@@ -246,6 +246,7 @@ def describe(config_name: Optional[str]) -> None:
         click.echo()
     click.echo("=" * 60)
 
+
 @cli.command()
 @click.argument("plaintext")
 @click.option("--method", "-m",
