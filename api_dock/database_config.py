@@ -344,7 +344,7 @@ def load_shared_config(config_dir: Optional[str] = None) -> Dict[str, Any]:
     shared_path = os.path.join(config_dir, DATABASES_DIR, SHARED_CONFIG_FILE)
     store = get_store(config_dir)
     return memoized(
-        ("databases", file_key(shared_path), store.generation, id(store)),
+        ("databases", file_key(shared_path), store.generation),
         lambda: _expand_shared_config(load_static_shared_config(config_dir), store, shared_path),
     )
 
