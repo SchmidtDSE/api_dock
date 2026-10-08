@@ -96,6 +96,28 @@ class TestRouteMapping:
         assert prepared.params == {"kind": ["a", "b", "c"], "page": "2"}
 
 
+class TestRemoteFileReads:
+    """A remote request reads that remote's file, not every remote file."""
+
+    def test_one_file_per_request(self, tmp_path: Path, http_server: Any,
+                                  monkeypatch: pytest.MonkeyPatch) -> None:
+        from api_dock import config as config_module
+        for name in ("a", "b", "c", "d"):
+            _write(tmp_path / "remotes" / f"{name}.yaml", {"name": name, "url": http_server.url})
+        _write(tmp_path / "config.yaml", {"name": "t", "remotes": ["a", "b", "c", "d"],
+                                          "settings": {"add_trailing_slash": False}})
+        mapper = RouteMapper(str(tmp_path / "config.yaml"))
+        reads = []
+        real = config_module.load_yaml_file
+
+        def counting(path: str, *args: Any) -> Any:
+            reads.append(Path(path).name)
+            return real(path, *args)
+        monkeypatch.setattr(config_module, "load_yaml_file", counting)
+        assert asyncio.run(mapper.map_route("c", "x", "GET")).status_code == 200
+        assert reads == ["c.yaml"]
+
+
 class TestErrors:
     """Remote failures don't send internal details to clients."""
 
