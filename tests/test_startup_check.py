@@ -225,6 +225,25 @@ class TestStartupShapeCheck:
         with pytest.raises(ValueError, match="ghost_db"):
             RouteMapper(config_path)
 
+    @pytest.mark.parametrize("settings, message", [
+        ("[1, 2]", "settings must be a mapping"),
+        ("{add_trailing_slash: 'yes'}", "add_trailing_slash must be true or false"),
+        ("{follow_redirects: 1}", "follow_redirects must be true or false"),
+        ("{timeout: fast}", "timeout must be a positive number"),
+        ("{timeout: -1}", "timeout must be a positive number"),
+    ])
+    def test_invalid_settings_stop_startup(self, tmp_path: Path, settings: str,
+                                           message: str) -> None:
+        """Bad settings fail at startup, not on a live request."""
+        (tmp_path / "config.yaml").write_text(f"name: x\nsettings: {settings}\n")
+        with pytest.raises(ValueError, match=message):
+            RouteMapper(str(tmp_path / "config.yaml"))
+
+    @pytest.mark.parametrize("timeout", ["null", "false", "30", "2.5"])
+    def test_valid_timeouts(self, tmp_path: Path, timeout: str) -> None:
+        (tmp_path / "config.yaml").write_text(f"name: x\nsettings: {{timeout: {timeout}}}\n")
+        RouteMapper(str(tmp_path / "config.yaml"))
+
     def test_unknown_version_schema_stops_startup(self, tmp_path: Path) -> None:
         """A version's `schema:` must name a schema in databases/config.yaml."""
         (tmp_path / "databases").mkdir()
