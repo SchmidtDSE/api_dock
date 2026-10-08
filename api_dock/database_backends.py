@@ -175,7 +175,6 @@ class DuckDBBackend(DatabaseBackend):
             if self._slots is not None:
                 self._slots.release()
 
-
     def _attach_postgres(self, conn: Any, tables: List[TableReference]) -> None:
         """Attach each PostgreSQL connection the query's tables use, read-only.
 
