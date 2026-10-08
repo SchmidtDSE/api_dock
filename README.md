@@ -116,6 +116,53 @@ file.
 
 ---
 
+## Example: versions from a catalog (lookups)
+
+When the list of databases/versions lives somewhere else (a table of model runs, a
+deployments API), a lookup turns its rows into config. api_dock runs it at startup, every
+`refresh` and on demand:
+
+```yaml
+# api_dock_config/databases/config.yaml
+database:
+  connections:
+    core: {host: db.example.com, dbname: catalog, user: readonly, password: env:DB_PASSWORD}
+  runs_catalog: {connection: core, table: public.model_runs}   # or {uri: s3://.../runs.parquet}
+
+lookups:
+  model_runs:
+    sql: |
+      SELECT name, version, detections_uri,
+             replace(name, '-', '_') || '_' || replace(version, '.', 'p') AS schema
+      FROM [[runs_catalog]] WHERE published
+    refresh: 7d
+    allow: ["s3://my-bucket/runs/"]        # URIs from rows must start with this
+
+slugs:
+  - from: model_runs                       # one database/version per row
+    name: "{{row.name}}"
+    version: "{{row.version}}"
+    schema:
+      name: "{{row.schema}}"
+      tables:
+        detections: {uri: "{{row.detections_uri}}"}
+```
+
+```yaml
+# api_dock_config/config.yaml
+databases:
+  - from: model_runs                       # serve every database the lookup generates
+settings:
+  lookups:                                 # optional: GET status / POST refresh
+    refresh_route: /admin/lookups
+    token: env:API_DOCK_ADMIN_TOKEN
+```
+
+Lookups can read PostgreSQL tables, Parquet/CSV files or an HTTP API, and can also
+generate remote versions or fill single values. See [Lookups](https://github.com/SchmidtDSE/api_dock/wiki/Lookups).
+
+---
+
 ## CLI
 
 ```bash
