@@ -94,6 +94,9 @@ HOP_BY_HOP_HEADERS: frozenset = frozenset({
 EXCLUDED_REQUEST_HEADERS: frozenset = frozenset({
     "connection",
     "content-length",
+    # The client's cookies never pass through as-is: the Cookie header sent
+    # upstream is built from the remote's `cookies` setting (see _cookie_header).
+    "cookie",
     "host",
     "keep-alive",
     "proxy-authorization",
@@ -201,6 +204,7 @@ class RouteMapper:
         self.lookup_endpoint = parse_lookup_settings(self.settings.get(LOOKUP_SETTINGS_KEY))
         self._start_lookups()
         self.remote_names, self.database_names = self._check_configs()
+        _warn_ignored_remote_authentication(self.remote_names, self.config, self.config_dir)
         self.listing_specs, self.listing_warnings = resolve_listing_specs(
             self.config, self.config_dir
         )
@@ -548,10 +552,14 @@ class RouteMapper:
         follow_redirects = self.settings.get("follow_redirects", True)
         timeout = _resolve_timeout(self.settings.get("timeout", DEFAULT_TIMEOUT))
 
+        upstream_headers = _filter_request_headers(headers or {})
+        if filtered_cookies:
+            upstream_headers["Cookie"] = _cookie_header(filtered_cookies)
+
         return PreparedRequest(
             url=full_url,
             method=method,
-            headers=_filter_request_headers(headers or {}),
+            headers=upstream_headers,
             params=filtered_query_params,
             cookies=filtered_cookies,
             body=body,
@@ -622,7 +630,6 @@ class RouteMapper:
                     headers=prepared.headers,
                     content=prepared.body,
                     params=prepared.params,
-                    cookies=prepared.cookies,
                 )
 
                 content_type = response.headers.get("content-type", "application/octet-stream")
@@ -965,6 +972,45 @@ class RouteMapper:
 #
 # INTERNAL
 #
+def _warn_ignored_remote_authentication(
+        remote_names: List[str], main_config: Dict[str, Any], config_dir: str) -> None:
+    """Warn when an ``authentication`` setting would be ignored by remote routes.
+
+    Remote routes aren't gated by api_dock: the upstream API checks credentials
+    (the client's cookies reach it through the remote's ``cookies`` setting).
+    An ``authentication`` block in a remote's config, or in the main config
+    while remotes are served, is easy to mistake for protection, so it is
+    logged once at startup.
+
+    Args:
+        remote_names: Served remote names.
+        main_config: The main config.
+        config_dir: Base config directory.
+    """
+    if main_config.get("authentication") and remote_names:
+        logger.warning(
+            "The main config's `authentication` applies to database routes only; remote "
+            "routes (%s) aren't checked by api_dock (the upstream API must check credentials)",
+            ", ".join(remote_names),
+        )
+    for name in remote_names:
+        try:
+            versions: List[Optional[str]] = (
+                list(get_remote_versions(name, main_config, config_dir))
+                if is_versioned_remote(name, main_config, config_dir) else [None]
+            )
+            for version in versions:
+                remote_config = find_remote_config(name, main_config, config_dir, version=version)
+                if isinstance(remote_config, dict) and remote_config.get("authentication"):
+                    label = name if version is None else f"{name} version {version}"
+                    logger.warning(
+                        "Remote '%s' has an `authentication` setting, which api_dock doesn't "
+                        "apply to remote routes (the upstream API must check credentials)", label
+                    )
+        except (FileNotFoundError, ValueError, yaml.YAMLError):
+            continue
+
+
 def _check_inline_remotes(remote_names: List[str], config_dir: str) -> None:
     """Check ``remotes/config.yaml`` at startup.
 
@@ -1062,6 +1108,18 @@ def _check_database(
                     raise ValueError(f"route '{route_name}': {error}") from error
         except ValueError as error:
             raise ValueError(f"{label}, {error}") from error
+
+
+def _cookie_header(cookies: Dict[str, str]) -> str:
+    """Write cookies as a Cookie request header value.
+
+    Args:
+        cookies: Cookie name -> value (already filtered by the remote's config).
+
+    Returns:
+        ``"name1=value1; name2=value2"``.
+    """
+    return "; ".join(f"{name}={value}" for name, value in cookies.items())
 
 
 def _filter_request_headers(headers: Dict[str, str]) -> Dict[str, str]:
