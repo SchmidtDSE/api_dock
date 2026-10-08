@@ -14,7 +14,7 @@ License: BSD 3-Clause
 #
 from typing import Any, Dict, List, Optional, Tuple
 
-from api_dock.config import get_remote_names, get_remote_versions, is_versioned_remote
+from api_dock.config import get_remote_names, get_remote_versions, is_versioned_remote, versions_equal
 from api_dock.database_config import (
     get_database_names,
     get_database_versions,
@@ -340,26 +340,4 @@ def _version_selected(stem: str, allowed: List[Any]) -> bool:
     Returns:
         True if the stem matches any allowed spec.
     """
-    return any(_version_equal(stem, spec) for spec in allowed)
-
-
-def _version_equal(stem: str, spec: Any) -> bool:
-    """Compare a version stem to a config spec, tolerating int/float forms.
-
-    So a stem "4.0" matches a YAML value of 4.0, 4, or "4.0".
-
-    Args:
-        stem: The filesystem version stem.
-        spec: The configured version value.
-
-    Returns:
-        True if they represent the same version.
-    """
-    stem_str = str(stem).strip()
-    spec_str = str(spec).strip()
-    if stem_str == spec_str:
-        return True
-    try:
-        return float(stem_str) == float(spec_str)
-    except ValueError:
-        return False
+    return any(versions_equal(stem, spec) for spec in allowed)
