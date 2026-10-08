@@ -47,7 +47,7 @@ class TestBuildSqlQueryValues:
             route, DATABASE_CONFIG, {"group_id": "42"}, {"weight": "0 OR true"}
         )
         assert sql == (
-            f"SELECT * FROM {TABLE_SQL} WHERE d.group_id = ? AND d.weight >= ?"
+            f"SELECT * FROM {TABLE_SQL} WHERE (d.group_id = ?) AND (d.weight >= ?)"
         )
         assert values == ["42", "0 OR true"]
 
@@ -71,7 +71,7 @@ class TestBuildSqlQueryValues:
         sql, values = build_sql_query(
             route, DATABASE_CONFIG, {}, {"a": "A", "b": "B"}, {"user_id": "alice"}
         )
-        assert sql == f"SELECT * FROM {TABLE_SQL} WHERE user_id = ? AND b = ? AND a = ?"
+        assert sql == f"SELECT * FROM {TABLE_SQL} WHERE (user_id = ?) AND (b = ?) AND (a = ?)"
         assert values == ["alice", "B", "A"]
 
     def test_value_is_not_scanned_for_variables(self) -> None:
@@ -86,7 +86,7 @@ class TestBuildSqlQueryValues:
             {"name": "{{cookies.session_token}}", "token": "1"},
             {"session_token": "secret"},
         )
-        assert sql == f"SELECT * FROM {TABLE_SQL} WHERE name = ? AND token = ?"
+        assert sql == f"SELECT * FROM {TABLE_SQL} WHERE (name = ?) AND (token = ?)"
         assert values == ["{{cookies.session_token}}", "secret"]
 
     def test_quote_in_value_is_bound_unchanged(self) -> None:
@@ -98,7 +98,7 @@ class TestBuildSqlQueryValues:
         }
         for value in ["O'Brien", "'; DROP TABLE x; --"]:
             sql, values = build_sql_query(route, DATABASE_CONFIG, {}, {"name": value})
-            assert sql == f"SELECT * FROM {TABLE_SQL} WHERE name = ?"
+            assert sql == f"SELECT * FROM {TABLE_SQL} WHERE (name = ?)"
             assert values == [value]
 
     def test_quoted_variable_is_read_as_variable(self) -> None:
@@ -109,7 +109,7 @@ class TestBuildSqlQueryValues:
             "query_params": [{"name": {"sql": "UPPER(name) = UPPER('{{name}}')"}}],
         }
         sql, values = build_sql_query(route, DATABASE_CONFIG, {}, {"kind": "a", "name": "b"})
-        assert sql == f"SELECT * FROM {TABLE_SQL} WHERE kind = ? AND UPPER(name) = UPPER(?)"
+        assert sql == f"SELECT * FROM {TABLE_SQL} WHERE (kind = ?) AND (UPPER(name) = UPPER(?))"
         assert values == ["a", "b"]
 
     def test_variable_inside_longer_string_is_left_as_text(self) -> None:
@@ -131,7 +131,7 @@ class TestBuildSqlQueryValues:
         sql, values = build_sql_query(
             route, DATABASE_CONFIG, {}, {"id": "4"}, {}, {"id": ["1", "4", "2"]}
         )
-        assert sql == f"SELECT * FROM {TABLE_SQL} WHERE id IN (?, ?, ?)"
+        assert sql == f"SELECT * FROM {TABLE_SQL} WHERE (id IN (?, ?, ?))"
         assert values == ["1", "4", "2"]
 
     def test_default_value_is_bound_as_string(self) -> None:
@@ -142,7 +142,7 @@ class TestBuildSqlQueryValues:
             "query_params": [{"min_weight": {"sql": "weight >= {{min_weight}}", "default": 0.5}}],
         }
         sql, values = build_sql_query(route, DATABASE_CONFIG, {}, {})
-        assert sql == f"SELECT * FROM {TABLE_SQL} WHERE weight >= ?"
+        assert sql == f"SELECT * FROM {TABLE_SQL} WHERE (weight >= ?)"
         assert values == ["0.5"]
 
     def test_conditional_sql_is_bound(self) -> None:
@@ -159,7 +159,7 @@ class TestBuildSqlQueryValues:
             ],
         }
         sql, values = build_sql_query(route, DATABASE_CONFIG, {}, {"mode": "recent"})
-        assert sql == f"SELECT * FROM {TABLE_SQL} WHERE ts >= ?"
+        assert sql == f"SELECT * FROM {TABLE_SQL} WHERE (ts >= ?)"
         assert values == ["2024-01-01"]
 
         sql, values = build_sql_query(route, DATABASE_CONFIG, {}, {"mode": "all"})
