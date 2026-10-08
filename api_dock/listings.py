@@ -180,7 +180,9 @@ def _add_collision_warnings(
         config_dir: Directory holding the config files. If None, uses default.
         warnings_out: List to append warnings to.
     """
-    proxy_names = set(get_remote_names(config, config_dir)) | set(get_database_names(config))
+    proxy_names = (
+        set(get_remote_names(config, config_dir)) | set(get_database_names(config, config_dir))
+    )
     seen_routes: Dict[str, str] = {}
 
     for spec in specs:
@@ -212,7 +214,7 @@ def _add_unknown_include_warnings(
         config_dir: Directory holding the config files. If None, uses default.
         warnings_out: List to append warnings to.
     """
-    db_names = set(get_database_names(config))
+    db_names = set(get_database_names(config, config_dir))
     remote_names = set(get_remote_names(config, config_dir))
 
     for spec in specs:
@@ -278,7 +280,7 @@ def _source_rows(
         List of row entries for the given source type.
     """
     if source_type == "databases":
-        names = get_database_names(config)
+        names = get_database_names(config, config_dir)
 
         def versions_of(name: str) -> List[str]:
             if not is_versioned_database(name, config_dir):
