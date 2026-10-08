@@ -140,7 +140,6 @@ class _StripBasePath:
         await self.app(scope, receive, send)
 
 
-
 def _add_main_routes(app: FastAPI, route_mapper: RouteMapper) -> None:
     """Add main API routes to the FastAPI app.
 
