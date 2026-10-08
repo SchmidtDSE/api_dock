@@ -244,6 +244,8 @@ class LookupStore:
         self.config_dir = config_dir
         self.specs: Dict[str, LookupSpec] = {}
         self.results: Dict[str, LookupResult] = {}
+        # Generations are unique across stores, so expanded configs can be memoized on
+        # (file, generation): a trial store and the store it's committed to share them.
         self.generation = 0
         self.context = LookupContext(config_dir)
         self._lock = threading.Lock()
