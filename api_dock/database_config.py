@@ -19,6 +19,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import yaml
 
+from api_dock.config import load_yaml_file, versions_equal
 from api_dock.lookups import (
     check_plain,
     check_schema_name,
@@ -186,7 +187,7 @@ def load_database_config(database_filename: str, config_dir: Optional[str] = Non
         if version_key in slug_versions:
             return slug_versions[version_key]
 
-    return fill_lookup_values(_load_yaml_file(database_config_path), database_config_path,
+    return fill_lookup_values(load_yaml_file(database_config_path, "Database configuration"), database_config_path,
                               config_dir)
 
 
@@ -327,7 +328,7 @@ def load_static_shared_config(config_dir: Optional[str] = None) -> Dict[str, Any
     if not os.path.isfile(shared_path):
         return {}
 
-    contents = _load_yaml_file(shared_path)
+    contents = load_yaml_file(shared_path)
     if not isinstance(contents, dict):
         raise ValueError(f"{shared_path} must contain a mapping")
 
@@ -1310,28 +1311,6 @@ def _hoist_inline_schema(entry: Dict[str, Any], schemas: Dict[str, Any], generat
     entry[DATABASE_SCHEMA_KEY] = name
 
 
-def _load_yaml_file(file_path: str) -> Dict[str, Any]:
-    """Load a YAML file and return its contents.
-
-    Args:
-        file_path: Path to the YAML file.
-
-    Returns:
-        Dictionary containing YAML data.
-
-    Raises:
-        FileNotFoundError: If file doesn't exist.
-        yaml.YAMLError: If file is invalid YAML.
-    """
-    try:
-        with open(file_path, 'r') as file:
-            return yaml.safe_load(file) or {}
-    except FileNotFoundError:
-        raise FileNotFoundError(f"Database configuration file not found: {file_path}")
-    except yaml.YAMLError as e:
-        raise yaml.YAMLError(f"Invalid YAML in {file_path}: {e}")
-
-
 def _validate_connections(shared_file: Dict[str, Any], shared_path: str) -> None:
     """Validate the shared ``connections`` and the PostgreSQL tables that use them.
 
@@ -1444,7 +1423,7 @@ def _matches_any(entries: Any, database_name: str, version: Optional[str]) -> bo
             continue
         if entry_version == ALL_VERSIONS:
             return True
-        if version is not None and _versions_equal(version, entry_version):
+        if version is not None and versions_equal(version, entry_version):
             return True
     return False
 
@@ -1474,26 +1453,6 @@ def _parse_selection_entry(entry: Any) -> Tuple[str, str]:
     if not slug:
         raise ValueError(f"Include/exclude entry has no slug: {entry!r}")
     return (slug, entry_version.strip() or ALL_VERSIONS)
-
-
-def _versions_equal(version: str, spec: str) -> bool:
-    """Compare a version stem to an include/exclude version, tolerating float forms.
-
-    So "3.0" matches a YAML ``3.0`` or ``3`` as well as ``"3.0"``.
-
-    Args:
-        version: The resolved version stem.
-        spec: The configured include/exclude version.
-
-    Returns:
-        True if they represent the same version.
-    """
-    if str(version).strip() == str(spec).strip():
-        return True
-    try:
-        return float(version) == float(spec)
-    except ValueError:
-        return False
 
 
 def _route_shape(pattern: Any) -> str:
