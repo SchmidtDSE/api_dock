@@ -275,6 +275,8 @@ def _handle_proxy(route_mapper: RouteMapper, remote_name: str, path: str) -> Fla
     )
     for key, value in proxy_resp.headers.items():
         response.headers[key] = value
+    for cookie in proxy_resp.set_cookies:
+        response.headers.add("Set-Cookie", cookie)
 
     return response
 
