@@ -27,6 +27,7 @@ from api_dock.config import (
     is_versioned_remote,
     resolve_latest_version,
     sort_versions,
+    versions_equal,
 )
 from api_dock.database_config import get_database_versions, resolve_latest_database_version
 from api_dock.route_mapper import RouteMapper
@@ -92,6 +93,18 @@ class TestVersionOrdering:
         for version in ("0.9", "0.10", "0.2"):
             _write(tmp_path / "databases" / "db" / f"{version}.yaml", {"routes": []})
         assert get_database_versions("db", str(tmp_path)) == ["0.2", "0.9", "0.10"]
+
+
+class TestVersionsEqual:
+    """Include/exclude and listing filters match versions part by part."""
+
+    @pytest.mark.parametrize("version, spec, equal", [
+        ("3.0", 3.0, True), ("3", "3.0", True), ("4.0", 4, True), ("2.4", "2.4.0", True),
+        ("1.10", "1.1", False), ("1.1", 1.1, True), ("2.4v0.5", "2.4v0.5", True),
+        ("0.10", 0.1, False), ("a", "b", False),
+    ])
+    def test_versions_equal(self, version: str, spec: Any, equal: bool) -> None:
+        assert versions_equal(version, spec) is equal
 
 
 class TestInlineRemotes:
