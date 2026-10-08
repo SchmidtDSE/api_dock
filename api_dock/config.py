@@ -107,7 +107,14 @@ def find_remote_config(remote_name: str, main_config: Dict[str, Any], config_dir
             return inline_versions[str(version)]
         raise FileNotFoundError(f"Remote '{remote_name}' has no version '{version}'")
 
-    # Non-versioned remote - use the regular mapping
+    # Fast path: remotes/<name>.yaml whose `name` (if any) is the remote's name.
+    direct_path = os.path.join(config_dir, REMOTES_DIR, f"{remote_name}.yaml")
+    if os.path.isfile(direct_path) and remote_name != REMOTES_SHARED_FILE[:-5]:
+        direct = load_yaml_file(direct_path)
+        if isinstance(direct, dict) and direct.get("name", remote_name) == remote_name:
+            return _fill_lookup_values(direct, direct_path, config_dir)
+
+    # Otherwise map names to files (a file's `name` can differ from its file name)
     remote_mapping = get_remote_mapping(main_config, config_dir)
 
     if remote_name not in remote_mapping:
@@ -776,25 +783,38 @@ def is_route_allowed(route: str, config: Dict[str, Any], remote_name: Optional[s
     Returns:
         True if route is allowed, False otherwise.
     """
-    # Always allow empty route (root path) for API metadata access
-    if not route or route == "":
+    if not route:
         return True
-    # Check global restrictions from main config
-    global_restricted = config.get("restricted", [])
-    global_routes = config.get("routes", [])
-
-    # Check remote-specific restrictions from remote config file
-    remote_restricted = []
-    remote_routes = []
-
+    remote_config = None
     if remote_name:
         try:
-            remote_config = find_remote_config(remote_name, config, config_dir=config_dir, version=version)
-            remote_restricted = remote_config.get("restricted", [])
-            remote_routes = remote_config.get("routes", [])
+            remote_config = find_remote_config(remote_name, config, config_dir=config_dir,
+                                               version=version)
         except FileNotFoundError:
-            # If remote config not found, just use global restrictions
-            pass
+            pass  # just the global rules
+    return route_allowed_by_config(route, config, remote_config, method)
+
+
+def route_allowed_by_config(route: str, config: Dict[str, Any],
+                            remote_config: Optional[Dict[str, Any]],
+                            method: Optional[str] = None) -> bool:
+    """Check a route against the main config's and an already loaded remote config's rules.
+
+    Args:
+        route: The route (path after the remote name and version).
+        config: Main configuration dictionary (global ``routes`` / ``restricted``).
+        remote_config: The remote's config, or None for the global rules only.
+        method: HTTP method.
+
+    Returns:
+        True if the route is allowed.
+    """
+    if not route:
+        return True  # the remote's root is always allowed
+    global_restricted = config.get("restricted", [])
+    global_routes = config.get("routes", [])
+    remote_restricted = (remote_config or {}).get("restricted", [])
+    remote_routes = (remote_config or {}).get("routes", [])
 
     # If explicit routes are defined (whitelist), check against them
     # Remote-specific routes take precedence over global routes
