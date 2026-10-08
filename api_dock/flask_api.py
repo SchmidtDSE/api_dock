@@ -58,6 +58,7 @@ def create_app(config_path: Optional[str] = None) -> Flask:
     for message in route_mapper.listing_warnings:
         warnings.warn(message, stacklevel=2)
 
+    _add_lookup_routes(app, route_mapper)
     _add_listing_routes(app, route_mapper)
     _add_remote_routes(app, route_mapper)
     _add_main_routes(app, route_mapper)
@@ -113,6 +114,36 @@ def _strip_base_path(wsgi_app: Callable, base_path: str) -> Callable:
             environ["PATH_INFO"] = stripped
         return wsgi_app(environ, start_response)
     return middleware
+
+
+def _add_lookup_routes(app: Flask, route_mapper: RouteMapper) -> None:
+    """Refresh due lookups in the background, and add the refresh endpoint if configured.
+
+    Flask has no lifespan to run a refresh loop in, so each request checks
+    whether a lookup is due and, if so, refreshes it in a thread.
+
+    Args:
+        app: Flask application instance.
+        route_mapper: RouteMapper instance.
+    """
+
+    @app.before_request
+    def refresh_due_lookups() -> None:
+        route_mapper.refresh_due_lookups_in_background()
+
+    endpoint = route_mapper.lookup_endpoint
+    if endpoint is None:
+        return
+
+    @app.route(f"/{endpoint.route}", methods=["GET", "POST"], endpoint="api_dock_lookups")
+    def lookups() -> FlaskResponse:
+        """GET: lookup status. POST: refresh lookups (all, or ?name=...)."""
+        result = route_mapper.lookup_endpoint_response(
+            request.method, request.headers.get("Authorization"), request.args.getlist("name")
+        )
+        return FlaskResponse(
+            result.content, status=result.status_code, content_type=result.content_type
+        )
 
 
 def _add_main_routes(app: Flask, route_mapper: RouteMapper) -> None:
