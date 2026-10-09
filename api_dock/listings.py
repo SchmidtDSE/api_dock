@@ -14,7 +14,12 @@ License: BSD 3-Clause
 #
 from typing import Any, Dict, List, Optional, Tuple
 
-from api_dock.config import get_remote_names, get_remote_versions, is_versioned_remote, versions_equal
+from api_dock.config import (
+    get_remote_names,
+    get_remote_versions,
+    is_versioned_remote,
+    versions_equal,
+)
 from api_dock.database_config import (
     get_database_names,
     get_database_versions,
@@ -186,12 +191,15 @@ def _add_collision_warnings(
     seen_routes: Dict[str, str] = {}
 
     for spec in specs:
-        first_segment = spec.route.split("/")[0]
-        if first_segment in proxy_names:
-            warnings_out.append(
-                f"expose.{spec.kind}: route '/{spec.route}' shadows the proxy "
-                f"for '{first_segment}'"
-            )
+        # Names may contain "/": the listing route shadows a name it equals or
+        # one whose path starts with the route.
+        for name in sorted(proxy_names):
+            if name == spec.route or name.startswith(f"{spec.route}/") or \
+                    spec.route.startswith(f"{name}/"):
+                warnings_out.append(
+                    f"expose.{spec.kind}: route '/{spec.route}' shadows the proxy "
+                    f"for '{name}'"
+                )
         if spec.route in seen_routes:
             warnings_out.append(
                 f"expose: route '/{spec.route}' is used by both "
