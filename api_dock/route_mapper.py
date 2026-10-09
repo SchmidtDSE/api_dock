@@ -17,6 +17,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import threading
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -95,6 +96,12 @@ from api_dock.types import PreparedRequest, ProxyResponse, SqlContext
 # CONSTANTS
 #
 DEFAULT_VERSION: str = "latest"
+
+# settings.allow_nested_names: whether names may contain "/".
+ALLOW_NESTED_NAMES_KEY: str = "allow_nested_names"
+
+# A route segment that is a variable ({{name}}) matches any request segment.
+ROUTE_VARIABLE_PATTERN = re.compile(r"^\{\{[^{}]+\}\}$")
 
 # Upstream Set-Cookie headers are kept apart (one value per cookie), since a
 # headers dict would merge several into one.
@@ -433,7 +440,32 @@ class RouteMapper:
             raise ValueError(f"Shared database config (databases/config.yaml): {error}") from error
         for database_name in database_names:
             _check_database(database_name, self.config, self.config_dir, shared_file)
+        _check_names(remote_names, database_names,
+                     bool(self.settings.get(ALLOW_NESTED_NAMES_KEY, True)))
+        _check_nested_shadowing(remote_names, database_names, self.config, self.config_dir,
+                                shared_file)
         return remote_names, database_names
+
+    def split_name(self, full_path: str) -> Optional[Tuple[str, str]]:
+        """Find the remote or database a request path is for.
+
+        Names may contain "/" (``birdnet/2.4/bullfrog``), so the longest served
+        name the path starts with wins; the rest is the version and route.
+
+        Args:
+            full_path: The request path without its leading "/" (e.g.
+                ``birdnet/2.4/bullfrog/0.5/recordings/3/detections/``).
+
+        Returns:
+            ``(name, rest)``, or None if no served name matches.
+        """
+        for name in sorted(set(self.remote_names) | set(self.database_names), key=len,
+                           reverse=True):
+            if full_path == name or full_path == f"{name}/":
+                return name, ""
+            if full_path.startswith(f"{name}/"):
+                return name, full_path[len(name) + 1:]
+        return None
 
     async def _refresh_lookups_forever(self) -> None:
         """Refresh lookups as they come due, until cancelled."""
@@ -998,6 +1030,105 @@ class RouteMapper:
 #
 # INTERNAL
 #
+def _check_names(remote_names: List[str], database_names: List[str],
+                 allow_nested: bool) -> None:
+    """Check served names: no empty or ``latest`` segments; "/" only if allowed.
+
+    Args:
+        remote_names: Served remote names.
+        database_names: Served database names.
+        allow_nested: settings.allow_nested_names.
+
+    Raises:
+        ValueError: If a name is invalid.
+    """
+    for name in list(remote_names) + list(database_names):
+        if "/" in name and not allow_nested:
+            raise ValueError(
+                f"Name '{name}' contains '/', but settings.{ALLOW_NESTED_NAMES_KEY} is false"
+            )
+        segments = name.split("/")
+        if any(not segment for segment in segments):
+            raise ValueError(f"Name '{name}' has an empty segment (leading, trailing or '//')")
+        if DEFAULT_VERSION in segments:
+            raise ValueError(f"Name '{name}' can't contain a '{DEFAULT_VERSION}' segment")
+
+
+def _check_nested_shadowing(
+        remote_names: List[str],
+        database_names: List[str],
+        main_config: Dict[str, Any],
+        config_dir: str,
+        shared_file: Dict[str, Any]) -> None:
+    """Refuse nested names that would hide part of the name they sit under.
+
+    A request goes to the longest name its path starts with, so a name such as
+    ``birdnet/2.4/bullfrog`` takes every ``birdnet/2.4/bullfrog/...`` path. That
+    is an error if the outer name could serve such a path: when the outer name
+    is a remote (remotes forward any path), when the nested name covers a whole
+    version (``birdnet/2.4``), or when one of that version's routes could match
+    (``bullfrog/...`` or ``{{var}}/...``).
+
+    Args:
+        remote_names: Served remote names.
+        database_names: Served database names.
+        main_config: The main config.
+        config_dir: Base config directory.
+        shared_file: The shared database config.
+
+    Raises:
+        ValueError: Naming the nested name and what it would hide.
+    """
+    names = set(remote_names) | set(database_names)
+    for inner in names:
+        for outer in names:
+            if inner == outer or not inner.startswith(f"{outer}/"):
+                continue
+            rest = inner[len(outer) + 1:].split("/")
+            if outer not in database_names:
+                raise ValueError(
+                    f"'{inner}' is nested under remote '{outer}', which forwards every path, "
+                    f"so it would hide part of '{outer}'"
+                )
+            version: Optional[str] = None
+            if is_versioned_database(outer, config_dir):
+                if rest[0] not in get_database_versions(outer, config_dir):
+                    continue  # not a version of the outer name: nothing to hide
+                version, rest = rest[0], rest[1:]
+            label = outer if version is None else f"{outer}/{version}"
+            if not rest:
+                raise ValueError(f"'{inner}' would hide every route of '{label}'")
+            for route in _database_route_patterns(outer, version, main_config, config_dir,
+                                                  shared_file):
+                segments = route.strip("/").split("/")
+                if len(segments) >= len(rest) and all(
+                        segment == part or ROUTE_VARIABLE_PATTERN.match(segment)
+                        for segment, part in zip(segments, rest)):
+                    raise ValueError(f"'{inner}' would hide route '{route}' of '{label}'")
+
+
+def _database_route_patterns(
+        name: str, version: Optional[str], main_config: Dict[str, Any], config_dir: str,
+        shared_file: Dict[str, Any]) -> List[str]:
+    """The route patterns a database/version serves (its own plus shared routes).
+
+    Args:
+        name: Database name.
+        version: Version, or None.
+        main_config: The main config.
+        config_dir: Base config directory.
+        shared_file: The shared database config.
+
+    Returns:
+        Route patterns.
+    """
+    config = load_database_config(name, config_dir, version=version)
+    config = apply_shared_definitions(merge_inherited_config(config, main_config), shared_file,
+                                      name, version)
+    return [str(route.get("route", "")) for route in config.get("routes") or []
+            if isinstance(route, dict)]
+
+
 def _split_version(
         kind: str, name: str, path: str,
         versions: Optional[List[str]]) -> Union[ProxyResponse, Tuple[Optional[str], str]]:
