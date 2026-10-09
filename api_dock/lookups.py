@@ -821,6 +821,28 @@ def check_plain(value: Any, what: str) -> str:
     return text
 
 
+def check_name(value: Any, what: str = "name") -> str:
+    """Check a generated remote/database name (it may contain "/").
+
+    Args:
+        value: The generated value.
+        what: What it is (for messages).
+
+    Returns:
+        The name as a string.
+
+    Raises:
+        RowTemplateError: If a "/"-separated part is empty or has characters
+            other than letters, digits, ``.``, ``_`` and ``-``.
+    """
+    text = "" if value is None else str(value).strip()
+    if not text or not all(PLAIN_VALUE_PATTERN.match(part) for part in text.split("/")):
+        raise RowTemplateError(
+            f"{what} {text!r} must be letters, digits, '.', '_' or '-' (parts separated by '/')"
+        )
+    return text
+
+
 def check_schema_name(value: Any) -> str:
     """Check a generated schema name (it becomes an SQL identifier).
 
