@@ -217,9 +217,12 @@ def _add_remote_routes(app: FastAPI, route_mapper: RouteMapper) -> None:
         route_mapper: RouteMapper instance.
     """
 
-    @app.api_route("/{remote_name}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
-    async def proxy_to_remote(remote_name: str, path: str, request: Request) -> Response:
+    @app.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
+    async def proxy_to_remote(full_path: str, request: Request) -> Response:
         """Proxy requests to remote APIs or databases.
+
+        The served name is the longest one the path starts with (names may
+        contain "/"); the rest of the path is the version and route.
 
         Database routes are handled with a buffered response. Remote API routes
         are streamed: upstream bytes are piped to the client as they arrive via
@@ -229,13 +232,18 @@ def _add_remote_routes(app: FastAPI, route_mapper: RouteMapper) -> None:
         header.
 
         Args:
-            remote_name: Name of the remote API or database.
-            path: The path to proxy to the remote API or query from database.
+            full_path: The request path after the leading "/".
             request: The incoming request.
 
         Returns:
             Response from the upstream with original status, headers, and body.
         """
+        match = route_mapper.split_name(full_path)
+        if match is None:
+            first = full_path.split("/", 1)[0]
+            return Response(content=json.dumps({"error": f"Remote '{first}' not found"}),
+                            status_code=404, media_type="application/json")
+        remote_name, path = match
         cookies = dict(request.cookies) if request.cookies else {}
 
         if remote_name in route_mapper.database_names:
