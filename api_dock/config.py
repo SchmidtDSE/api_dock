@@ -42,10 +42,14 @@ GENERATED_FLAG: str = "__generated__"
 # Default settings
 DEFAULT_SETTINGS: Dict[str, Any] = {
     "add_trailing_slash": True,
+    # Remote/database names may contain "/" (e.g. "birdnet/2.4/bullfrog").
+    "allow_nested_names": True,
 }
 
 # Settings that must be true or false.
-BOOLEAN_SETTINGS: Tuple[str, ...] = ("add_trailing_slash", "follow_redirects")
+BOOLEAN_SETTINGS: Tuple[str, ...] = (
+    "add_trailing_slash", "follow_redirects", "allow_nested_names",
+)
 
 # Default authentication and cookie settings
 DEFAULT_AUTH_SETTINGS: Dict[str, Any] = {
