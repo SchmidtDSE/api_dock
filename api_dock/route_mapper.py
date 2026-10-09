@@ -31,6 +31,8 @@ import yaml
 from api_dock.auth import validate_authentication
 from api_dock.config import (
     DEFAULT_CONFIG_DIR,
+    EXCLUDED_DATABASES_KEY,
+    EXCLUDED_REMOTES_KEY,
     filter_cookies_by_config,
     filter_remote_query_params,
     find_remote_config,
@@ -431,6 +433,11 @@ class RouteMapper:
         Raises:
             ValueError: If a config fails a check.
         """
+        for key in (EXCLUDED_REMOTES_KEY, EXCLUDED_DATABASES_KEY):
+            excluded = self.config.get(key)
+            if excluded is not None and (not isinstance(excluded, list) or not all(
+                    isinstance(name, str) for name in excluded)):
+                raise ValueError(f"{key} must be a list of names")
         remote_names = get_remote_names(self.config, self.config_dir)
         _check_inline_remotes(remote_names, self.config_dir)
         try:
