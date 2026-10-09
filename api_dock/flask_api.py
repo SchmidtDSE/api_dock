@@ -194,30 +194,27 @@ def _add_remote_routes(app: Flask, route_mapper: RouteMapper) -> None:
         route_mapper: RouteMapper instance.
     """
 
-    @app.route("/<remote_name>/", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
-    def proxy_to_remote_root(remote_name: str):
-        """Proxy requests to remote APIs or databases (root path).
-
-        Args:
-            remote_name: Name of the remote API or database.
-
-        Returns:
-            Response from the upstream with original status, headers, and body.
-        """
-        return _handle_proxy(route_mapper, remote_name, "")
-
-    @app.route("/<remote_name>/<path:path>", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
-    def proxy_to_remote(remote_name: str, path: str):
+    @app.route("/<path:full_path>", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
+    def proxy_to_remote(full_path: str):
         """Proxy requests to remote APIs or databases.
 
+        The served name is the longest one the path starts with (names may
+        contain "/"); the rest of the path is the version and route.
+
         Args:
-            remote_name: Name of the remote API or database.
-            path: The path to proxy to the remote API or query from database.
+            full_path: The request path after the leading "/".
 
         Returns:
             Response from the upstream with original status, headers, and body.
         """
-        return _handle_proxy(route_mapper, remote_name, path)
+        # Flask drops a trailing slash from <path:...>; keep it for routes that end in "/".
+        if request.path.endswith("/") and not full_path.endswith("/"):
+            full_path += "/"
+        match = route_mapper.split_name(full_path)
+        if match is None:
+            first = full_path.split("/", 1)[0]
+            return jsonify({"error": f"Remote '{first}' not found"}), 404
+        return _handle_proxy(route_mapper, *match)
 
 
 def _handle_proxy(route_mapper: RouteMapper, remote_name: str, path: str) -> FlaskResponse:
