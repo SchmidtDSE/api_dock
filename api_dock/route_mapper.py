@@ -70,6 +70,7 @@ from api_dock.database_config import (
 from api_dock.database_backends import (
     DatabaseLifecycleError,
     DatabaseUnavailableError,
+    DatabaseValueError,
     DUCKDB_SETTINGS_KEY,
     DuckDBBackend,
 )
@@ -1252,6 +1253,15 @@ async def _run_database_query(
         columns, rows = await backend.execute(sql, values, auth_tables)
     except DatabaseUnavailableError:
         return _error_response(503, "Database unavailable")
+    except DatabaseValueError as error:
+        # The caller's mistake only if one of the request's values is the one
+        # that didn't convert (bad data in a table is still a server error).
+        message = str(error)
+        if any(value and str(value) in message for value in values):
+            return _json_response(
+                {"error": "Invalid value for a query parameter", "detail": message}, 400
+            )
+        return _error_response(500, "Database query error")
     except Exception:
         return _error_response(500, "Database query error")
     return _json_response([

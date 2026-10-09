@@ -96,7 +96,8 @@ class TestNativeRoutes:
 
     def test_injection_is_just_a_value(self, client: TestClient) -> None:
         assert client.get("/shop/items", params={"q": "' OR '1'='1"}).json() == []
-        assert client.get("/shop/items", params={"min_price": "0 OR 1=1"}).status_code == 500
+        response = client.get("/shop/items", params={"min_price": "0 OR 1=1"})
+        assert response.status_code == 400 and "0 OR 1=1" in response.json()["detail"]
 
     def test_postgres_types_as_json(self, client: TestClient) -> None:
         row = client.get("/shop/items/1").json()[0]

@@ -27,6 +27,8 @@ from api_dock.database_backends import (
     DatabaseBackend,
     DatabaseLifecycleError,
     DatabaseUnavailableError,
+    DatabaseValueError,
+    first_message_line,
     QueryResult,
 )
 from api_dock.postgres_config import (
@@ -52,6 +54,10 @@ RECONNECT_TIMEOUT_SECONDS: float = 300.0
 # connections. Class 08 (connection exceptions) is also treated as unavailable.
 UNAVAILABLE_SQLSTATES: frozenset = frozenset({"57P01", "57P02", "57P03"})
 CONNECTION_SQLSTATE_CLASS: str = "08"
+
+# SQLSTATEs for a value that can't be read as its type: invalid text representation,
+# invalid datetime format, datetime field overflow, numeric value out of range.
+VALUE_SQLSTATES: frozenset = frozenset({"22P02", "22007", "22008", "22003"})
 
 # A table's columns and their exact types, in order (for lining up unions).
 COLUMNS_SQL: str = (
@@ -121,6 +127,8 @@ class PostgresBackend(DatabaseBackend):
         except psycopg.Error as error:
             if _is_unavailable_error(error, conn):
                 raise DatabaseUnavailableError("Database unavailable") from error
+            if error.sqlstate in VALUE_SQLSTATES:
+                raise DatabaseValueError(first_message_line(error)) from error
             raise
         finally:
             await self.pool.putconn(conn)

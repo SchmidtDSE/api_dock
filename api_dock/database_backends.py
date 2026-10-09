@@ -52,6 +52,14 @@ class DatabaseLifecycleError(Exception):
     """A backend was used before it was started, after it closed, or on the wrong loop."""
 
 
+class DatabaseValueError(Exception):
+    """A value couldn't be converted to the type it's compared with (e.g. text vs a number).
+
+    The message is the database's first message line, which names the value and
+    the type but not the SQL.
+    """
+
+
 class DatabaseBackend(ABC):
     """Runs SQL with bound values and returns every row.
 
@@ -166,7 +174,10 @@ class DuckDBBackend(DatabaseBackend):
                 )
                 for statement in build_schema_view_statements(tables):
                     conn.execute(statement)
-                rows = conn.execute(sql, values).fetchall()
+                try:
+                    rows = conn.execute(sql, values).fetchall()
+                except duckdb.ConversionException as error:
+                    raise DatabaseValueError(first_message_line(error)) from error
                 columns = [desc[0] for desc in conn.description] if conn.description else []
                 return columns, rows
             finally:
@@ -205,6 +216,19 @@ class DuckDBBackend(DatabaseBackend):
                 )
             except Exception as error:
                 raise DatabaseUnavailableError("Database unavailable") from error
+
+
+def first_message_line(error: BaseException) -> str:
+    """The first line of an error message (database messages continue with SQL context).
+
+    Args:
+        error: The error.
+
+    Returns:
+        Its first non-empty line.
+    """
+    lines = [line.strip() for line in str(error).splitlines() if line.strip()]
+    return lines[0] if lines else type(error).__name__
 
 
 def parse_duckdb_settings(options: Any) -> Tuple[List[str], Optional[int]]:

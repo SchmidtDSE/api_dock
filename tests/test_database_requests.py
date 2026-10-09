@@ -154,10 +154,12 @@ class TestFilterValues:
     @pytest.mark.anyio
     @pytest.mark.parametrize("value", ["0.5 + 0.3", "0 OR true"])
     async def test_sql_in_value_is_rejected(self, route_mapper: RouteMapper, value: str) -> None:
-        """A value that is SQL, not a number, gives an error and no rows."""
+        """A value that is SQL, not a number, is an invalid value (400) and returns no rows."""
         result = await _items(route_mapper, {"weight": value})
-        assert result.status_code == 500
-        assert json.loads(result.content) == {"error": "Database query error"}
+        assert result.status_code == 400
+        body = json.loads(result.content)
+        assert body["error"] == "Invalid value for a query parameter"
+        assert value in body["detail"] and "SELECT" not in body["detail"]
 
     @pytest.mark.anyio
     @pytest.mark.parametrize("name, expected", [
