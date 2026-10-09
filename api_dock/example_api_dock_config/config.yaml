@@ -3,6 +3,11 @@ description: My API Dock instance
 authors:
   - Your Name
 
+# What to serve. Leave out `remotes:` / `databases:` to serve everything found in
+# remotes/ and databases/ (files, version folders, slugs, remotes/config.yaml);
+# `excluded_remotes:` / `excluded_databases:` leave names out. Names may contain
+# "/" (e.g. birdnet/2.4/bullfrog) unless settings.allow_nested_names is false.
+
 # Remote APIs to proxy (add a file per remote in remotes/)
 remotes:
   - example_remote
@@ -10,6 +15,9 @@ remotes:
 # SQL databases to query (add a file per database in databases/)
 databases:
   - example_db
+
+# excluded_databases:
+#   - work_in_progress_db
 
 settings:
   add_trailing_slash: false   # Set true to auto-append trailing slash to proxied paths
