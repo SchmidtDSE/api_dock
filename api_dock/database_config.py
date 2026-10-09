@@ -21,6 +21,7 @@ import yaml
 
 from api_dock.config import load_yaml_file, versions_equal
 from api_dock.lookups import (
+    check_name,
     check_plain,
     check_schema_name,
     check_template_positions,
@@ -1210,7 +1211,7 @@ def _expand_shared_config(static: Dict[str, Any], store: LookupStore, label: str
     slugs = []
 
     def check_generated(entry: Dict[str, Any]) -> None:
-        entry[SLUG_NAME_KEY] = check_plain(entry.get(SLUG_NAME_KEY), "name")
+        entry[SLUG_NAME_KEY] = check_name(entry.get(SLUG_NAME_KEY))
         if entry.get(SLUG_VERSION_KEY) is not None:
             entry[SLUG_VERSION_KEY] = check_plain(entry[SLUG_VERSION_KEY], "version")
         _hoist_entry_schemas(entry, schemas, generated=True)
@@ -1418,14 +1419,46 @@ def _matches_any(entries: Any, database_name: str, version: Optional[str]) -> bo
         raise ValueError(f"Include/exclude list must be a list, got {type(entries).__name__}")
 
     for entry in entries:
-        slug, entry_version = _parse_selection_entry(entry)
-        if slug != database_name:
+        matched, entry_version = _selection_entry_version(entry, database_name)
+        if not matched:
             continue
         if entry_version == ALL_VERSIONS:
             return True
         if version is not None and versions_equal(version, entry_version):
             return True
     return False
+
+
+def _selection_entry_version(entry: Any, database_name: str) -> Tuple[bool, str]:
+    """Whether an include/exclude entry names a database, and which versions.
+
+    String entries are compared with the database's name rather than split at
+    the first "/", since names may contain "/": for ``birdnet/2.4/bullfrog``,
+    ``"birdnet/2.4/bullfrog"`` means all versions and
+    ``"birdnet/2.4/bullfrog/0.5"`` version 0.5 (and ``"birdnet/2.4"`` doesn't
+    name it at all).
+
+    Args:
+        entry: ``"<name>"``, ``"<name>/<version or *>"``, or ``{slug, version}``.
+        database_name: The database's name.
+
+    Returns:
+        ``(names it, version spec)`` where the spec may be ALL_VERSIONS.
+
+    Raises:
+        ValueError: If the entry has no name or an unsupported type.
+    """
+    if isinstance(entry, str):
+        text = entry.strip().strip("/")
+        if not text:
+            raise ValueError(f"Include/exclude entry has no slug: {entry!r}")
+        if text == database_name:
+            return True, ALL_VERSIONS
+        if text.startswith(f"{database_name}/"):
+            return True, text[len(database_name) + 1:].strip() or ALL_VERSIONS
+        return False, ALL_VERSIONS
+    slug, entry_version = _parse_selection_entry(entry)
+    return slug == database_name, entry_version
 
 
 def _parse_selection_entry(entry: Any) -> Tuple[str, str]:
